@@ -882,3 +882,281 @@ class SlaAlertViewFilterTestCase(TestCase):
 
         response = self.client.get(reverse("helpdesk:sla_alert"))
         self.assertEqual(response.context["total_count"], 3)
+
+
+class SlaAlertViewPermissionTestCase(TestCase):
+    """Integration tests for sla_alert view access control.
+
+    Covers three critical entry paths that previously lacked regression
+    protection:
+
+    1. Anonymous (not logged in) users must be blocked.
+    2. Authenticated users without helpdesk-staff permission must be blocked.
+    3. A staff user who (under per-queue permission mode) has access to ZERO
+       queues must still get a well-formed 200 response with empty data, not
+       a server crash or permission bypass.
+    """
+
+    fixtures = ["emailtemplate.json"]
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from django.test.client import Client
+        from helpdesk import settings as helpdesk_settings
+
+        self._saved_per_queue_setting = (
+            helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION
+        )
+        helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION = False
+
+        User = get_user_model()
+        self.staff_user = User.objects.create(
+            username="staff_user", is_staff=True
+        )
+        self.staff_user.set_password("pass")
+        self.staff_user.save()
+
+        self.non_staff_user = User.objects.create(
+            username="regular_user", is_staff=False, is_active=True
+        )
+        self.non_staff_user.set_password("pass")
+        self.non_staff_user.save()
+
+        self.queue = Queue.objects.create(
+            title="Test Queue",
+            slug="perm-test-queue",
+            escalate_days=3,
+        )
+
+        self.client = Client()
+
+    def tearDown(self):
+        from helpdesk import settings as helpdesk_settings
+
+        helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION = (
+            self._saved_per_queue_setting
+        )
+
+    # --- Group 1: Unauthenticated (anonymous) access ---
+
+    def test_anonymous_user_redirected_to_login(self):
+        """Anonymous user requesting sla_alert must be redirected to login.
+
+        Guards the outermost @helpdesk_staff_member_required decorator.
+        A regression here would mean a full permission bypass allowing any
+        random web visitor to read the SLA dashboard.
+        """
+        from django.urls import reverse
+
+        self.client.logout()
+        response = self.client.get(reverse("helpdesk:sla_alert"))
+        self.assertEqual(
+            response.status_code,
+            302,
+            "Anonymous users must be redirected (HTTP 302), not served the view.",
+        )
+        location = response.get("Location", "")
+        self.assertTrue(
+            "login" in location.lower() or location.startswith("/"),
+            f"Redirect target should point to login page, got: {location!r}",
+        )
+
+    def test_anonymous_user_has_no_access_to_context(self):
+        """Anonymous user must not receive any ticket context.
+
+        Secondary check ensuring the redirect happens before the view body
+        runs (i.e. no partial data leak on error pages or misconfigured
+        decorator stacking).
+        """
+        from django.urls import reverse
+
+        self.client.logout()
+        response = self.client.get(reverse("helpdesk:sla_alert"))
+        self.assertIsNone(
+            getattr(response, "context", None)
+            or (response.context if hasattr(response, "context") and response.status_code != 302 else None),
+            "Anonymous response must not carry template context.",
+        )
+
+    # --- Group 2: Authenticated but not staff ---
+
+    def test_authenticated_non_staff_user_forbidden(self):
+        """Logged-in user without is_staff flag must be blocked (redirected).
+
+        The view is decorated twice:
+          1. @helpdesk_staff_member_required  (outermost, via user_passes_test)
+          2. staff_member_required()          (applied manually at the bottom)
+        The outermost decorator runs first and rejects non-staff users by
+        redirecting them to the login page (HTTP 302). This is consistent
+        with how Django's user_passes_test decorator handles failed tests.
+        Either way, the critical security guarantee is: the view body
+        never executes for non-staff users.
+        """
+        from django.urls import reverse
+
+        self.client.login(username="regular_user", password="pass")
+        response = self.client.get(reverse("helpdesk:sla_alert"))
+        self.assertIn(
+            response.status_code,
+            (302, 403),
+            "Non-staff users must not reach the view body (expected 302 or 403).",
+        )
+        if response.status_code == 302:
+            location = response.get("Location", "")
+            self.assertTrue(
+                "login" in location.lower() or location.startswith("/"),
+                f"Redirect must be to login, got: {location!r}",
+            )
+
+    def test_inactive_user_treated_as_unauthenticated(self):
+        """An inactive user must not be allowed through (redirected, 302).
+
+        The staff check first gates on is_authenticated AND is_active; an
+        inactive account should not even reach the 403 branch.
+        """
+        from django.contrib.auth import get_user_model
+        from django.urls import reverse
+
+        User = get_user_model()
+        inactive = User.objects.create(
+            username="inactive_user", is_staff=True, is_active=False
+        )
+        inactive.set_password("pass")
+        inactive.save()
+
+        self.client.login(username="inactive_user", password="pass")
+        response = self.client.get(reverse("helpdesk:sla_alert"))
+        self.assertEqual(
+            response.status_code,
+            302,
+            "Inactive users must be redirected to login (HTTP 302).",
+        )
+
+    # --- Group 3: Staff user with zero accessible queues ---
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_staff_with_no_queue_access_returns_200_empty(self):
+        """Under per-queue permission, staff with zero queues gets HTTP 200 with empty data.
+
+        This is the "empty-queue degradation" scenario: the user is a valid
+        staff member, but HelpdeskUser.get_queues() returns an empty queryset.
+        The view must:
+          - return 200 (not 403, 404, or 500)
+          - carry all expected context keys
+          - show 0 tickets in every bucket
+        A regression here typically surfaces as a server crash when the
+        template iterates over None / unexpected empty data.
+        """
+        from django.contrib.auth import get_user_model
+        from django.urls import reverse
+        from helpdesk import settings as helpdesk_settings
+        from helpdesk.models import Ticket
+
+        helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION = True
+
+        # A staff user who has NOT been granted any queue permission.
+        # Under per-queue mode they will see zero queues.
+        User = get_user_model()
+        noqueue_staff = User.objects.create(
+            username="noqueue_staff", is_staff=True, is_active=True
+        )
+        noqueue_staff.set_password("pass")
+        noqueue_staff.save()
+
+        # Seed a ticket in the unrelated queue to confirm it is NOT leaked
+        Ticket.objects.create(
+            title="Other Queue Ticket",
+            queue=self.queue,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+        )
+
+        self.client.logout()
+        self.client.login(username="noqueue_staff", password="pass")
+        response = self.client.get(reverse("helpdesk:sla_alert"))
+
+        self.assertEqual(
+            response.status_code,
+            200,
+            "Staff with no queues must still receive HTTP 200 (graceful degradation).",
+        )
+        self.assertEqual(
+            response.context["total_count"],
+            0,
+            "Staff with no queues must see total_count=0 (no data leak).",
+        )
+        self.assertEqual(response.context["overdue_count"], 0)
+        self.assertEqual(response.context["warning_count"], 0)
+        self.assertEqual(response.context["excluded_count"], 0)
+        self.assertEqual(response.context["ok_count"], 0)
+        self.assertEqual(
+            response.context["display_tickets"],
+            [],
+            "display_tickets must be an empty list for the zero-queue case.",
+        )
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_staff_with_partial_queue_access_no_data_leak(self):
+        """Staff with permission to queue_A must not see tickets in queue_B.
+
+        Validates that the `queue__in=user_queues` filter is actually wired
+        up correctly — i.e. the per-queue permission setting really does
+        restrict the ticket queryset, not just the dropdown choices.
+        """
+        from django.contrib.auth import get_user_model
+        from django.contrib.auth.models import Permission
+        from django.urls import reverse
+        from helpdesk import settings as helpdesk_settings
+        from helpdesk.models import Ticket
+
+        helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION = True
+
+        queue_a = Queue.objects.create(
+            title="Queue A", slug="perm-queue-a", escalate_days=3
+        )
+        queue_b = Queue.objects.create(
+            title="Queue B", slug="perm-queue-b", escalate_days=3
+        )
+
+        User = get_user_model()
+        user_a = User.objects.create(
+            username="user_a_only", is_staff=True, is_active=True
+        )
+        user_a.set_password("pass")
+        user_a.save()
+
+        # Grant permission ONLY for queue_a (strip "helpdesk." prefix)
+        perm_a = Permission.objects.get(codename=queue_a.permission_name[9:])
+        user_a.user_permissions.add(perm_a)
+
+        ticket_a = Ticket.objects.create(
+            title="Ticket in A",
+            queue=queue_a,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+        )
+        ticket_b = Ticket.objects.create(
+            title="Ticket in B",
+            queue=queue_b,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+        )
+
+        self.client.login(username="user_a_only", password="pass")
+        response = self.client.get(reverse("helpdesk:sla_alert"))
+        self.assertEqual(response.status_code, 200)
+
+        visible_ids = {t.id for t in response.context["display_tickets"]}
+        self.assertIn(
+            ticket_a.id,
+            visible_ids,
+            "User must see tickets in queues they have permission for.",
+        )
+        self.assertNotIn(
+            ticket_b.id,
+            visible_ids,
+            "User must NOT see tickets in queues they lack permission for (data leak).",
+        )

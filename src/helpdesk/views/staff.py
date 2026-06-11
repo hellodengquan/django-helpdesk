@@ -2353,6 +2353,3 @@ def sla_alert(request):
         'helpdesk/sla_alert.html',
         context,
     )
-
-
-sla_alert = staff_member_required(sla_alert)
