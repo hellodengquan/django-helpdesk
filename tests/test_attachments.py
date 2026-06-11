@@ -291,6 +291,14 @@ class AttachmentCleanupTests(TestCase):
                 count += len(files)
         return count
 
+    def tearDown(self):
+        super().tearDown()
+        try:
+            if os.path.exists(MEDIA_DIR):
+                shutil.rmtree(MEDIA_DIR)
+        except OSError:
+            pass
+
     def test_attachment_save_failure_cleans_up_file(self):
         """When Attachment.save() fails after file is written, the file should be cleaned up."""
         file_content = b"test attachment content for save failure"
@@ -304,18 +312,12 @@ class AttachmentCleanupTests(TestCase):
             file=test_file,
         )
 
-        with mock.patch.object(
-            models.FollowUpAttachment,
-            "_perform_save",
-            create=True,
+        with mock.patch(
+            "django.db.models.Model._save_table",
             side_effect=Exception("DB save failed"),
         ):
-            with mock.patch(
-                "django.db.models.Model.save",
-                side_effect=Exception("DB save failed"),
-            ):
-                with self.assertRaises(Exception):
-                    att.save()
+            with self.assertRaises(Exception):
+                att.save()
 
         final_file_count = self._count_files_in_media_dir()
         self.assertEqual(
@@ -481,6 +483,14 @@ class ConcurrentUploadConflictTests(TestCase):
                 count += len(files)
         return count
 
+    def tearDown(self):
+        super().tearDown()
+        try:
+            if os.path.exists(MEDIA_DIR):
+                shutil.rmtree(MEDIA_DIR)
+        except OSError:
+            pass
+
     def test_same_filename_concurrent_uploads_no_orphan(self):
         """When two attachments with the same filename are saved to the same followup,
         Django auto-renames the second file. If the second save fails, no orphan file
@@ -507,7 +517,7 @@ class ConcurrentUploadConflictTests(TestCase):
         )
 
         with mock.patch(
-            "django.db.models.Model.save",
+            "django.db.models.Model._save_table",
             side_effect=Exception("Simulated concurrent DB write failure"),
         ):
             with self.assertRaises(Exception):
@@ -654,7 +664,7 @@ class ConcurrentUploadConflictTests(TestCase):
         second_file = SimpleUploadedFile("proc_conflict.txt", b"second", "text/plain")
 
         with mock.patch(
-            "django.db.models.Model.save",
+            "django.db.models.Model._save_table",
             side_effect=Exception("DB save failed on conflicting filename"),
         ):
             result = lib.process_attachments(self.followup, [second_file])
@@ -664,6 +674,236 @@ class ConcurrentUploadConflictTests(TestCase):
             initial_file_count,
             final_file_count,
             "Orphan file left behind when process_attachments fails on filename conflict",
+        )
+
+
+@override_settings(MEDIA_ROOT=MEDIA_DIR)
+class DiskFullCleanupTests(TestCase):
+    """Regression tests for orphan files left behind when disk is full during upload."""
+
+    fixtures = ["emailtemplate.json"]
+
+    def setUp(self):
+        self.queue = models.Queue.objects.create(
+            title="DiskFull Queue",
+            slug="df_q",
+            allow_public_submission=True,
+        )
+        self.ticket = models.Ticket.objects.create(
+            queue=self.queue,
+            title="Disk Full Test Ticket",
+            description="Test disk full handling",
+        )
+        self.followup = models.FollowUp.objects.create(
+            ticket=self.ticket,
+            title="Disk Full FollowUp",
+            comment="Testing disk full scenarios",
+        )
+        User = get_user_model()
+        self.user = User.objects.create(
+            username="diskfull_user",
+            is_staff=True,
+        )
+        self.user.set_password("pass")
+        self.user.save()
+
+    def tearDown(self):
+        super().tearDown()
+        try:
+            if os.path.exists(MEDIA_DIR):
+                shutil.rmtree(MEDIA_DIR)
+        except OSError:
+            pass
+
+    def _count_files_in_media_dir(self):
+        count = 0
+        if os.path.exists(MEDIA_DIR):
+            for root, dirs, files in os.walk(MEDIA_DIR):
+                count += len(files)
+        return count
+
+    def test_storage_write_enospc_cleans_up_partial_file(self):
+        """When storage._save raises ENOSPC (disk full) mid-write, the partial
+        file should be cleaned up by SafeFileSystemStorage."""
+        import errno
+        from helpdesk.storage import SafeFileSystemStorage
+
+        storage = SafeFileSystemStorage(location=MEDIA_DIR)
+        test_content = b"x" * 4096
+        content = SimpleUploadedFile("enospc_test.bin", test_content, "application/octet-stream")
+
+        initial_file_count = self._count_files_in_media_dir()
+        saved_name = None
+        target_name = storage.get_available_name("enospc_test.bin")
+
+        original_fdopen = os.fdopen
+
+        def failing_fdopen(fd, *args, **kwargs):
+            real_file = original_fdopen(fd, *args, **kwargs)
+            original_write = real_file.write
+
+            def failing_write(data):
+                original_write(data[:512])
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+            real_file.write = failing_write
+            return real_file
+
+        with mock.patch("os.fdopen", side_effect=failing_fdopen):
+            try:
+                saved_name = storage._save(target_name, content)
+            except OSError as e:
+                self.assertEqual(
+                    e.errno,
+                    errno.ENOSPC,
+                    "Expected ENOSPC error",
+                )
+            else:
+                self.fail("Expected OSError with ENOSPC was not raised")
+
+        final_file_count = self._count_files_in_media_dir()
+        self.assertEqual(
+            initial_file_count,
+            final_file_count,
+            "Partial file was left behind after disk full during storage write",
+        )
+
+        if saved_name:
+            full_path = os.path.join(MEDIA_DIR, saved_name)
+            self.assertFalse(
+                os.path.exists(full_path),
+                f"Partial file '{saved_name}' should not exist after cleanup",
+            )
+
+    def test_attachment_save_enospc_cleans_up_file(self):
+        """When Attachment.save() fails with ENOSPC during file write, no orphan
+        file should remain."""
+        import errno
+
+        test_content = b"disk full test content" * 100
+        test_file = SimpleUploadedFile(
+            "disk_full_att.txt", test_content, "text/plain"
+        )
+        initial_file_count = self._count_files_in_media_dir()
+
+        att = models.FollowUpAttachment(
+            followup=self.followup,
+            file=test_file,
+        )
+
+        original_fdopen = os.fdopen
+
+        def failing_fdopen(fd, *args, **kwargs):
+            real_file = original_fdopen(fd, *args, **kwargs)
+            original_write = real_file.write
+
+            def failing_write(data):
+                original_write(data[:100])
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+            real_file.write = failing_write
+            return real_file
+
+        with mock.patch("os.fdopen", side_effect=failing_fdopen):
+            with self.assertRaises((OSError, Exception)):
+                att.save()
+
+        final_file_count = self._count_files_in_media_dir()
+        self.assertEqual(
+            initial_file_count,
+            final_file_count,
+            "Orphan file left behind after disk full during Attachment.save",
+        )
+
+    def test_process_attachments_enospc_no_orphan(self):
+        """When process_attachments encounters ENOSPC, no orphan files should remain."""
+        import errno
+
+        test_content = b"process attachments disk full test" * 50
+        test_file = SimpleUploadedFile(
+            "proc_diskfull.txt", test_content, "text/plain"
+        )
+        initial_file_count = self._count_files_in_media_dir()
+
+        original_fdopen = os.fdopen
+
+        def failing_fdopen(fd, *args, **kwargs):
+            real_file = original_fdopen(fd, *args, **kwargs)
+            original_write = real_file.write
+
+            def failing_write(data):
+                original_write(data[:64])
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+            real_file.write = failing_write
+            return real_file
+
+        with mock.patch("os.fdopen", side_effect=failing_fdopen):
+            try:
+                lib.process_attachments(self.followup, [test_file])
+            except (OSError, Exception):
+                pass
+
+        final_file_count = self._count_files_in_media_dir()
+        self.assertEqual(
+            initial_file_count,
+            final_file_count,
+            "Orphan files left behind after disk full in process_attachments",
+        )
+
+    def test_update_ticket_enospc_cleans_attachments(self):
+        """When update_ticket fails due to ENOSPC during attachment write,
+        no orphan attachment files should remain."""
+        import errno
+        from helpdesk.update_ticket import update_ticket
+
+        test_content = b"update ticket disk full content" * 50
+        test_file = SimpleUploadedFile(
+            "update_diskfull.txt", test_content, "text/plain"
+        )
+        initial_file_count = self._count_files_in_media_dir()
+        initial_att_count = models.FollowUpAttachment.objects.filter(
+            followup__ticket=self.ticket
+        ).count()
+
+        original_fdopen = os.fdopen
+
+        def failing_fdopen(fd, *args, **kwargs):
+            real_file = original_fdopen(fd, *args, **kwargs)
+            original_write = real_file.write
+
+            def failing_write(data):
+                original_write(data[:128])
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+            real_file.write = failing_write
+            return real_file
+
+        with mock.patch("os.fdopen", side_effect=failing_fdopen):
+            try:
+                update_ticket(
+                    self.user,
+                    self.ticket,
+                    comment="Disk full test comment",
+                    files=[test_file],
+                )
+            except (OSError, Exception):
+                pass
+
+        final_file_count = self._count_files_in_media_dir()
+        final_att_count = models.FollowUpAttachment.objects.filter(
+            followup__ticket=self.ticket
+        ).count()
+
+        self.assertEqual(
+            initial_file_count,
+            final_file_count,
+            "Orphan files left behind after disk full in update_ticket",
+        )
+        self.assertEqual(
+            initial_att_count,
+            final_att_count,
+            "Database records not rolled back after disk full in update_ticket",
         )
 
 

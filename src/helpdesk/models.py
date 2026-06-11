@@ -10,6 +10,7 @@ models.py - Model (and hence database) definitions. This is the core of the
 from .lib import format_time_spent, convert_value, daily_time_spent_calculation
 from .templated_email import send_templated_mail
 from .validators import validate_file_extension
+from .storage import SafeFileSystemStorage
 import datetime
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -1211,6 +1212,7 @@ class Attachment(models.Model):
         upload_to=attachment_path,
         max_length=1000,
         validators=[validate_file_extension],
+        storage=lambda: SafeFileSystemStorage(),
     )
 
     filename = models.CharField(
@@ -1253,12 +1255,20 @@ class Attachment(models.Model):
 
         is_new = self._state.adding
         saved_file_name = None
+        candidate_cleanup_paths = []
         if self.file:
             try:
                 from django.db.models.fields.files import FieldFile
 
                 if isinstance(self.file, FieldFile) and self.file.name:
                     saved_file_name = self.file.name
+
+                if is_new and hasattr(self.file, "name") and self.file.name:
+                    try:
+                        candidate_paths = self._get_potential_storage_paths()
+                        candidate_cleanup_paths.extend(candidate_paths)
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -1266,18 +1276,135 @@ class Attachment(models.Model):
             return super(Attachment, self).save(*args, **kwargs)
         except Exception:
             file_name_changed = self.file and self.file.name and self.file.name != saved_file_name
-            if is_new or file_name_changed:
+            needs_cleanup = is_new or file_name_changed
+
+            if needs_cleanup:
                 try:
                     if self.file and self.file.name:
-                        from django.core.files.storage import default_storage
-                        if default_storage.exists(self.file.name):
-                            self.file.delete(save=False)
+                        actual_name = self.file.name
+                        try:
+                            safe_to_delete = self._is_safe_to_delete_storage_path(actual_name)
+                        except Exception:
+                            safe_to_delete = False
+
+                        if safe_to_delete:
+                            try:
+                                from django.core.files.storage import default_storage
+                                if default_storage.exists(actual_name):
+                                    default_storage.delete(actual_name)
+                                    logger.info(
+                                        "Cleaned up attachment file '%s' after save failure",
+                                        actual_name,
+                                    )
+                            except Exception as inner_e:
+                                logger.warning(
+                                    "Failed to delete storage path '%s': %s",
+                                    actual_name,
+                                    str(inner_e),
+                                )
+                        else:
+                            logger.info(
+                                "Skipped FieldFile.delete for '%s' - path may belong to another record",
+                                actual_name,
+                            )
+                        try:
+                            from django.db.models.fields.files import FieldFile
+                            if isinstance(self.file, FieldFile):
+                                try:
+                                    self.file.close()
+                                except Exception:
+                                    pass
+                                self.file.name = None
+                                self.file._committed = False
+                        except Exception:
+                            pass
                 except Exception as e:
                     logger.warning(
-                        "Failed to clean up attachment file after save failure: %s",
+                        "Failed to clean up attachment: %s",
+                        str(e),
+                    )
+
+            if candidate_cleanup_paths and (is_new and not self.file.name):
+                try:
+                    from django.core.files.storage import default_storage
+                    seen = set()
+                    for p in candidate_cleanup_paths:
+                        if not p or p in seen:
+                            continue
+                        seen.add(p)
+                        try:
+                            if default_storage.exists(p):
+                                can_delete = False
+                                if is_new and self.pk is None:
+                                    try:
+                                        can_delete = self._is_safe_to_delete_storage_path(p)
+                                    except Exception:
+                                        can_delete = True
+                                else:
+                                    can_delete = False
+
+                                if can_delete:
+                                    default_storage.delete(p)
+                                    logger.info(
+                                        "Cleaned up candidate attachment file '%s' after save failure",
+                                        p,
+                                    )
+                                else:
+                                    logger.info(
+                                        "Skipped cleanup of '%s' - cannot safely verify ownership",
+                                        p,
+                                    )
+                        except Exception as inner_e:
+                            logger.warning(
+                                "Failed to clean up candidate attachment file '%s': %s",
+                                p,
+                                str(inner_e),
+                            )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to clean up candidate attachment files: %s",
                         str(e),
                     )
             raise
+
+    def _is_safe_to_delete_storage_path(self, storage_path):
+        if not storage_path:
+            return False
+        try:
+            existing_count = 0
+            if isinstance(self, FollowUpAttachment):
+                existing_count = FollowUpAttachment.objects.filter(
+                    file=storage_path
+                ).exclude(pk=self.pk if self.pk else -1).count()
+            elif isinstance(self, KBIAttachment):
+                existing_count = KBIAttachment.objects.filter(
+                    file=storage_path
+                ).exclude(pk=self.pk if self.pk else -1).count()
+            return existing_count == 0
+        except Exception:
+            return False
+
+    def _get_potential_storage_paths(self):
+        paths = []
+        if not self.file or not hasattr(self.file, "name") or not self.file.name:
+            return paths
+        try:
+            base_path = None
+            if isinstance(self, FollowUpAttachment):
+                base_path = FollowUpAttachment.attachment_path(self, self.file.name)
+            elif isinstance(self, KBIAttachment):
+                base_path = KBIAttachment.attachment_path(self, self.file.name)
+            if base_path:
+                paths.append(base_path)
+
+                name, ext = os.path.splitext(os.path.basename(base_path))
+                dir_name = os.path.dirname(base_path)
+                for i in range(1, 20):
+                    variant = os.path.join(dir_name, f"{name}_{i}{ext}")
+                    paths.append(variant)
+        except Exception:
+            pass
+        return paths
 
     def get_filename(self):
         return str(self.file)
