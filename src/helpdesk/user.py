@@ -110,6 +110,8 @@ class HelpdeskUser:
         """
         if self.has_full_access():
             return True
+        elif queue.allow_public_submission:
+            return True
         else:
             return (
                 helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION
