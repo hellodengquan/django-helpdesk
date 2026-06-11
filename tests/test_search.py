@@ -14,6 +14,8 @@ from helpdesk.query import (
     get_search_cache_suffix,
     get_search_cache_key,
     get_query_class,
+    _get_django_cache,
+    HELPDESK_QUERY_CACHE_TIMEOUT,
     SEARCH_BACKEND_POSTGRES,
     SEARCH_BACKEND_FALLBACK,
     apply_search_annotations,
@@ -578,3 +580,217 @@ class CacheBackendIsolationTests(TestCase):
 
         self.assertEqual(len(query._result_cache), 1)
         self.assertIn(fallback_key, query._result_cache)
+
+
+class ProcessCacheIsolationTests(TestCase):
+    def setUp(self):
+        self.queue = Queue.objects.create(
+            title="Process Cache Queue",
+            slug="process_cache_queue",
+            allow_public_submission=True,
+        )
+        self.user = get_staff_user()
+        self.ticket = Ticket.objects.create(
+            title="Process Cache Ticket",
+            queue=self.queue,
+            description="Testing process cache isolation",
+        )
+        self.ticket.save()
+
+    def test_get_django_cache_returns_cache_instance(self):
+        cache = _get_django_cache()
+        self.assertIsNotNone(cache)
+
+    def test_process_cache_key_includes_backend(self):
+        from helpdesk.user import HelpdeskUser
+
+        QueryClass = get_query_class()
+        query = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": "test"},
+        )
+        process_key = query._get_process_cache_key()
+        self.assertIn("fallback", process_key)
+        self.assertIn(str(self.user.pk), process_key)
+
+    @override_settings(
+        DATABASES={
+            "default": {
+                "ENGINE": "django.db.backends.postgresql",
+                "NAME": "test_db",
+            }
+        }
+    )
+    def test_process_cache_key_postgres_includes_backend(self):
+        from helpdesk.user import HelpdeskUser
+
+        QueryClass = get_query_class()
+        query = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": "test"},
+        )
+        process_key = query._get_process_cache_key()
+        self.assertIn("postgres", process_key)
+
+    def test_process_cache_key_differs_between_backends(self):
+        from helpdesk.user import HelpdeskUser
+
+        QueryClass = get_query_class()
+        query = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": "test"},
+        )
+        fallback_key = query._get_process_cache_key()
+        with self.settings(
+            DATABASES={
+                "default": {
+                    "ENGINE": "django.db.backends.postgresql",
+                    "NAME": "test_db",
+                }
+            }
+        ):
+            postgres_key = query._get_process_cache_key()
+        self.assertNotEqual(fallback_key, postgres_key)
+        self.assertIn("fallback", fallback_key)
+        self.assertIn("postgres", postgres_key)
+
+    def test_get_writes_to_process_cache(self):
+        from helpdesk.user import HelpdeskUser
+
+        QueryClass = get_query_class()
+        query = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": ""},
+        )
+        process_key = query._get_process_cache_key()
+        cache = _get_django_cache()
+        result = query.get()
+        cached = cache.get(process_key)
+        self.assertIsNotNone(cached)
+
+    def test_get_reads_from_process_cache(self):
+        from helpdesk.user import HelpdeskUser
+
+        QueryClass = get_query_class()
+        query1 = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": ""},
+        )
+        result1 = query1.get()
+        process_key = query1._get_process_cache_key()
+        cache = _get_django_cache()
+        self.assertIsNotNone(cache.get(process_key))
+
+        query2 = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": ""},
+        )
+        result2 = query2.get()
+        self.assertEqual(list(result1), list(result2))
+
+    def test_process_cache_isolation_prevents_cross_backend_pollution(self):
+        from helpdesk.user import HelpdeskUser
+
+        QueryClass = get_query_class()
+        query = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": ""},
+        )
+        fallback_result = query.get()
+        fallback_process_key = query._get_process_cache_key()
+        cache = _get_django_cache()
+        self.assertIsNotNone(cache.get(fallback_process_key))
+
+        with self.settings(
+            DATABASES={
+                "default": {
+                    "ENGINE": "django.db.backends.postgresql",
+                    "NAME": "test_db",
+                }
+            }
+        ):
+            postgres_process_key = query._get_process_cache_key()
+            self.assertNotEqual(fallback_process_key, postgres_process_key)
+            cached_postgres = cache.get(postgres_process_key)
+            self.assertIsNone(cached_postgres)
+
+    def test_process_cache_different_users_different_keys(self):
+        from helpdesk.user import HelpdeskUser
+
+        user2 = User.objects.create(
+            username="cache_test_user2",
+            is_staff=True,
+        )
+        user2.set_password("pass")
+        user2.save()
+
+        QueryClass = get_query_class()
+        query1 = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": ""},
+        )
+        query2 = QueryClass(
+            HelpdeskUser(user2),
+            query_params={"search_string": ""},
+        )
+        key1 = query1._get_process_cache_key()
+        key2 = query2._get_process_cache_key()
+        self.assertNotEqual(key1, key2)
+
+    def test_process_cache_different_queries_different_keys(self):
+        from helpdesk.user import HelpdeskUser
+
+        QueryClass = get_query_class()
+        query1 = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": "test1"},
+        )
+        query2 = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": "test2"},
+        )
+        key1 = query1._get_process_cache_key()
+        key2 = query2._get_process_cache_key()
+        self.assertNotEqual(key1, key2)
+
+    def test_cache_timeout_is_configurable(self):
+        self.assertEqual(HELPDESK_QUERY_CACHE_TIMEOUT, 60)
+
+    def test_process_cache_key_format(self):
+        from helpdesk.user import HelpdeskUser
+
+        QueryClass = get_query_class()
+        query = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": "format"},
+        )
+        process_key = query._get_process_cache_key()
+        self.assertTrue(process_key.startswith("helpdesk:query:"))
+        self.assertIn(str(self.user.pk), process_key)
+
+    def test_instance_cache_and_process_cache_both_backend_aware(self):
+        from helpdesk.user import HelpdeskUser
+
+        QueryClass = get_query_class()
+        query = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": ""},
+        )
+        instance_key = query._get_cache_key()
+        process_key = query._get_process_cache_key()
+        self.assertIn("fallback", instance_key)
+        self.assertIn("fallback", process_key)
+        with self.settings(
+            DATABASES={
+                "default": {
+                    "ENGINE": "django.db.backends.postgresql",
+                    "NAME": "test_db",
+                }
+            }
+        ):
+            instance_key_pg = query._get_cache_key()
+            process_key_pg = query._get_process_cache_key()
+        self.assertIn("postgres", instance_key_pg)
+        self.assertIn("postgres", process_key_pg)
+        self.assertNotEqual(instance_key, instance_key_pg)
+        self.assertNotEqual(process_key, process_key_pg)

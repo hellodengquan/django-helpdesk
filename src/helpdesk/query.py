@@ -80,6 +80,19 @@ def get_search_cache_key(base_key):
     return f"{base_key}{suffix}"
 
 
+HELPDESK_QUERY_CACHE_TIMEOUT = 60
+
+
+def _get_django_cache():
+    from django.core.cache import caches
+    from django.core.cache.backends.base import InvalidCacheBackendError
+
+    try:
+        return caches["helpdesk"]
+    except (KeyError, InvalidCacheBackendError):
+        return caches["default"]
+
+
 def _get_fallback_annotation_fields():
     fields = {}
     for field_path in SEARCH_FIELDS:
@@ -196,7 +209,13 @@ class __Query__:
         return get_search_filter_args(search)
 
     def _get_cache_key(self):
-        return get_search_cache_key("result")
+        return get_search_cache_key("helpdesk:query:result")
+
+    def _get_process_cache_key(self):
+        user_id = self.huser.user.pk if hasattr(self.huser.user, "pk") else "anon"
+        query_hash = self.base64
+        base = f"helpdesk:query:{user_id}:{query_hash}"
+        return get_search_cache_key(base)
 
     def __run__(self, queryset):
         """
@@ -256,13 +275,20 @@ class __Query__:
         return queryset.distinct()
 
     def get(self):
-        cache_key = self._get_cache_key()
-        if cache_key in self._result_cache:
-            return self._result_cache[cache_key]
+        instance_cache_key = self._get_cache_key()
+        if instance_cache_key in self._result_cache:
+            return self._result_cache[instance_cache_key]
+        process_cache_key = self._get_process_cache_key()
+        cache = _get_django_cache()
+        cached_result = cache.get(process_cache_key)
+        if cached_result is not None:
+            self._result_cache[instance_cache_key] = cached_result
+            return cached_result
         # Prefilter the allowed tickets
         tickets = self.huser.get_tickets_in_queues().select_related()
         result = self.__run__(tickets)
-        self._result_cache[cache_key] = result
+        self._result_cache[instance_cache_key] = result
+        cache.set(process_cache_key, result, HELPDESK_QUERY_CACHE_TIMEOUT)
         return result
 
     def get_datatables_context(self, *, column_lookup=None, **kwargs):
