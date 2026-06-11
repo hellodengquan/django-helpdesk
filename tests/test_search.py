@@ -16,6 +16,10 @@ from helpdesk.query import (
     get_query_class,
     _get_django_cache,
     HELPDESK_QUERY_CACHE_TIMEOUT,
+    get_search_cache_version,
+    invalidate_search_cache,
+    invalidate_search_cache_for_ticket,
+    SEARCH_CACHE_VERSION_KEY,
     SEARCH_BACKEND_POSTGRES,
     SEARCH_BACKEND_FALLBACK,
     apply_search_annotations,
@@ -794,3 +798,205 @@ class ProcessCacheIsolationTests(TestCase):
         self.assertIn("postgres", process_key_pg)
         self.assertNotEqual(instance_key, instance_key_pg)
         self.assertNotEqual(process_key, process_key_pg)
+
+
+class CacheInvalidationTests(TestCase):
+    def setUp(self):
+        self.queue = Queue.objects.create(
+            title="Invalidation Test Queue",
+            slug="invalidation_test_queue",
+            allow_public_submission=True,
+        )
+        self.user = get_staff_user()
+        self.ticket = Ticket.objects.create(
+            title="Cache Invalidation Ticket",
+            queue=self.queue,
+            description="Testing cache invalidation",
+        )
+        self.ticket.save()
+        cache = _get_django_cache()
+        cache.delete(SEARCH_CACHE_VERSION_KEY)
+
+    def test_get_search_cache_version_returns_integer(self):
+        version = get_search_cache_version()
+        self.assertIsInstance(version, int)
+        self.assertGreaterEqual(version, 1)
+
+    def test_invalidate_search_cache_increments_version(self):
+        old_version = get_search_cache_version()
+        invalidate_search_cache()
+        new_version = get_search_cache_version()
+        self.assertEqual(new_version, old_version + 1)
+
+    def test_invalidate_search_cache_called_multiple_times(self):
+        version1 = get_search_cache_version()
+        invalidate_search_cache()
+        version2 = get_search_cache_version()
+        invalidate_search_cache()
+        version3 = get_search_cache_version()
+        self.assertEqual(version2, version1 + 1)
+        self.assertEqual(version3, version2 + 1)
+
+    def test_cache_key_changes_after_invalidation(self):
+        old_key = get_search_cache_key("test_query")
+        invalidate_search_cache()
+        new_key = get_search_cache_key("test_query")
+        self.assertNotEqual(old_key, new_key)
+
+    def test_cache_key_includes_version(self):
+        version = get_search_cache_version()
+        key = get_search_cache_key("test_query")
+        self.assertIn(f"_v{version}_", key)
+
+    def test_invalidate_for_ticket_calls_global_invalidate(self):
+        old_version = get_search_cache_version()
+        invalidate_search_cache_for_ticket(self.ticket.id)
+        new_version = get_search_cache_version()
+        self.assertEqual(new_version, old_version + 1)
+
+    def test_process_cache_key_changes_after_invalidation(self):
+        from helpdesk.user import HelpdeskUser
+
+        QueryClass = get_query_class()
+        query = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": ""},
+        )
+        old_key = query._get_process_cache_key()
+        invalidate_search_cache()
+        new_key = query._get_process_cache_key()
+        self.assertNotEqual(old_key, new_key)
+
+    def test_instance_cache_key_changes_after_invalidation(self):
+        from helpdesk.user import HelpdeskUser
+
+        QueryClass = get_query_class()
+        query = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": ""},
+        )
+        old_key = query._get_cache_key()
+        invalidate_search_cache()
+        new_key = query._get_cache_key()
+        self.assertNotEqual(old_key, new_key)
+
+    def test_search_result_cache_invalidated_on_ticket_save(self):
+        from helpdesk.user import HelpdeskUser
+
+        cache = _get_django_cache()
+        QueryClass = get_query_class()
+        query = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": "Cache Invalidation"},
+        )
+        result1 = query.get()
+        old_process_key = query._get_process_cache_key()
+        self.assertIsNotNone(cache.get(old_process_key))
+
+        self.ticket.title = "Updated Title for Cache Invalidation Test"
+        self.ticket.save()
+
+        new_process_key = query._get_process_cache_key()
+        self.assertNotEqual(old_process_key, new_process_key)
+        self.assertIsNone(cache.get(new_process_key))
+
+    def test_search_result_cache_invalidated_on_ticket_create(self):
+        from helpdesk.user import HelpdeskUser
+
+        cache = _get_django_cache()
+        QueryClass = get_query_class()
+        query = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": ""},
+        )
+        result1 = query.get()
+        old_process_key = query._get_process_cache_key()
+        self.assertIsNotNone(cache.get(old_process_key))
+
+        new_ticket = Ticket.objects.create(
+            title="New Ticket for Cache Test",
+            queue=self.queue,
+            description="New ticket to test cache invalidation",
+        )
+        new_ticket.save()
+
+        new_process_key = query._get_process_cache_key()
+        self.assertNotEqual(old_process_key, new_process_key)
+        self.assertIsNone(cache.get(new_process_key))
+
+    def test_both_backend_caches_invalidated(self):
+        cache = _get_django_cache()
+        fallback_invalidate_key = "helpdesk:search:invalidate:fallback"
+        postgres_invalidate_key = "helpdesk:search:invalidate:postgres"
+
+        cache.delete(fallback_invalidate_key)
+        cache.delete(postgres_invalidate_key)
+
+        invalidate_search_cache()
+
+        fallback_version = cache.get(fallback_invalidate_key)
+        postgres_version = cache.get(postgres_invalidate_key)
+        self.assertIsNotNone(fallback_version)
+        self.assertIsNotNone(postgres_version)
+        self.assertEqual(fallback_version, postgres_version)
+
+    def test_invalidate_on_ticket_delete(self):
+        from helpdesk.user import HelpdeskUser
+
+        cache = _get_django_cache()
+        QueryClass = get_query_class()
+        query = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": ""},
+        )
+        result1 = query.get()
+        old_process_key = query._get_process_cache_key()
+        self.assertIsNotNone(cache.get(old_process_key))
+
+        ticket_id = self.ticket.id
+        self.ticket.delete()
+
+        new_process_key = query._get_process_cache_key()
+        self.assertNotEqual(old_process_key, new_process_key)
+        self.assertIsNone(cache.get(new_process_key))
+
+    def test_cache_invalidation_affects_all_users(self):
+        from helpdesk.user import HelpdeskUser
+
+        user2 = User.objects.create(
+            username="cache_inval_user2",
+            is_staff=True,
+        )
+        user2.set_password("pass")
+        user2.save()
+
+        QueryClass = get_query_class()
+        query1 = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": ""},
+        )
+        query2 = QueryClass(
+            HelpdeskUser(user2),
+            query_params={"search_string": ""},
+        )
+
+        old_key1 = query1._get_process_cache_key()
+        old_key2 = query2._get_process_cache_key()
+
+        invalidate_search_cache()
+
+        new_key1 = query1._get_process_cache_key()
+        new_key2 = query2._get_process_cache_key()
+
+        self.assertNotEqual(old_key1, new_key1)
+        self.assertNotEqual(old_key2, new_key2)
+
+    def test_version_key_stored_in_process_cache(self):
+        cache = _get_django_cache()
+        cache.delete(SEARCH_CACHE_VERSION_KEY)
+
+        version = get_search_cache_version()
+        self.assertEqual(version, 1)
+
+        stored_version = cache.get(SEARCH_CACHE_VERSION_KEY)
+        self.assertEqual(stored_version, 1)

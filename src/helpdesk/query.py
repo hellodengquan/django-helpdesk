@@ -77,10 +77,13 @@ def get_search_cache_suffix():
 
 def get_search_cache_key(base_key):
     suffix = get_search_cache_suffix()
-    return f"{base_key}{suffix}"
+    version = get_search_cache_version()
+    return f"{base_key}_v{version}{suffix}"
 
 
 HELPDESK_QUERY_CACHE_TIMEOUT = 60
+
+SEARCH_CACHE_VERSION_KEY = "helpdesk:search:cache_version"
 
 
 def _get_django_cache():
@@ -91,6 +94,33 @@ def _get_django_cache():
         return caches["helpdesk"]
     except (KeyError, InvalidCacheBackendError):
         return caches["default"]
+
+
+def get_search_cache_version():
+    cache = _get_django_cache()
+    version = cache.get(SEARCH_CACHE_VERSION_KEY)
+    if version is None:
+        version = 1
+        cache.set(SEARCH_CACHE_VERSION_KEY, version, None)
+    return version
+
+
+def invalidate_search_cache():
+    cache = _get_django_cache()
+    try:
+        cache.incr(SEARCH_CACHE_VERSION_KEY)
+    except ValueError:
+        cache.set(SEARCH_CACHE_VERSION_KEY, 1, None)
+    for suffix in [SEARCH_BACKEND_FALLBACK, SEARCH_BACKEND_POSTGRES]:
+        pattern_key = f"helpdesk:search:invalidate:{suffix}"
+        try:
+            cache.incr(pattern_key)
+        except ValueError:
+            cache.set(pattern_key, 1, None)
+
+
+def invalidate_search_cache_for_ticket(ticket_id=None):
+    invalidate_search_cache()
 
 
 def _get_fallback_annotation_fields():
