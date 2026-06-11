@@ -451,7 +451,260 @@ def save(self, *args, **kwargs):
 
 ---
 
-## 6. 流程时序图
+## 6. 并发隐患深度分析
+
+### 6.1 无任何并发控制机制
+
+代码库中**完全没有**以下并发控制手段：
+
+| 保护机制 | 是否存在 | 代码证据 |
+|----------|----------|----------|
+| 数据库唯一约束（message_id） | ❌ | `migrations/0022_add_submitter_email_id_field_to_ticket.py:12-23` 仅添加字段，无 `unique=True` |
+| 数据库行锁（SELECT FOR UPDATE） | ❌ | `email.py` 中无 `select_for_update()` 调用 |
+| 数据库事务包裹 | ❌ | `email.py` 中无 `transaction.atomic`，也未配置 `ATOMIC_REQUESTS` |
+| 分布式锁（如 Redis lock） | ❌ | 无相关代码 |
+| 处理状态标记（processing/processed） | ❌ | Ticket/FollowUp 模型无相关字段 |
+| 进程级互斥锁（如 PID 文件） | ❌ | `get_email.py` 中无相关逻辑 |
+
+### 6.2 邮件删除时机分析
+
+所有协议的删除时机都**晚于**业务处理完成：
+
+**POP3** (`email.py:148-190`):
+```
+server.list() → server.retr(msgNum) → extract_email_metadata() → server.dele(msgNum)
+```
+
+**IMAP** (`email.py:224-261`):
+```
+server.search() → server.fetch(num, "(RFC822)") → extract_email_metadata() → server.store(num, "+FLAGS", "\\Deleted")
+```
+
+**关键问题**：两个进程可以同时 `list()`/`search()` 到同一封邮件，同时 `retr()`/`fetch()` 拉取，各自处理成功后各自删除。
+
+### 6.3 竞态场景一：新邮件（无 In-Reply-To）
+
+当 cron 间隔 < 单次拉取耗时，两个进程重叠运行时：
+
+```
+时间线：
+T0: 进程1 list() → 看到邮件 #5
+T0: 进程2 list() → 看到邮件 #5
+T1: 进程1 retr(5) → 获取完整邮件内容
+T1: 进程2 retr(5) → 获取完整邮件内容
+T2: 进程1 extract_email_metadata() → ticket_id=None, in_reply_to=None
+T2: 进程2 extract_email_metadata() → ticket_id=None, in_reply_to=None
+T3: 进程1 FollowUp.objects.filter(message_id=None) → None
+T3: 进程2 FollowUp.objects.filter(message_id=None) → None
+T4: 进程1 Ticket.objects.create() → 工单 #1001
+T4: 进程2 Ticket.objects.create() → 工单 #1002
+T5: 进程1 FollowUp.save() → 关联工单 #1001，message_id="<msg-123@example.com>"
+T5: 进程2 FollowUp.save() → 关联工单 #1002，message_id="<msg-123@example.com>"
+T6: 进程1 process_attachments() → 附件保存到工单 #1001
+T6: 进程2 process_attachments() → 附件保存到工单 #1002
+T7: 进程1 send_info_email() → 发通知邮件
+T7: 进程2 send_info_email() → 发通知邮件
+T8: 进程1 new_ticket_done.send() → 触发 webhook
+T8: 进程2 new_ticket_done.send() → 触发 webhook
+T9: 进程1 server.dele(5) → 标记删除
+T9: 进程2 server.dele(5) → 标记删除
+T10: 进程1 server.quit() → 真正删除
+T10: 进程2 server.quit() → 真正删除
+
+结果：两张内容完全相同的工单 #1001 和 #1002，各自有 FollowUp，各自有附件，各自发送了通知。
+```
+
+**核心代码路径**（`email.py:629-641`）：
+```python
+if ticket is None:
+    if not getattr(settings, "QUEUE_EMAIL_BOX_UPDATE_ONLY", False):
+        ticket = Ticket.objects.create(
+            title=payload["subject"],
+            queue=queue,
+            submitter_email=sender_email,
+            created=now,
+            description=payload["body"],
+            priority=payload["priority"],
+        )
+        ticket.save()
+        new = True
+```
+
+由于没有事务，两个进程都会通过 `ticket is None` 的判断，各自创建 Ticket。
+
+### 6.4 竞态场景二：回复邮件（有 In-Reply-To）
+
+```
+时间线：
+T0: 进程1 FollowUp.objects.filter(message_id="<prev-456@example.com>") → 找到 FollowUp #50 → 工单 #800
+T0: 进程2 FollowUp.objects.filter(message_id="<prev-456@example.com>") → 找到 FollowUp #50 → 工单 #800
+T1: 进程1 FollowUp.save() → 创建 FollowUp #51，关联工单 #800
+T1: 进程2 FollowUp.save() → 创建 FollowUp #52，关联工单 #800
+T2: 进程1 process_attachments() → 附件保存到 FollowUp #51
+T2: 进程2 process_attachments() → 附件保存到 FollowUp #52
+
+结果：工单 #800 下有两条内容完全相同的 FollowUp #51 和 #52，各自有附件。
+```
+
+**核心代码路径**（`email.py:607-614`）：
+```python
+if in_reply_to is not None:
+    queryset = FollowUp.objects.filter(message_id=in_reply_to).order_by("-date")
+    if queryset.count() > 0:
+        previous_followup = queryset.first()
+        ticket = previous_followup.ticket
+```
+
+由于两个进程同时查询，都能找到同一个 Ticket，但都会创建各自的 FollowUp。
+
+### 6.5 In-Reply-To 和主题匹配在竞态下的有效性
+
+| 匹配方式 | 防止重复工单 | 防止重复 FollowUp | 说明 |
+|----------|-------------|------------------|------|
+| In-Reply-To | ✅ 对回复邮件 | ❌ | 能匹配到同一 Ticket，但两个进程各创建 FollowUp |
+| 主题 slug 匹配 | ✅ 对回复邮件 | ❌ | 同上 |
+| 两者都无（新邮件） | ❌ | ❌ | 两个进程各自创建 Ticket 和 FollowUp |
+
+**结论**：这两种机制是**业务去重**手段，不是**并发去重**手段。它们在单进程串行时工作良好，但在并发重叠时无法防止重复。
+
+### 6.6 并发防护的可行方案
+
+基于代码现状，可采用以下修复方案：
+
+**方案 A：数据库唯一约束（推荐）**
+```sql
+-- 在 FollowUp 表上添加唯一约束
+ALTER TABLE helpdesk_followup ADD CONSTRAINT unique_message_id UNIQUE(message_id);
+```
+配合代码中捕获 `IntegrityError`，第二个进程会因唯一约束冲突而失败，邮件保留在服务器，下次重试时通过 In-Reply-To 匹配到已有工单（但此时已有 FollowUp，会走更新流程）。
+
+**方案 B：分布式锁**
+在 `process_email()` 入口添加基于 Redis 的锁，确保同一时间只有一个进程在运行。
+
+**方案 C：先标记删除再处理**
+修改拉取逻辑，先 `store(+FLAGS, "\\Deleted")` 标记删除，再处理。但需要处理回滚逻辑。
+
+---
+
+## 7. 残缺工单分析
+
+### 7.1 执行顺序与事务边界
+
+`create_object_from_email_message()` (`email.py:588-714`) 的执行顺序：
+
+```
+1. 查询已有 Ticket (In-Reply-To / ticket_id)
+   ↓
+2. 无匹配 → Ticket.objects.create()  ← Ticket 已持久化
+   ↓
+3. FollowUp.save()                    ← FollowUp 已持久化，同时触发 Ticket.modified 更新
+   ↓
+4. process_attachments(f, files)      ← 可能抛出 ValidationError
+   ↓
+5. create_ticket_cc()                 ← 创建抄送关系
+   ↓
+6. send_info_email()                  ← 发送通知邮件
+   ↓
+7. new_ticket_done.send() / update_ticket_done.send()  ← 发送信号
+   ↓
+8. return ticket                      ← 返回成功，邮件将被删除
+```
+
+**关键代码**（`email.py:683-694`）：
+```python
+if helpdesk_settings.HELPDESK_ENABLE_ATTACHMENTS:
+    try:
+        attached = process_attachments(f, files)
+    except ValidationError as e:
+        logger.error(str(e))  # 仅记录日志，不回滚
+    else:
+        for att_file in attached:
+            logger.info("Attachment '%s' successfully added...", att_file[0])
+```
+
+由于**没有事务包裹**，步骤 2 和 3 的数据一旦写入就永久保存。步骤 4 抛出异常后，仅被捕获并记录日志，函数继续执行后续步骤。
+
+### 7.2 process_attachments 的失败原因
+
+`process_attachments()` (`lib.py:151-188`) 可能抛出 `ValidationError` 的场景：
+
+```python
+def process_attachments(followup, attached_files):
+    errors = set()
+    for attached in attached_files:
+        att = FollowUpAttachment(
+            followup=followup,
+            file=attached,
+            filename=filename,
+            mime_type=...,
+            size=attached.size,
+        )
+        try:
+            att.full_clean()  # ← 验证失败抛出 ValidationError
+        except ValidationError as e:
+            errors.add(e)
+        else:
+            att.save()        # ← 保存失败也可能抛出异常
+    
+    if errors:
+        raise ValidationError(list(errors))  # ← 所有附件验证完统一抛出
+```
+
+可能的失败原因：
+1. `att.full_clean()` 验证失败：文件名非法、文件大小超限、MIME 类型不被允许等
+2. `att.save()` 失败：磁盘满、权限不足、文件系统错误等
+3. `upload_to` 路径生成失败
+
+**注意**：循环内部分附件可能已 `save()` 成功，只有验证失败的会被收集。但一旦有任何验证失败，最后会统一抛出 `ValidationError`，**已成功保存的附件不会回滚**。
+
+### 7.3 残缺工单的最终状态
+
+| 字段 | 值 | 说明 |
+|------|----|------|
+| `Ticket.status` | OPEN | 正常打开状态，无任何异常标记 |
+| `Ticket.created` | 正确时间 | 已正确设置 |
+| `Ticket.modified` | 正确时间 | 由 `FollowUp.save()` 联动更新 |
+| `Ticket.description` | 邮件正文 | 已正确保存 |
+| `FollowUp.comment` | 邮件完整正文 | 已正确保存 |
+| `FollowUp.message_id` | 邮件 Message-ID | 已正确设置 |
+| `FollowUp.followupattachment_set.count()` | 0 或 部分 | 部分成功的附件可能已保存 |
+| `Ticket.ticketcc_set` | 可能已创建 | CC 关系在异常捕获后创建 |
+| 通知邮件 | 已发送 | `send_info_email()` 在异常捕获后执行 |
+| 信号 | 已发送 | `new_ticket_done` 在异常捕获后发送 |
+| 原始邮件 | 已删除 | 函数返回 ticket（非 None），触发删除 |
+
+**没有任何数据库字段标记这是一个"残缺"工单**。它看起来就是一个正常的、没有附件的工单。
+
+### 7.4 残缺工单的发现机制
+
+**自动化发现**：
+1. 查看日志中是否有 `logger.error(str(e))` 记录（`email.py:687`）
+2. 日志内容包含 `ValidationError` 的详细信息
+
+**手动发现**：
+1. 人工对比邮件内容和工单内容，发现附件缺失
+2. 定期查询 `FollowUp.objects.filter(message_id__isnull=False, followupattachment__isnull=True)` 找出有 message_id 但无附件的 FollowUp
+
+### 7.5 残缺工单的补救方法
+
+由于原始邮件已被从服务器删除，补救手段有限：
+
+1. **从邮件服务器备份恢复**：如果邮件服务器有备份，可手动恢复邮件到收件箱，下次轮询时会重新处理。但需要注意：
+   - 重新处理会创建新的 FollowUp（因为已有 Ticket）
+   - 如果 message_id 上有唯一约束，会失败
+
+2. **从发件人重新获取**：联系发件人重新发送邮件，然后手动关联到已有工单。
+
+3. **文件系统层面恢复**：如果 `att.save()` 部分成功但整体抛出异常，已保存的附件文件可能仍在磁盘上。可通过 FollowUp ID 在 `helpdesk/attachments/` 目录中查找。
+
+4. **代码层面的预防修复**：
+   - 添加 `transaction.atomic` 包裹整个流程
+   - 先验证所有附件，再统一保存（当前实现是边验证边保存）
+   - 附件处理失败时返回 None，让邮件保留在服务器上重试
+
+---
+
+## 8. 流程时序图
 
 ```
 ┌─────────┐     ┌──────────┐     ┌──────────────┐     ┌──────────┐     ┌────────────┐
@@ -471,7 +724,7 @@ def save(self, *args, **kwargs):
 
 ---
 
-## 7. 配置项速查
+## 9. 配置项速查
 
 | 配置项 | 默认值 | 作用 | 代码位置 |
 |--------|--------|------|----------|
