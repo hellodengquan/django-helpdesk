@@ -21,9 +21,14 @@ from email.message import EmailMessage, MIMEPart
 from email.utils import getaddresses
 from email_reply_parser import EmailReplyParser
 from helpdesk import settings as helpdesk_settings
-from helpdesk.exceptions import DeleteIgnoredTicketException, IgnoreTicketException
+from helpdesk.exceptions import (
+    BypassTicketException,
+    DeleteIgnoredTicketException,
+    IgnoreTicketException,
+)
 from helpdesk.lib import process_attachments, safe_template_context
 from helpdesk.models import FollowUp, IgnoreEmail, Queue, Ticket
+from helpdesk.routing import apply_routing
 from helpdesk.signals import new_ticket_done, update_ticket_done
 import imaplib
 import logging
@@ -176,6 +181,12 @@ def pop3_sync(q, logger, server):
                 "Message %s was ignored and deleted from POP3 server" % msgNum
             )
             server.dele(msgNum)
+        except BypassTicketException as btex:
+            logger.warning(
+                "Message %s bypassed (kept in POP3 mailbox): %s",
+                msgNum,
+                btex.reason,
+            )
         else:
             if ticket:
                 server.dele(msgNum)
@@ -241,6 +252,12 @@ def imap_sync(q, logger, server):
                     server.store(num, "+FLAGS", "\\Deleted")
                     logger.warning(
                         "Message %s was ignored and deleted from IMAP server" % num
+                    )
+                except BypassTicketException as btex:
+                    logger.warning(
+                        "Message %s bypassed (kept in IMAP mailbox): %s",
+                        num,
+                        btex.reason,
                     )
                 except TypeError as te:
                     # Log the error with stacktrace to help identify what went wrong
@@ -342,6 +359,13 @@ def imap_oauth_sync(q, logger, server):
                     server.expunge()
                     logger.warning(
                         "Message %s was ignored and deleted from IMAP server" % num
+                    )
+
+                except BypassTicketException as btex:
+                    logger.warning(
+                        "Message %s bypassed (kept in IMAP mailbox): %s",
+                        num,
+                        btex.reason,
                     )
 
                 except TypeError as te:
@@ -477,6 +501,12 @@ def process_queue(q, logger):
                     os.unlink(m)
                     logger.warning(
                         "Message %d was ignored and deleted local directory", i
+                    )
+                except BypassTicketException as btex:
+                    logger.warning(
+                        "Message %d bypassed (kept in local directory): %s",
+                        i,
+                        btex.reason,
                     )
                 else:
                     if ticket:
@@ -628,14 +658,17 @@ def create_object_from_email_message(message, ticket_id, payload, files, logger)
     # New issue, create a new <Ticket> instance
     if ticket is None:
         if not getattr(settings, "QUEUE_EMAIL_BOX_UPDATE_ONLY", False):
-            ticket = Ticket.objects.create(
+            create_kwargs = dict(
                 title=payload["subject"],
-                queue=queue,
+                queue=payload.get("queue", queue),
                 submitter_email=sender_email,
                 created=now,
                 description=payload["body"],
                 priority=payload["priority"],
             )
+            if "assigned_to" in payload and payload["assigned_to"] is not None:
+                create_kwargs["assigned_to"] = payload["assigned_to"]
+            ticket = Ticket.objects.create(**create_kwargs)
             ticket.save()
             logger.debug("Created new ticket %s-%s" % (ticket.queue.slug, ticket.id))
             new = True
@@ -1174,6 +1207,17 @@ def extract_email_metadata(
         "priority": priority,
         "files": files,
     }
+
+    if ticket_id is None:
+        payload, _matched_rule = apply_routing(
+            payload,
+            sender_email=sender_email,
+            subject=subject,
+            body=(filtered_body or full_body or ""),
+            queue=original_queue,
+            bypass_on_no_match=helpdesk_settings.HELPDESK_EMAIL_ROUTING_BYPASS_ON_NO_MATCH,
+        )
+        queue = payload["queue"]
 
     return create_object_from_email_message(
         message_obj, ticket_id, payload, files, logger=logger

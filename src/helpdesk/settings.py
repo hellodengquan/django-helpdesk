@@ -508,3 +508,19 @@ LOG_WARN_WHEN_CC_EMAIL_LINKED_TO_MORE_THAN_1_USER = getattr(
 )
 HELPDESK_API_ENABLED = getattr(settings, "HELPDESK_API_ENABLED", True)
 HELPDESK_UI_ENABLED = getattr(settings, "HELPDESK_UI_ENABLED", True)
+
+#############################################
+# email routing (auto-assignment) options   #
+#############################################
+
+# If True, an incoming email (for a new ticket) that does not match any
+# enabled EmailRoutingRule will be kept in the mailbox (bypassed) for manual
+# processing. If False, unmatched emails fall back to the default behaviour
+# (ticket created in the queue the email was pulled from, with default
+# priority and no owner assigned).
+#
+# Default is False for backward compatibility / zero-config behaviour so
+# that fresh installations without any rules still create tickets normally.
+HELPDESK_EMAIL_ROUTING_BYPASS_ON_NO_MATCH = getattr(
+    settings, "HELPDESK_EMAIL_ROUTING_BYPASS_ON_NO_MATCH", False
+)

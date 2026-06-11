@@ -13,3 +13,18 @@ class DeleteIgnoredTicketException(Exception):
     """
 
     pass
+
+
+class BypassTicketException(Exception):
+    """
+    Raised when an email should be bypassed (kept in mailbox, no ticket created).
+
+    Two scenarios trigger this:
+      1. A routing rule matched explicitly with `bypass=True`.
+      2. No routing rule matched the email (default fallback for unrouted mail).
+    """
+
+    def __init__(self, reason: str = "No matching routing rule", rule=None):
+        self.reason = reason
+        self.rule = rule
+        super().__init__(reason)

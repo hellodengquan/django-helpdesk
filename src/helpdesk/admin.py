@@ -6,6 +6,7 @@ from helpdesk.models import (
     ChecklistTask,
     ChecklistTemplate,
     CustomField,
+    EmailRoutingRule,
     EmailTemplate,
     EscalationExclusion,
     FollowUp,
@@ -157,3 +158,73 @@ class ChecklistAdmin(admin.ModelAdmin):
 
 admin.site.register(PreSetReply)
 admin.site.register(EscalationExclusion)
+
+
+@admin.register(EmailRoutingRule)
+class EmailRoutingRuleAdmin(admin.ModelAdmin):
+    list_display = (
+        "name",
+        "order",
+        "enabled",
+        "queue_list",
+        "sender_email",
+        "subject",
+        "keywords_summary",
+        "target_queue",
+        "target_priority",
+        "target_owner",
+        "bypass",
+    )
+    list_filter = ("enabled", "bypass", "queues", "target_queue", "target_priority", "target_owner")
+    search_fields = ("name", "sender_email", "subject", "keywords")
+    ordering = ("order", "id")
+    filter_horizontal = ("queues",)
+
+    fieldsets = (
+        (
+            _("Basic Settings"),
+            {
+                "fields": ("name", "order", "enabled", "queues"),
+            },
+        ),
+        (
+            _("Matching Conditions"),
+            {
+                "fields": (
+                    ("sender_email", "sender_match_type"),
+                    ("subject", "subject_match_type"),
+                    ("keywords", "keywords_match_type", "keywords_logic"),
+                ),
+                "description": _(
+                    "All non-empty conditions must be satisfied for the rule to match. "
+                    "Leave a field blank to match any value for that condition."
+                ),
+            },
+        ),
+        (
+            _("Assignment Actions"),
+            {
+                "fields": (
+                    "bypass",
+                    "target_queue",
+                    "target_priority",
+                    "target_owner",
+                ),
+                "description": _(
+                    "If 'Bypass Processing' is ticked, matching emails will be kept in "
+                    "the mailbox and not turned into tickets. Otherwise, the specified "
+                    "target queue, priority, and/or owner will be applied."
+                ),
+            },
+        ),
+    )
+
+    @admin.display(description=_("Keywords"))
+    def keywords_summary(self, obj):
+        kws = obj._get_keyword_list()
+        if not kws:
+            return "-"
+        short = ", ".join(kws[:3])
+        if len(kws) > 3:
+            short += f" +{len(kws) - 3}"
+        return short

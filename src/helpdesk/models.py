@@ -2274,3 +2274,295 @@ class ChecklistTask(models.Model):
 
     def __str__(self):
         return self.description
+
+
+MATCH_TYPE_EXACT = "exact"
+MATCH_TYPE_CONTAINS = "contains"
+MATCH_TYPE_REGEX = "regex"
+MATCH_TYPE_WILDCARD = "wildcard"
+
+MATCH_TYPE_CHOICES = (
+    (MATCH_TYPE_EXACT, _("Exact Match")),
+    (MATCH_TYPE_CONTAINS, _("Contains")),
+    (MATCH_TYPE_REGEX, _("Regular Expression")),
+    (MATCH_TYPE_WILDCARD, _("Wildcard (*)")),
+)
+
+KEYWORDS_LOGIC_ALL = "all"
+KEYWORDS_LOGIC_ANY = "any"
+
+KEYWORDS_LOGIC_CHOICES = (
+    (KEYWORDS_LOGIC_ALL, _("All Keywords")),
+    (KEYWORDS_LOGIC_ANY, _("Any Keyword")),
+)
+
+
+class EmailRoutingRule(models.Model):
+    """
+    Rules for automatically assigning incoming emails to specific queues,
+    priorities, and owners based on sender, subject, and body keywords.
+
+    Rules are evaluated in 'order' ascending (lower number = higher priority).
+    The first matching rule wins. If no rule matches, the email goes to
+    bypass processing (kept in mailbox and not turned into a ticket).
+    """
+
+    name = models.CharField(
+        _("Rule Name"),
+        max_length=100,
+        help_text=_("A descriptive name for this routing rule."),
+    )
+
+    order = models.IntegerField(
+        _("Priority Order"),
+        default=0,
+        help_text=_(
+            "Lower numbers are evaluated first. The first matching rule is applied."
+        ),
+        db_index=True,
+    )
+
+    enabled = models.BooleanField(
+        _("Enabled"),
+        default=True,
+        help_text=_("Whether this rule is active."),
+    )
+
+    queues = models.ManyToManyField(
+        Queue,
+        blank=True,
+        help_text=_(
+            "Leave blank for this rule to apply to all queues, "
+            "or select specific queues to limit this rule to."
+        ),
+        related_name="routing_rules",
+    )
+
+    sender_email = models.CharField(
+        _("Sender E-Mail"),
+        max_length=255,
+        blank=True,
+        help_text=_(
+            "Sender email pattern. Leave blank to match any sender. "
+            "Supports wildcards (*) in wildcard mode."
+        ),
+    )
+
+    sender_match_type = models.CharField(
+        _("Sender Match Type"),
+        max_length=20,
+        choices=MATCH_TYPE_CHOICES,
+        default=MATCH_TYPE_WILDCARD,
+    )
+
+    subject = models.CharField(
+        _("Subject Pattern"),
+        max_length=255,
+        blank=True,
+        help_text=_("Subject pattern. Leave blank to match any subject."),
+    )
+
+    subject_match_type = models.CharField(
+        _("Subject Match Type"),
+        max_length=20,
+        choices=MATCH_TYPE_CHOICES,
+        default=MATCH_TYPE_CONTAINS,
+    )
+
+    keywords = models.TextField(
+        _("Keywords"),
+        blank=True,
+        help_text=_(
+            "Comma or newline-separated keywords to search for in the email body. "
+            "Leave blank to match any body content."
+        ),
+    )
+
+    keywords_logic = models.CharField(
+        _("Keywords Logic"),
+        max_length=10,
+        choices=KEYWORDS_LOGIC_CHOICES,
+        default=KEYWORDS_LOGIC_ANY,
+        help_text=_(
+            "Whether all keywords must be present, or just any one of them."
+        ),
+    )
+
+    keywords_match_type = models.CharField(
+        _("Keywords Match Type"),
+        max_length=20,
+        choices=MATCH_TYPE_CHOICES,
+        default=MATCH_TYPE_CONTAINS,
+    )
+
+    target_queue = models.ForeignKey(
+        Queue,
+        on_delete=models.SET_NULL,
+        related_name="+",
+        verbose_name=_("Target Queue"),
+        blank=True,
+        null=True,
+        help_text=_(
+            "Queue to assign to matching tickets. "
+            "Leave blank to keep the original queue."
+        ),
+    )
+
+    target_priority = models.IntegerField(
+        _("Target Priority"),
+        choices=Ticket.PRIORITY_CHOICES,
+        blank=True,
+        null=True,
+        help_text=_(
+            "Priority to assign. Leave blank to keep default/email-derived priority."
+        ),
+    )
+
+    target_owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="+",
+        verbose_name=_("Target Owner"),
+        blank=True,
+        null=True,
+        help_text=_("Owner to assign. Leave blank to leave unassigned."),
+    )
+
+    bypass = models.BooleanField(
+        _("Bypass Processing"),
+        default=False,
+        help_text=_(
+            "If ticked, matching emails will be kept in the mailbox and NOT "
+            "turned into tickets. Takes precedence over target_* fields."
+        ),
+    )
+
+    created = models.DateTimeField(
+        _("Created"),
+        auto_now_add=True,
+    )
+
+    modified = models.DateTimeField(
+        _("Modified"),
+        auto_now=True,
+    )
+
+    class Meta:
+        ordering = ("order", "id")
+        verbose_name = _("E-Mail Routing Rule")
+        verbose_name_plural = _("E-Mail Routing Rules")
+
+    def __str__(self):
+        return "%s (#%d)" % (self.name, self.order)
+
+    def queue_list(self):
+        queues = self.queues.all().order_by("title")
+        if len(queues) == 0:
+            return "*"
+        return ", ".join([str(q) for q in queues])
+
+    def _get_keyword_list(self):
+        if not self.keywords:
+            return []
+        raw = self.keywords.replace("\n", ",").replace(";", ",")
+        return [k.strip() for k in raw.split(",") if k.strip()]
+
+    @staticmethod
+    def _match_pattern(pattern, text, match_type, case_sensitive=False):
+        if not pattern:
+            return True
+        if text is None:
+            return False
+        if not case_sensitive:
+            pattern = pattern.lower()
+            text = text.lower()
+
+        if match_type == MATCH_TYPE_EXACT:
+            return pattern == text
+
+        if match_type == MATCH_TYPE_CONTAINS:
+            return pattern in text
+
+        if match_type == MATCH_TYPE_REGEX:
+            flags = 0 if case_sensitive else re.IGNORECASE
+            try:
+                return re.search(pattern, text, flags=flags) is not None
+            except re.error:
+                return False
+
+        if match_type == MATCH_TYPE_WILDCARD:
+            regex_pattern = re.escape(pattern).replace(r"\*", ".*")
+            flags = 0 if case_sensitive else re.IGNORECASE
+            try:
+                return re.fullmatch(regex_pattern, text, flags=flags) is not None
+            except re.error:
+                return False
+
+        return False
+
+    def matches(self, sender_email, subject, body, queue=None):
+        """
+        Check if this rule matches the given email attributes.
+
+        :param sender_email: The sender's email address
+        :param subject: The email subject
+        :param body: The email body text
+        :param queue: The queue being processed (optional, for queue scoping)
+        :return: True if this rule matches, False otherwise
+        """
+        if not self.enabled:
+            return False
+
+        if self.pk and queue is not None:
+            scoped_queues = self.queues.all()
+            if scoped_queues.exists() and not scoped_queues.filter(pk=queue.pk).exists():
+                return False
+
+        if self.sender_email and not self._match_pattern(
+            self.sender_email, sender_email, self.sender_match_type
+        ):
+            return False
+
+        if self.subject and not self._match_pattern(
+            self.subject, subject, self.subject_match_type
+        ):
+            return False
+
+        keywords = self._get_keyword_list()
+        if keywords:
+            matches = [
+                self._match_pattern(kw, body or "", self.keywords_match_type)
+                for kw in keywords
+            ]
+            if self.keywords_logic == KEYWORDS_LOGIC_ALL:
+                if not all(matches):
+                    return False
+            else:
+                if not any(matches):
+                    return False
+
+        return True
+
+    def apply_to_payload(self, payload):
+        """
+        Apply this rule's assignment targets to a ticket creation payload dict.
+
+        :param payload: dict with keys 'queue', 'priority'
+        :return: dict with updated queue/priority, plus 'assigned_to' key, and
+                 'bypass' key if processing should be skipped
+        """
+        result = dict(payload)
+        if self.bypass:
+            result["bypass"] = True
+            return result
+
+        if self.target_queue is not None:
+            result["queue"] = self.target_queue
+
+        if self.target_priority is not None:
+            result["priority"] = self.target_priority
+
+        if self.target_owner is not None:
+            result["assigned_to"] = self.target_owner
+
+        return result
