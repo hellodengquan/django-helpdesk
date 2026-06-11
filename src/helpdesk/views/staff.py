@@ -1301,7 +1301,11 @@ def edit_ticket(request, ticket_id):
     ticket = get_object_or_404(Ticket, id=ticket_id)
     ticket_perm_check(request, ticket)
 
-    form = EditTicketForm(request.POST or None, instance=ticket)
+    form = EditTicketForm(
+        request.POST or None,
+        instance=ticket,
+        queue_choices=get_user_queues(request.user)
+    )
     if form.is_valid():
         ticket = form.save()
         return redirect(ticket)

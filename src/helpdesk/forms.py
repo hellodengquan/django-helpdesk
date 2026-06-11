@@ -126,11 +126,13 @@ class EditTicketForm(CustomFieldMixin, forms.ModelForm):
     class Media:
         js = ("helpdesk/js/init_due_date.js", "helpdesk/js/init_datetime_classes.js")
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, queue_choices=None, **kwargs):
         """
         Add any custom fields that are defined to the form
         """
         super(EditTicketForm, self).__init__(*args, **kwargs)
+        if queue_choices and "queue" in self.fields:
+            self.fields["queue"].choices = queue_choices
 
         # Since title is max 100 characters limit it in editing
         if "title" in self.fields:

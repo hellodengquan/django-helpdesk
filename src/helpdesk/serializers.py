@@ -238,8 +238,9 @@ class TicketSerializer(BaseTicketSerializer):
 
     def create(self, validated_data):
         """Use TicketForm to validate and create ticket"""
-        queues = HelpdeskUser(self.context["request"].user).get_queues()
-        queue_choices = [(q.id, q.title) for q in queues]
+        queue_choices = HelpdeskUser(self.context["request"].user).get_queue_choices(
+            include_empty=False
+        )
         data = validated_data.copy()
         data["body"] = data["description"]
         # TicketForm needs id for ForeignKey (not the instance themselves)

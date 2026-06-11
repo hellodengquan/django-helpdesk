@@ -9,12 +9,17 @@ scripts/escalate_tickets.py - Easy way to escalate tickets based on their age,
 """
 
 from datetime import date, timedelta
-from django.core.management.base import BaseCommand
+from django.contrib.auth import get_user_model
+from django.core.management.base import BaseCommand, CommandError
 from django.db.models import Q
 from django.utils import timezone
 from django.utils.translation import gettext as _
 from helpdesk.lib import safe_template_context
 from helpdesk.models import EscalationExclusion, Queue, Ticket
+from helpdesk.user import HelpdeskUser
+
+
+User = get_user_model()
 
 
 class Command(BaseCommand):
@@ -24,7 +29,13 @@ class Command(BaseCommand):
             "--queues",
             nargs="*",
             choices=list(Queue.objects.values_list("slug", flat=True)),
-            help="Queues to include (default: all). Enter the queues slug as space separated list.",
+            help="Queues to include (default: user-accessible queues). Enter the queues slug as space separated list.",
+        )
+        parser.add_argument(
+            "-u",
+            "--user",
+            default=None,
+            help="Username to filter queues by permission (default: superuser access to all queues).",
         )
         parser.add_argument(
             "-x",
@@ -44,10 +55,22 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         verbose = options["escalate_verbosely"]
         notify_only = options["notify_only"]
+        username = options["user"]
 
         queue_slugs = options["queues"]
+
+        if username:
+            try:
+                user = User.objects.get(username=username)
+            except User.DoesNotExist:
+                raise CommandError(f"User '{username}' does not exist.")
+            huser = HelpdeskUser(user)
+            allowed_queues = huser.get_queues()
+        else:
+            allowed_queues = Queue.objects.all()
+
         # Only include queues with escalation configured
-        queues = Queue.objects.filter(escalate_days__isnull=False).exclude(
+        queues = allowed_queues.filter(escalate_days__isnull=False).exclude(
             escalate_days=0
         )
         if queue_slugs is not None:

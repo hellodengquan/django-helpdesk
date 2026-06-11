@@ -56,15 +56,19 @@ class HelpdeskUser:
         else:
             return all_queues
 
-    def get_queue_choices(self):
+    def get_queue_choices(self, include_empty=True):
         """Return list of choices for html form for queues the user can access.
 
-        Returns only one choice if there is only one queue or add empty
-        choice at the beginning of the list, if there are more queues.
+        When include_empty is True (default for HTML forms):
+          - Returns only one choice if there is only one queue
+          - Adds empty choice at the beginning of the list if there are more queues
+
+        When include_empty is False (for API/serializer usage):
+          - Returns only the actual queue choices without empty option
         """
         queues = self.get_queues()
         queue_choices = []
-        if len(queues) > 1:
+        if include_empty and len(queues) > 1:
             queue_choices = [("", "--------")]
         queue_choices += [(q.id, q.title) for q in queues]
         return queue_choices

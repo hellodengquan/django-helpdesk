@@ -10,8 +10,13 @@ scripts/create_escalation_exclusion.py - Easy way to routinely add particular
 """
 
 from datetime import date, timedelta
+from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 from helpdesk.models import EscalationExclusion, Queue
+from helpdesk.user import HelpdeskUser
+
+
+User = get_user_model()
 
 day_names = {
     "monday": 0,
@@ -46,7 +51,13 @@ class Command(BaseCommand):
             "--queues",
             nargs="*",
             choices=list(Queue.objects.values_list("slug", flat=True)),
-            help="Queues to include (default: all). Enter the queues slug as space separated list.",
+            help="Queues to include (default: user-accessible queues). Enter the queues slug as space separated list.",
+        )
+        parser.add_argument(
+            "-u",
+            "--user",
+            default=None,
+            help="Username to filter queues by permission (default: superuser access to all queues).",
         )
         parser.add_argument(
             "-x",
@@ -61,13 +72,24 @@ class Command(BaseCommand):
         occurrences = options["occurrences"]
         verbose = options["exclude_verbosely"]
         queue_slugs = options["queues"]
+        username = options["user"]
 
         if not (days and occurrences):
             raise CommandError("One or more occurrences must be specified.")
 
+        if username:
+            try:
+                user = User.objects.get(username=username)
+            except User.DoesNotExist:
+                raise CommandError(f"User '{username}' does not exist.")
+            huser = HelpdeskUser(user)
+            allowed_queues = huser.get_queues()
+        else:
+            allowed_queues = Queue.objects.all()
+
         queues = []
         if queue_slugs is not None:
-            queues = Queue.objects.filter(slug__in=queue_slugs)
+            queues = allowed_queues.filter(slug__in=queue_slugs)
 
         for day_name in days:
             day = day_names[day_name]
