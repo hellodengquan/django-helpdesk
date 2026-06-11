@@ -595,6 +595,401 @@ class RoutingBypassLoggingTests(TestCase):
         )
 
 
+class RoutingDisabledRuleDegradationTests(TestCase):
+    """
+    Verify that disabled rules correctly degrade to "no match" behaviour and
+    produce the same bypass logs as if the rule was absent.  This protects
+    against future regressions where an enabled flag check is accidentally
+    dropped.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.q = Queue.objects.create(title="Support", slug="support")
+        cls.owner = User.objects.create_user(username="tech", password="p")
+
+    def setUp(self):
+        EmailRoutingRule.objects.all().delete()
+
+    def _grab_routing_logs(self, caplog):
+        return [r for r in caplog.records if r.name == "helpdesk.routing"]
+
+    def _find_log_by_event(self, records, event):
+        for r in records:
+            if f"event={event}" in r.getMessage():
+                return r
+        return None
+
+    def _get_field_from_msg(self, message: str, key: str) -> Optional[str]:
+        match = re.search(rf"{key}=(?:'([^']*)'|(\S+))", message)
+        if not match:
+            empty_match = re.search(rf"{key}=(\s|$)", message)
+            return "" if empty_match else None
+        return match.group(1) if match.group(1) is not None else match.group(2)
+
+    # -------- find_matching_rule() behaviour with disabled rules --------
+
+    def test_all_rules_disabled_returns_none(self):
+        """Multiple rules exist but all disabled → find_matching_rule returns None."""
+        EmailRoutingRule.objects.create(
+            name="Disabled VIP rule",
+            order=1,
+            enabled=False,
+            sender_email="*@vip.com",
+            sender_match_type=MATCH_TYPE_WILDCARD,
+        )
+        EmailRoutingRule.objects.create(
+            name="Disabled billing rule",
+            order=2,
+            enabled=False,
+            subject="*billing*",
+            subject_match_type=MATCH_TYPE_WILDCARD,
+        )
+        self.assertIsNone(
+            find_matching_rule(
+                sender_email="ceo@vip.com",
+                subject="urgent billing issue",
+                body="invoice",
+            )
+        )
+
+    def test_disabled_rule_skipped_next_enabled_wins(self):
+        """First matching rule is disabled → next enabled rule wins."""
+        disabled = EmailRoutingRule.objects.create(
+            name="Disabled VIP",
+            order=1,
+            enabled=False,
+            sender_email="*@vip.com",
+            sender_match_type=MATCH_TYPE_WILDCARD,
+            target_priority=1,
+        )
+        enabled = EmailRoutingRule.objects.create(
+            name="Enabled wildcard",
+            order=10,
+            enabled=True,
+            subject="*urgent*",
+            subject_match_type=MATCH_TYPE_WILDCARD,
+            target_priority=3,
+        )
+        matched = find_matching_rule(
+            sender_email="ceo@vip.com",
+            subject="Very urgent problem",
+            body="System down",
+        )
+        self.assertIsNotNone(matched)
+        self.assertEqual(matched.pk, enabled.pk)
+        self.assertNotEqual(matched.pk, disabled.pk)
+
+    def test_disabled_rule_skipped_even_if_would_match(self):
+        """A disabled rule sits first in order but is completely skipped."""
+        EmailRoutingRule.objects.create(
+            name="Disabled high priority",
+            order=0,
+            enabled=False,
+            sender_email="ceo@company.com",
+            sender_match_type=MATCH_TYPE_EXACT,
+            target_priority=1,
+        )
+        next_rule = EmailRoutingRule.objects.create(
+            name="Enabled fallback",
+            order=5,
+            enabled=True,
+            sender_email="*@company.com",
+            sender_match_type=MATCH_TYPE_WILDCARD,
+            target_priority=3,
+        )
+        matched = find_matching_rule(
+            sender_email="ceo@company.com",
+            subject="Hello",
+            body="Hello",
+        )
+        self.assertEqual(matched.pk, next_rule.pk)
+
+    # -------- apply_routing() degradation with all rules disabled --------
+
+    def test_all_rules_disabled_bypass_log_matches_zero_rules_format(self):
+        """
+        When all existing rules are disabled the bypass log must be identical
+        in format (bypass_type, matched_rule, etc.) to the case when zero
+        rules exist in the database at all.  The only allowed difference is
+        total_rules_evaluated and rule_diagnostics contents.
+        """
+        # --- Phase A: zero rules in DB ---
+        with self.assertLogs("helpdesk.routing", level="WARNING") as caplog_a:
+            with self.assertRaises(BypassTicketException):
+                apply_routing(
+                    {"queue": self.q, "priority": 3},
+                    sender_email="a@b.com",
+                    subject="Hello",
+                    body="body",
+                    queue=self.q,
+                    bypass_on_no_match=True,
+                )
+        log_a = self._find_log_by_event(
+            self._grab_routing_logs(caplog_a), "email_routing_bypass"
+        )
+        msg_a = log_a.getMessage()
+
+        # --- Phase B: same rules all exist but disabled ---
+        EmailRoutingRule.objects.create(
+            name="R1", order=1, enabled=False,
+            sender_email="*@x.com", sender_match_type=MATCH_TYPE_WILDCARD,
+        )
+        EmailRoutingRule.objects.create(
+            name="R2", order=2, enabled=False,
+            subject="*urgent*", subject_match_type=MATCH_TYPE_WILDCARD,
+        )
+        with self.assertLogs("helpdesk.routing", level="WARNING") as caplog_b:
+            with self.assertRaises(BypassTicketException):
+                apply_routing(
+                    {"queue": self.q, "priority": 3},
+                    sender_email="a@b.com",
+                    subject="Hello",
+                    body="body",
+                    queue=self.q,
+                    bypass_on_no_match=True,
+                )
+        log_b = self._find_log_by_event(
+            self._grab_routing_logs(caplog_b), "email_routing_bypass"
+        )
+        msg_b = log_b.getMessage()
+
+        # --- Compare all fields that MUST be identical ---
+        for key in ("event", "bypass_type", "sender", "subject", "queue",
+                    "matched_rule", "matched_rule_id"):
+            self.assertEqual(
+                self._get_field_from_msg(msg_a, key),
+                self._get_field_from_msg(msg_b, key),
+                f"Field '{key}' differs between zero-rules and all-disabled bypass",
+            )
+        # bypass_type must be no_matching_rule (NOT rule_explicit_bypass)
+        self.assertEqual(
+            self._get_field_from_msg(msg_b, "bypass_type"),
+            "no_matching_rule",
+        )
+        # ... but total_rules_evaluated MUST differ (proves disabled rules were walked)
+        self.assertEqual(
+            self._get_field_from_msg(msg_a, "total_rules_evaluated"), "0"
+        )
+        self.assertEqual(
+            self._get_field_from_msg(msg_b, "total_rules_evaluated"), "2"
+        )
+
+    def test_disabled_bypass_rule_does_not_emit_explicit_bypass(self):
+        """
+        A rule marked both `bypass=True` AND `enabled=False` must NOT
+        trigger a rule_explicit_bypass event.  It must degrade to a regular
+        no_matching_rule bypass (or fall through to later enabled rules).
+        """
+        EmailRoutingRule.objects.create(
+            name="Disabled bypass spam",
+            order=1,
+            enabled=False,
+            subject="*spam*",
+            subject_match_type=MATCH_TYPE_WILDCARD,
+            bypass=True,
+        )
+        with self.assertLogs("helpdesk.routing", level="WARNING") as caplog:
+            with self.assertRaises(BypassTicketException):
+                apply_routing(
+                    {"queue": self.q, "priority": 3},
+                    sender_email="s@evil.com",
+                    subject="Buy this spam now",
+                    body="spam",
+                    queue=self.q,
+                    bypass_on_no_match=True,
+                )
+        log = self._find_log_by_event(
+            self._grab_routing_logs(caplog), "email_routing_bypass"
+        )
+        self.assertIsNotNone(log)
+        self.assertEqual(
+            self._get_field_from_msg(log.getMessage(), "bypass_type"),
+            "no_matching_rule",
+        )
+        self.assertEqual(
+            self._get_field_from_msg(log.getMessage(), "matched_rule"),
+            "",
+        )
+
+    # -------- collect_routing_diagnostics() with disabled rules --------
+
+    def test_diagnostics_lists_disabled_rules_with_rule_disabled_reason(self):
+        r1 = EmailRoutingRule.objects.create(
+            name="R1", order=1, enabled=False,
+            sender_email="*@x.com", sender_match_type=MATCH_TYPE_WILDCARD,
+        )
+        r2 = EmailRoutingRule.objects.create(
+            name="R2", order=2, enabled=True,
+            sender_email="*@x.com", sender_match_type=MATCH_TYPE_WILDCARD,
+        )
+        matched, total, diags = collect_routing_diagnostics(
+            "ceo@x.com", "s", "b",
+        )
+        # Even though R1 matches the pattern it must be skipped due to disabled
+        # → R2 is the match.  BUT we stop at the first match, so only R1 is
+        # in the diagnostic list (R2 never got evaluated).
+        #
+        # However: current implementation stops on FIRST HIT, so R1 (disabled)
+        # returns False from matches() (since enabled check is inside matches),
+        # and is added to diags as a miss.  Then R2 is evaluated and added
+        # as hit. So total should be 2.
+        self.assertEqual(total, 2)
+        self.assertEqual(len(diags), 2)
+        self.assertFalse(diags[0]["matched"])
+        self.assertIn("rule_disabled", diags[0]["reasons"])
+        self.assertTrue(diags[1]["matched"])
+        self.assertEqual(diags[1]["rule_id"], r2.pk)
+
+    # -------- Mix of disabled / enabled / bypass rules --------
+
+    def test_mix_disabled_enabled_explicit_bypass(self):
+        """
+        Scenario:
+          order=1: disabled rule (matches sender)
+          order=2: enabled rule (matches nothing)
+          order=3: enabled rule with bypass=True (matches subject)
+        Expected: matches order=3 with rule_explicit_bypass bypass type.
+        """
+        EmailRoutingRule.objects.create(
+            name="Disabled VIP", order=1, enabled=False,
+            sender_email="*@vip.com", sender_match_type=MATCH_TYPE_WILDCARD,
+        )
+        EmailRoutingRule.objects.create(
+            name="Unrelated", order=2, enabled=True,
+            subject="*nope*", subject_match_type=MATCH_TYPE_WILDCARD,
+        )
+        bypass_rule = EmailRoutingRule.objects.create(
+            name="Marketing bypass", order=3, enabled=True,
+            subject="*free trial*", subject_match_type=MATCH_TYPE_WILDCARD,
+            bypass=True,
+        )
+        with self.assertLogs("helpdesk.routing", level="WARNING") as caplog:
+            with self.assertRaises(BypassTicketException) as ctx:
+                apply_routing(
+                    {"queue": self.q, "priority": 3},
+                    sender_email="sales@vip.com",
+                    subject="Claim your free trial",
+                    body="Click",
+                    queue=self.q,
+                    bypass_on_no_match=True,
+                )
+
+        self.assertEqual(ctx.exception.rule.pk, bypass_rule.pk)
+        self.assertEqual(ctx.exception.sender_email, "sales@vip.com")
+        self.assertEqual(ctx.exception.subject, "Claim your free trial")
+        log = self._find_log_by_event(
+            self._grab_routing_logs(caplog), "email_routing_bypass"
+        )
+        msg = log.getMessage()
+        self.assertEqual(
+            self._get_field_from_msg(msg, "bypass_type"),
+            "rule_explicit_bypass",
+        )
+        self.assertEqual(
+            self._get_field_from_msg(msg, "matched_rule"),
+            "Marketing bypass",
+        )
+        # 3 rules evaluated (disabled VIP → miss, unrelated → miss, marketing → hit+stop)
+        self.assertEqual(
+            self._get_field_from_msg(msg, "total_rules_evaluated"), "3"
+        )
+        # Disabled rule should be mentioned in diagnostics with rule_disabled
+        self.assertIn("Disabled VIP", msg)
+        self.assertIn("rule_disabled", msg)
+
+
+class RoutingDisabledIntegrationTests(TestCase):
+    """
+    Integration tests that exercise the full extract_email_metadata pipeline
+    with rules that are present but disabled.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.q = Queue.objects.create(
+            title="Test",
+            slug="test",
+            email_address="support@test.com",
+        )
+        cls.owner = User.objects.create_user(username="owner2", password="p")
+
+    def setUp(self):
+        EmailRoutingRule.objects.all().delete()
+
+    def _make_message(self, sender, subject, body):
+        from email.message import EmailMessage
+        msg = EmailMessage()
+        msg["From"] = sender
+        msg["To"] = "support@test.com"
+        msg["Subject"] = subject
+        msg.set_content(body)
+        return msg.as_string()
+
+    def _logger(self):
+        return logging.getLogger("helpdesk.test.disable")
+
+    def test_all_rules_disabled_bypass_on_raises(self):
+        """
+        Integration: All rules disabled + bypass_on_no_match=True →
+        BypassTicketException raised, not a ticket creation.
+        """
+        import helpdesk.settings as hs
+        orig = hs.HELPDESK_EMAIL_ROUTING_BYPASS_ON_NO_MATCH
+        hs.HELPDESK_EMAIL_ROUTING_BYPASS_ON_NO_MATCH = True
+        try:
+            EmailRoutingRule.objects.create(
+                name="Disabled everything-catcher",
+                order=1,
+                enabled=False,
+                sender_email="*",
+                sender_match_type=MATCH_TYPE_WILDCARD,
+                target_owner=self.owner,
+            )
+            from helpdesk.email import extract_email_metadata
+            msg = self._make_message("a@b.com", "Disabled rule test", "Body")
+            with self.assertRaises(BypassTicketException) as ctx:
+                extract_email_metadata(message=msg, queue=self.q, logger=self._logger())
+            self.assertEqual(ctx.exception.sender_email, "a@b.com")
+            # No rule attached (degraded to "no matching rule")
+            self.assertIsNone(ctx.exception.rule)
+        finally:
+            hs.HELPDESK_EMAIL_ROUTING_BYPASS_ON_NO_MATCH = orig
+
+    def test_disabled_rule_not_applied_to_created_ticket(self):
+        """
+        Integration: All rules disabled + bypass_on_no_match=False → ticket
+        is created using default payload, WITHOUT the disabled rule's targets.
+        """
+        import helpdesk.settings as hs
+        orig = hs.HELPDESK_EMAIL_ROUTING_BYPASS_ON_NO_MATCH
+        hs.HELPDESK_EMAIL_ROUTING_BYPASS_ON_NO_MATCH = False
+        try:
+            EmailRoutingRule.objects.create(
+                name="Disabled priority rule",
+                order=1,
+                enabled=False,
+                sender_email="*",
+                sender_match_type=MATCH_TYPE_WILDCARD,
+                target_priority=1,
+                target_owner=self.owner,
+            )
+            from helpdesk.email import extract_email_metadata
+            msg = self._make_message("a@b.com", "Hello", "Body")
+            ticket = extract_email_metadata(
+                message=msg, queue=self.q, logger=self._logger()
+            )
+            self.assertIsNotNone(ticket)
+            # Default priority is 3, NOT the disabled-rule value of 1
+            self.assertEqual(ticket.priority, 3)
+            # No owner assigned
+            self.assertIsNone(ticket.assigned_to)
+            # Assigned to the original queue, not a target
+            self.assertEqual(ticket.queue, self.q)
+        finally:
+            hs.HELPDESK_EMAIL_ROUTING_BYPASS_ON_NO_MATCH = orig
+
+
 class RoutingApplyToPayloadTests(TestCase):
     """Test the apply_to_payload method respects bypass and target fields."""
 

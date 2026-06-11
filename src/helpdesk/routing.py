@@ -145,7 +145,9 @@ def collect_routing_diagnostics(
     queue: Optional[Queue] = None,
 ) -> Tuple[Optional[EmailRoutingRule], int, List[Dict]]:
     """
-    Walk all enabled rules with per-rule diagnostics.
+    Walk **all** rules (enabled and disabled) with per-rule diagnostics.
+    Disabled rules are included with ``"rule_disabled"`` reason so that
+    operators can see the full evaluation trail.
 
     :return: ``(matched_rule, total_rules_evaluated, rule_diags)``
              where ``rule_diags`` is a list of dicts like:
@@ -156,8 +158,8 @@ def collect_routing_diagnostics(
     matched_rule: Optional[EmailRoutingRule] = None
     total = 0
 
-    rules = EmailRoutingRule.objects.filter(enabled=True).order_by("order", "id")
-    for rule in rules.iterator():
+    rules = EmailRoutingRule.objects.order_by("order", "id").iterator()
+    for rule in rules:
         total += 1
         matched, reasons = _diag_check_rule(
             rule, sender_email, subject, body, queue
