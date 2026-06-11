@@ -974,6 +974,655 @@ class EscalationCycleTestCase(TestCase):
         self.assertEqual(ticket3.followup_set.count(), 0)
 
 
+class EscalationTimeBoundaryTestCase(TestCase):
+    """Test escalation time boundary cases: DST transitions, year/month rollovers, timezone mismatches."""
+
+    fixtures = ["emailtemplate.json"]
+
+    def setUp(self):
+        super().setUp()
+        self.queue = Queue.objects.create(
+            title="Boundary Test Queue",
+            slug="boundary-test",
+            escalate_days=2,
+        )
+        self.user = User.objects.create(
+            username="boundary_user",
+            is_staff=True,
+        )
+
+    # =========================================================================
+    # Daylight Saving Time transitions
+    #
+    # America/New_York 2024 DST:
+    #   SPRING FORWARD: Mar 10, 2024, 2:00 AM -> 3:00 AM (23-hour day)
+    #   FALL BACK:     Nov 3,  2024, 2:00 AM -> 1:00 AM (25-hour day)
+    # =========================================================================
+
+    @override_settings(USE_TZ=True, TIME_ZONE="America/New_York")
+    def test_escalation_spring_forward_dst_boundary_ticket_created_before(self):
+        """Test escalation across spring-forward DST, ticket created BEFORE transition.
+
+        DST Spring Forward 2024 (America/New_York):
+          - Saturday,  Mar 9:  normal 24-hour day
+          - Sunday,    Mar 10: 23-hour day (2am jumps to 3am)
+          - Monday,    Mar 11: normal 24-hour day
+
+        Timeline:
+          - escalate_days: 2
+          - ticket created: Fri Mar 8, 10:00 AM EST (15:00 UTC)
+          - mock today:     Mon Mar 11
+
+        Escalation logic (using LOCAL dates, since date.today() is timezone-naive local):
+          - last = Mar 11 - 2 days = Mar 9
+          - Iterate dates [Mar 9, Mar 10]:
+              Mar 9 (Sat): no exclusion, days=1
+              Mar 10 (Sun, DST day): no exclusion record, days=2
+          - days = 2
+          - req_last_escl_date = Mar 11 10:00 - 2 days = Mar 9 10:00
+            (Note: 'now' is mocked to Mar 11 10:00 local = Mar 11 14:00 UTC)
+          - Ticket created Mar 8 10:00 EST (15:00 UTC) <= Mar 9 10:00 EST? YES
+          - Ticket SHOULD escalate.
+
+        The key check here is that the 23-hour day (Mar 10) does NOT cause
+        us to miscount working days - the calendar date Mar 10 must still
+        count as exactly one working-day-or-not regardless of its length.
+        """
+        ny_tz = pytz.timezone("America/New_York")
+
+        ticket = create_ticket_with_created_date(
+            created_date=ny_tz.localize(datetime(2024, 3, 8, 10, 0, 0)),
+            queue=self.queue,
+            title="Pre-DST Transition Ticket",
+            description="Created before spring-forward DST",
+            priority=3,
+            status=Ticket.OPEN_STATUS,
+        )
+
+        with patch_escalation_datetime(
+            date(2024, 3, 11),
+            datetime(2024, 3, 11, 10, 0, 0),
+        ):
+            call_command("escalate_tickets")
+
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.priority, 2)
+        self.assertIsNotNone(ticket.last_escalation)
+
+    @override_settings(USE_TZ=True, TIME_ZONE="America/New_York")
+    def test_escalation_spring_forward_dst_boundary_ticket_created_on_transition(self):
+        """Test escalation when ticket created ON the 23-hour spring-forward day.
+
+        Ticket created Sunday Mar 10 at 10:00 AM EDT (14:00 UTC) — the
+        23-hour DST day. escalate_days=2, mock today=Wed Mar 13.
+
+        Escalation logic:
+          - last = Mar 13 - 2 days = Mar 11
+          - Dates [Mar 11, Mar 12]:
+              Mar 11 (Mon): days=1
+              Mar 12 (Tue): days=2
+          - days=2
+          - req_last_escl_date = Mar 13 10:00 - 2 days = Mar 11 10:00
+          - Ticket created Mar 10 10:00 EDT (14:00 UTC) <= Mar 11 10:00 EDT? YES
+          - SHOULD escalate.
+
+        The bug to guard against: if we used naive datetime arithmetic that
+        confused 24-hour vs 23-hour calendar days when subtracting
+        timedelta(days=2) from a DST datetime, the comparison threshold
+        would be off and we'd incorrectly skip the escalation.
+        """
+        ny_tz = pytz.timezone("America/New_York")
+
+        ticket = create_ticket_with_created_date(
+            created_date=ny_tz.localize(datetime(2024, 3, 10, 10, 0, 0)),
+            queue=self.queue,
+            title="DST-Day Ticket",
+            description="Created ON the spring-forward 23-hour day",
+            priority=4,
+            status=Ticket.OPEN_STATUS,
+        )
+
+        with patch_escalation_datetime(
+            date(2024, 3, 13),
+            datetime(2024, 3, 13, 10, 0, 0),
+        ):
+            call_command("escalate_tickets")
+
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.priority, 3)
+        self.assertIsNotNone(ticket.last_escalation)
+
+        # Audit trail check
+        followup = ticket.followup_set.latest("date")
+        self.assertEqual(followup.title, _("Ticket Escalated"))
+        ticket_change = followup.ticketchange_set.latest("id")
+        self.assertEqual(int(ticket_change.old_value), 4)
+        self.assertEqual(int(ticket_change.new_value), 3)
+
+    @override_settings(USE_TZ=True, TIME_ZONE="America/New_York")
+    def test_escalation_fall_back_dst_25_hour_day(self):
+        """Test escalation across fall-back DST, 25-hour day.
+
+        DST Fall Back 2024 (America/New_York):
+          - Saturday, Nov 2:  normal 24-hour day
+          - Sunday,   Nov 3:  25-hour day (2am repeats as 1am)
+          - Monday,   Nov 4:  normal 24-hour day
+
+        Ticket created Fri Nov 1 10:00 AM EDT. escalate_days=2, mock today=Mon Nov 4.
+
+        Escalation logic:
+          - last = Nov 4 - 2 days = Nov 2
+          - Dates [Nov 2, Nov 3]:
+              Nov 2 (Sat): no exclusion, days=1
+              Nov 3 (Sun, 25-hr day): no exclusion record, days=2
+          - days=2
+          - req_last_escl_date = Nov 4 10:00 - 2 days = Nov 2 10:00
+          - Ticket created Nov 1 10:00 EDT <= Nov 2 10:00? YES
+          - SHOULD escalate.
+
+        Critical guard: even though Nov 3 has an EXTRA hour and subtracting
+        2*24h from the mock "now" would land in a different wall-clock hour
+        than a naive calendar subtraction, we must still count exactly
+        2 calendar working-days and trigger correctly.
+        """
+        ny_tz = pytz.timezone("America/New_York")
+
+        ticket = create_ticket_with_created_date(
+            created_date=ny_tz.localize(datetime(2024, 11, 1, 10, 0, 0)),
+            queue=self.queue,
+            title="Pre Fall-Back Ticket",
+            description="Created before fall-back 25-hour day",
+            priority=3,
+            status=Ticket.OPEN_STATUS,
+        )
+
+        with patch_escalation_datetime(
+            date(2024, 11, 4),
+            datetime(2024, 11, 4, 10, 0, 0),
+        ):
+            call_command("escalate_tickets")
+
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.priority, 2)
+
+    @override_settings(USE_TZ=True, TIME_ZONE="America/New_York")
+    def test_escalation_dst_transition_with_exclusion(self):
+        """Test escalation with an exclusion on a DST transition weekend day.
+
+        Spring Forward 2024 weekend:
+          - Exclusion set on Sunday Mar 10 (the 23-hour DST day)
+          - Ticket created Friday Mar 8 10:00 AM
+          - escalate_days=2, mock today=Tuesday Mar 12
+
+        Escalation logic:
+          - last = Mar 12 - 2 days = Mar 10
+          - Dates [Mar 10, Mar 11]:
+              Mar 10 (Sun): EXCLUDED (explicit exclusion)
+              Mar 11 (Mon): days=1
+          - days=1  (NOT 2 — the exclusion ate one slot)
+          - req_last_escl_date = Mar 12 10:00 - 1 day = Mar 11 10:00
+          - Ticket created Mar 8 10:00 EST (15:00 UTC) <= Mar 11 10:00 EST? YES
+          - Wait, that'd still escalate!
+
+        To guarantee NO escalation we need:
+          - Ticket created later. Use Mar 11 11:00 AM instead.
+          - req_last_escl_date = Mar 12 10:00 - 1 day = Mar 11 10:00
+          - Created Mar 11 11:00 AM > 10:00 threshold → NO escalation.
+        """
+        ny_tz = pytz.timezone("America/New_York")
+
+        EscalationExclusion.objects.create(
+            name="DST Sunday Off",
+            date=date(2024, 3, 10),
+        )
+
+        ticket = create_ticket_with_created_date(
+            created_date=ny_tz.localize(datetime(2024, 3, 11, 11, 0, 0)),
+            queue=self.queue,
+            title="Monday After DST",
+            description="Exclusion + DST combined",
+            priority=3,
+            status=Ticket.OPEN_STATUS,
+        )
+
+        with patch_escalation_datetime(
+            date(2024, 3, 12),
+            datetime(2024, 3, 12, 10, 0, 0),
+        ):
+            call_command("escalate_tickets")
+
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.priority, 3)
+        self.assertIsNone(ticket.last_escalation)
+
+    # =========================================================================
+    # Year rollover & month rollover
+    # =========================================================================
+
+    def test_escalation_year_rollover_with_holiday_exclusions(self):
+        """Test escalation across Dec → Jan year boundary with holiday exclusions.
+
+        Scenario (holiday season):
+          - escalate_days=3 (overridden on this queue)
+          - Exclusions: Dec 31 (New Year's Eve), Jan 1 (New Year's Day)
+          - mock today=Friday Jan 3, 2025
+          - Ticket created Monday Dec 23, 2024 09:00
+
+        Escalation logic:
+          - last = Jan 3 - 3 days = Dec 31, 2024
+          - Dates [Dec 31, Jan 1, Jan 2]:
+              Dec 31 (Tue): EXCLUDED (New Year's Eve)
+              Jan  1 (Wed): EXCLUDED (New Year's Day)
+              Jan  2 (Thu): days=1
+          - days = 1
+          - req_last_escl_date = Jan 3 10:00 - 1 day = Jan 2 10:00
+          - Ticket created Dec 23 09:00 <= Jan 2 10:00 → YES
+          - SHOULD escalate 3 → 2
+
+        Critical boundary: exclusion rows in two different calendar years (2024 and
+        2025) must both be found by the date lookup and correctly exclude days.
+        """
+        self.queue.escalate_days = 3
+        self.queue.save()
+
+        EscalationExclusion.objects.create(
+            name="New Year's Eve 2024",
+            date=date(2024, 12, 31),
+        )
+        EscalationExclusion.objects.create(
+            name="New Year's Day 2025",
+            date=date(2025, 1, 1),
+        )
+
+        ticket = create_ticket_with_created_date(
+            created_date=timezone.make_aware(datetime(2024, 12, 23, 9, 0, 0)),
+            queue=self.queue,
+            title="Year-End Ticket",
+            description="Spans year rollover with holidays",
+            priority=3,
+            status=Ticket.OPEN_STATUS,
+        )
+
+        with patch_escalation_datetime(date(2025, 1, 3)):
+            call_command("escalate_tickets")
+
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.priority, 2)
+        self.assertIsNotNone(ticket.last_escalation)
+
+        # The followup comment records escalate_days (3), not the counted days (1)
+        followup = ticket.followup_set.latest("date")
+        self.assertIn("3 days", followup.comment)
+        ticket_change = followup.ticketchange_set.latest("id")
+        self.assertEqual(ticket_change.field, _("Priority"))
+        self.assertEqual(int(ticket_change.old_value), 3)
+        self.assertEqual(int(ticket_change.new_value), 2)
+
+    def test_escalation_year_rollover_no_escalation_on_fresh_ticket(self):
+        """Verify a recently-created ticket does NOT escalate on Jan 2.
+
+        Setup: escalate_days=3, exclusions on Dec 31 and Jan 1.
+        mock today = Jan 2, 10:00.
+
+        Escalation logic:
+          - last = Jan 2 - 3 days = Dec 30, 2024
+          - Dates [Dec 30, Dec 31, Jan 1]:
+              Dec 30 (Mon): days=1
+              Dec 31 (Tue): EXCLUDED
+              Jan  1 (Wed): EXCLUDED
+          - days = 1
+          - req_last_escl_date = Jan 2 10:00 - 1 day = Jan 1 10:00
+          - Ticket created Jan 1 11:00 > Jan 1 10:00 → NO escalation.
+
+        The edge: a ticket created literally on the holiday at 11am must not
+        be treated as "old enough" when only one calendar slot counted as a
+        working day because of the exclusions.
+        """
+        self.queue.escalate_days = 3
+        self.queue.save()
+
+        EscalationExclusion.objects.create(
+            name="New Year's Eve 2024",
+            date=date(2024, 12, 31),
+        )
+        EscalationExclusion.objects.create(
+            name="New Year's Day 2025",
+            date=date(2025, 1, 1),
+        )
+
+        ticket = create_ticket_with_created_date(
+            created_date=timezone.make_aware(datetime(2025, 1, 1, 11, 0, 0)),
+            queue=self.queue,
+            title="New Year Ticket",
+            description="Created on holiday",
+            priority=3,
+            status=Ticket.OPEN_STATUS,
+        )
+
+        with patch_escalation_datetime(date(2025, 1, 2)):
+            call_command("escalate_tickets")
+
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.priority, 3)
+        self.assertIsNone(ticket.last_escalation)
+
+    def test_escalation_month_rollover_with_exclusions(self):
+        """Test escalation across Jan 31 → Feb 1 month boundary.
+
+        Setup:
+          - escalate_days=3, mock today=Mon Feb 3
+          - Exclusion: Fri Jan 31 (company inventory day)
+          - Ticket created Tue Jan 28 09:30
+
+        Escalation logic:
+          - last = Feb 3 - 3 days = Jan 31
+          - Dates [Jan 31, Feb 1, Feb 2]:
+              Jan 31 (Fri): EXCLUDED → skip
+              Feb 1 (Sat): no exclusion → days=1
+              Feb 2 (Sun): no exclusion → days=2
+          - days = 2 (less than escalate_days=3; days cap at actual count of 2)
+          - req_last_escl_date = Feb 3 10:00 - 2 days = Feb 1 10:00
+          - Ticket created Jan 28 09:30 <= Feb 1 10:00 → YES
+          - SHOULD escalate 3 → 2
+
+        Guard against: the lookup for Jan 31 (different month) and
+        Feb 1/2 (next month) both returning correct exclusion rows.
+        """
+        self.queue.escalate_days = 3
+        self.queue.save()
+
+        EscalationExclusion.objects.create(
+            name="Inventory Day",
+            date=date(2025, 1, 31),
+        )
+
+        ticket = create_ticket_with_created_date(
+            created_date=timezone.make_aware(datetime(2025, 1, 28, 9, 30, 0)),
+            queue=self.queue,
+            title="Month-End Ticket",
+            description="Spans Jan → Feb boundary",
+            priority=3,
+            status=Ticket.OPEN_STATUS,
+        )
+
+        with patch_escalation_datetime(date(2025, 2, 3)):
+            call_command("escalate_tickets")
+
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.priority, 2)
+
+    def test_escalation_february_leap_year_rollover(self):
+        """Test escalation over Feb 28/29 during a leap year with Feb 29 exclusion.
+
+        Leap Year 2024:
+          - escalate_days=2, mock today=Monday Mar 4
+          - Exclusion: Thursday Feb 29 (leap day company holiday)
+          - Ticket 1 created Tuesday Feb 27 09:00
+          - Ticket 2 created Friday Feb 23 09:00
+
+        Escalation logic:
+          - last = Mar 4 - 2 days = Mar 2
+          - Dates [Mar 2, Mar 3]:
+              Mar 2 (Sat): days=1
+              Mar 3 (Sun): days=2
+          - days=2
+          - req_last_escl_date = Mar 4 10:00 - 2 days = Mar 2 10:00
+          - Ticket 1 (Feb 27 09:00) <= Mar 2 10:00 → YES, escalate 3→2
+          - Ticket 2 (Feb 23 09:00) <= Mar 2 10:00 → YES, escalate 2→1
+
+        Extra check: exclusion on Feb 29 is NEVER consulted because the
+        algorithm only walks back from today - escalate_days. If someone
+        refactored the loop to start earlier, the Feb 29 exclusion would
+        wrongly eat a day — this test locks in the START-of-range behavior.
+        """
+        EscalationExclusion.objects.create(
+            name="Leap Day Off",
+            date=date(2024, 2, 29),
+        )
+
+        ticket1 = create_ticket_with_created_date(
+            created_date=timezone.make_aware(datetime(2024, 2, 27, 9, 0, 0)),
+            queue=self.queue,
+            title="Pre-Leap-Day Ticket",
+            description="Created Tue before leap-day exclusion",
+            priority=3,
+            status=Ticket.OPEN_STATUS,
+        )
+        ticket2 = create_ticket_with_created_date(
+            created_date=timezone.make_aware(datetime(2024, 2, 23, 9, 0, 0)),
+            queue=self.queue,
+            title="Older Ticket",
+            description="Created Fri before leap week",
+            priority=2,
+            status=Ticket.OPEN_STATUS,
+        )
+
+        with patch_escalation_datetime(date(2024, 3, 4)):
+            call_command("escalate_tickets")
+
+        ticket1.refresh_from_db()
+        ticket2.refresh_from_db()
+
+        self.assertEqual(ticket1.priority, 2)
+        self.assertEqual(ticket2.priority, 1)
+
+    # =========================================================================
+    # Server timezone vs. ticket-creation timezone
+    # =========================================================================
+
+    @override_settings(USE_TZ=True, TIME_ZONE="UTC")
+    def test_escalation_server_utc_ticket_created_in_shanghai_tz_early_morning(self):
+        """Server runs UTC; ticket created in Shanghai (UTC+8) near midnight.
+
+        Date-boundary mismatch case:
+          - Ticket created: 2024-06-10 07:30 Shanghai = 2024-06-09 23:30 UTC
+            → In Shanghai, it's MONDAY morning June 10
+            → In server UTC,   it's SUNDAY  night   June  9
+
+        escalate_days=2, mock today (UTC date): June 11 → local server date June 11.
+
+        Escalation logic uses server-local date.today() = June 11:
+          - last = June 11 - 2 days = June 9
+          - Dates [June 9, June 10]:
+              June 9 (Sun): no exclusion → days=1
+              June 10 (Mon): no exclusion → days=2
+          - days=2
+          - req_last_escl_date = June 11 10:00 UTC - 2 days = June 9 10:00 UTC
+          - ticket.created stored as June 9 23:30 UTC. Is that <= June 9 10:00 UTC?
+            NO. → Ticket must NOT escalate.
+
+        Even though the user *perceives* the ticket as being opened on Monday
+        business hours June 10, on the server timeline it was filed Sunday
+        night and is therefore too new to trigger escalation by June 11 10:00 UTC.
+        """
+        shanghai_tz = pytz.timezone("Asia/Shanghai")
+
+        # 07:30 June 10 Shanghai → 23:30 June 9 UTC
+        shanghai_time = shanghai_tz.localize(datetime(2024, 6, 10, 7, 30, 0))
+        ticket = create_ticket_with_created_date(
+            created_date=shanghai_time,
+            queue=self.queue,
+            title="Shanghai Early Morning Ticket",
+            description="Server sees Sunday night; user sees Monday morning",
+            priority=3,
+            status=Ticket.OPEN_STATUS,
+        )
+
+        # Sanity check the timezone math — convert to UTC and read the .date()
+        utc_created = ticket.created.astimezone(pytz.UTC)
+        self.assertEqual(utc_created.date(), date(2024, 6, 9),
+                         "Ticket created UTC date should be June 9, not June 10")
+
+        with patch_escalation_datetime(
+            date(2024, 6, 11),
+            datetime(2024, 6, 11, 10, 0, 0),
+        ):
+            call_command("escalate_tickets")
+
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.priority, 3,
+                         "Ticket should NOT escalate — created Sunday UTC, too new")
+        self.assertIsNone(ticket.last_escalation)
+
+    @override_settings(USE_TZ=True, TIME_ZONE="UTC")
+    def test_escalation_server_utc_ticket_shanghai_evening_flips_day_boundary(self):
+        """Server UTC; ticket created Shanghai evening → next day UTC.
+
+        Opposite edge case:
+          - Ticket created: 2024-06-10 22:00 Shanghai = 2024-06-10 14:00 UTC
+            → Both sides agree it's June 10.
+
+        escalate_days=2, mock today=June 12 10:00 UTC.
+
+        Escalation:
+          - last = June 12 - 2 days = June 10
+          - Dates [June 10, June 11]:
+              June 10 (Mon): days=1
+              June 11 (Tue): days=2
+          - req_last_escl_date = June 12 10:00 - 2 days = June 10 10:00 UTC
+          - Ticket created June 10 14:00 UTC > June 10 10:00 → NO escalation.
+
+        Now move ticket one day EARLIER (June 9 Shanghai evening → June 9 14:00 UTC)
+        and it SHOULD escalate.
+        """
+        shanghai_tz = pytz.timezone("Asia/Shanghai")
+
+        # Case A: too recent, must NOT escalate
+        ticket_too_new = create_ticket_with_created_date(
+            created_date=shanghai_tz.localize(datetime(2024, 6, 10, 22, 0, 0)),
+            queue=self.queue,
+            title="Shanghai Evening — Too New",
+            description="June 10 22:00 CST = 14:00 UTC same day",
+            priority=3,
+            status=Ticket.OPEN_STATUS,
+        )
+
+        # Case B: one day earlier, SHOULD escalate
+        ticket_old_enough = create_ticket_with_created_date(
+            created_date=shanghai_tz.localize(datetime(2024, 6, 9, 22, 0, 0)),
+            queue=self.queue,
+            title="Shanghai Evening — Old Enough",
+            description="June 9 22:00 CST = June 9 14:00 UTC",
+            priority=4,
+            status=Ticket.OPEN_STATUS,
+        )
+
+        with patch_escalation_datetime(
+            date(2024, 6, 12),
+            datetime(2024, 6, 12, 10, 0, 0),
+        ):
+            call_command("escalate_tickets")
+
+        ticket_too_new.refresh_from_db()
+        ticket_old_enough.refresh_from_db()
+
+        self.assertEqual(ticket_too_new.priority, 3)
+        self.assertIsNone(ticket_too_new.last_escalation)
+
+        self.assertEqual(ticket_old_enough.priority, 3)
+        self.assertIsNotNone(ticket_old_enough.last_escalation)
+
+    @override_settings(USE_TZ=True, TIME_ZONE="America/Los_Angeles")
+    def test_escalation_server_pacific_ticket_europe_date_boundary(self):
+        """Server runs Pacific time; ticket created in Berlin (UTC+1 / UTC+2 DST).
+
+        Summer 2024 — Europe observes CEST (UTC+2).
+
+        Ticket scenario:
+          - Created in Berlin:  2024-06-11 01:00 CEST = 2024-06-10 23:00 UTC
+            → Berlin sees June 11 Tuesday early morning
+            → UTC sees    June 10 Monday late night
+            → LA server:  2024-06-10 16:00 PDT (Monday afternoon)
+
+        escalate_days=1.
+
+        The core test idea: date.today() runs in LOCAL server time. For the
+        comparison we call timezone.now() → returns UTC internally, then we
+        subtract days and compare against the stored-UTC created datetime.
+
+        We want the ticket to NOT escalate, so we need ticket.created >
+        req_last_escl_date. We use mock today = June 10 LA (Monday).
+
+        Escalation with today = Monday June 10, LA local:
+          - last = June 10 - 1 day = June 9
+          - Dates [June 9]:
+              June 9 (Sun LA local): days=1
+          - days=1
+          - mock "now" = June 10 10:00 PDT = June 10 17:00 UTC
+          - req_last_escl_date = June 10 17:00 UTC - 1 day = June 9 17:00 UTC
+
+        Now let's pick a ticket creation time that sits JUST after that
+        threshold on the Berlin user's timeline:
+          - Ticket created June 10 23:00 CEST = 21:00 UTC June 10
+            → Berlin sees June 10 late night
+            → UTC sees also June 10 evening
+            → req_last_escl_date is June 9 17:00 UTC
+            → 21:00 UTC June 10 comes AFTER 17:00 UTC June 9
+            → should NOT escalate.
+
+        Move ticket earlier on Berlin side but still pass threshold:
+          - Berlin June 9 19:00 CEST = 17:00 UTC June 9 → AT the threshold
+          - Berlin June 9 18:00 CEST = 16:00 UTC June 9 → BEFORE threshold
+            → SHOULD escalate.
+
+        So the two cases demonstrate the boundary:
+          - OLD ticket (June 9 18:00 Berlin = 16:00 UTC June 9) → escalates
+          - NEW ticket (June 10 23:00 Berlin = 21:00 UTC June 10) → no escalation
+        """
+        berlin_tz = pytz.timezone("Europe/Berlin")
+        la_tz = pytz.timezone("America/Los_Angeles")
+
+        # Override to 1 working day for fine-grained boundary testing
+        self.queue.escalate_days = 1
+        self.queue.save()
+
+        # Case A — OLD ticket: should escalate
+        ticket_old = create_ticket_with_created_date(
+            created_date=berlin_tz.localize(datetime(2024, 6, 9, 18, 0, 0)),
+            queue=self.queue,
+            title="Berlin Old Ticket",
+            description="18:00 Berlin Sun = 16:00 UTC Sun = old enough",
+            priority=4,
+            status=Ticket.OPEN_STATUS,
+        )
+        # Sanity check old: should be June 9 16:00 UTC
+        old_utc = ticket_old.created.astimezone(pytz.UTC)
+        self.assertEqual(old_utc.date(), date(2024, 6, 9))
+        self.assertEqual(old_utc.hour, 16)
+
+        # Case B — NEW ticket: should NOT escalate
+        ticket_new = create_ticket_with_created_date(
+            created_date=berlin_tz.localize(datetime(2024, 6, 10, 23, 0, 0)),
+            queue=self.queue,
+            title="Berlin New Ticket",
+            description="23:00 Berlin Mon = 21:00 UTC Mon = still too new",
+            priority=3,
+            status=Ticket.OPEN_STATUS,
+        )
+        # Sanity check new: should be June 10 21:00 UTC
+        new_utc = ticket_new.created.astimezone(pytz.UTC)
+        self.assertEqual(new_utc.date(), date(2024, 6, 10))
+        self.assertEqual(new_utc.hour, 21)
+
+        # Mock today = June 10 (Monday LA). "now" = June 10 10:00 PDT = 17:00 UTC
+        mock_today_local = date(2024, 6, 10)
+        mock_now_local_10am = datetime(2024, 6, 10, 10, 0, 0)  # LA local 10am
+
+        with patch_escalation_datetime(mock_today_local, mock_now_local_10am):
+            call_command("escalate_tickets")
+
+        ticket_old.refresh_from_db()
+        ticket_new.refresh_from_db()
+
+        # Case A (16:00 UTC June 9 <= 17:00 UTC June 9): SHOULD escalate
+        self.assertEqual(ticket_old.priority, 3)
+        self.assertIsNotNone(ticket_old.last_escalation)
+
+        # Case B (21:00 UTC June 10 > 17:00 UTC June 9): should NOT escalate
+        self.assertEqual(ticket_new.priority, 3)
+        self.assertIsNone(ticket_new.last_escalation)
+
+
 class CombinedSLAAndEscalationTestCase(TestCase):
     """Test combined scenarios of SLA calculation and escalation cycles."""
 
