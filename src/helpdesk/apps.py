@@ -11,3 +11,21 @@ class HelpdeskConfig(AppConfig):
 
     def ready(self):
         from . import webhooks  # noqa: F401
+
+        from django.db.models.signals import post_delete
+        from .models import (
+            FollowUpAttachment,
+            KBIAttachment,
+            _delete_attachment_file,
+        )
+
+        post_delete.connect(
+            _delete_attachment_file,
+            sender=FollowUpAttachment,
+            weak=False,
+        )
+        post_delete.connect(
+            _delete_attachment_file,
+            sender=KBIAttachment,
+            weak=False,
+        )

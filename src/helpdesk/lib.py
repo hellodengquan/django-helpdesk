@@ -155,10 +155,10 @@ def process_attachments(followup, attached_files):
     attachments = []
     errors = set()
 
+    from helpdesk.models import FollowUpAttachment
+
     for attached in attached_files:
         if attached.size:
-            from helpdesk.models import FollowUpAttachment
-
             filename = smart_str(attached.name)
             att = FollowUpAttachment(
                 followup=followup,
@@ -173,14 +173,16 @@ def process_attachments(followup, attached_files):
                 att.full_clean()
             except ValidationError as e:
                 errors.add(e)
-            else:
-                att.save()
+                continue
 
-                if attached.size < max_email_attachment_size:
-                    # Only files smaller than 512kb (or as defined in
-                    # settings.HELPDESK_MAX_EMAIL_ATTACHMENT_SIZE) are sent via
-                    # email.
-                    attachments.append([filename, att.file])
+            try:
+                att.save()
+            except Exception:
+                logger.exception("Failed to save attachment: %s", filename)
+                continue
+
+            if att.size < max_email_attachment_size:
+                attachments.append([filename, att.file])
 
     if errors:
         raise ValidationError(list(errors))

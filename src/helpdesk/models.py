@@ -1255,6 +1255,28 @@ class Attachment(models.Model):
     def get_size(self):
         return self.file.file.size
 
+    def delete(self, *args, **kwargs):
+        """Delete the attachment and its associated file.
+        
+        Ensures that when an Attachment record is deleted from the database,
+        the corresponding file on the storage backend is also removed.
+        File deletion failures are logged but do not prevent the database
+        record from being deleted, to avoid data inconsistency.
+        """
+        import logging
+
+        logger = logging.getLogger("helpdesk")
+        try:
+            if self.file and self.file.name:
+                self.file.delete(save=False)
+        except Exception as e:
+            logger.warning(
+                "Failed to delete attachment file '%s': %s",
+                self.file.name if self.file else "unknown",
+                str(e),
+            )
+        return super(Attachment, self).delete(*args, **kwargs)
+
     def attachment_path(self, filename):
         """Provide a file path that will help prevent files being overwritten, by
         putting attachments in a folder off attachments for ticket/followup_id/.
@@ -2274,3 +2296,24 @@ class ChecklistTask(models.Model):
 
     def __str__(self):
         return self.description
+
+
+def _delete_attachment_file(sender, instance, **kwargs):
+    """Signal handler to delete the file associated with an attachment.
+
+    This handles cascade deletions and bulk deletes which don't call
+    the model's delete() method directly. File deletion failures are
+    silently ignored to ensure database operations can complete.
+    """
+    import logging
+
+    logger = logging.getLogger("helpdesk")
+    try:
+        if instance.file and instance.file.name:
+            instance.file.delete(save=False)
+    except Exception as e:
+        logger.warning(
+            "Failed to delete attachment file '%s' during signal handling: %s",
+            instance.file.name if instance.file else "unknown",
+            str(e),
+        )
