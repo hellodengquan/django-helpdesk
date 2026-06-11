@@ -60,7 +60,6 @@ from helpdesk.lib import (
     queue_template_context,
     safe_template_context,
     get_assignable_users,
-    calculate_sla_deadline,
     get_ticket_sla_status,
 )
 from helpdesk.models import (
@@ -2244,7 +2243,8 @@ def sla_alert(request):
     status_filter = request.GET.get('status', 'all')
 
     tickets = Ticket.objects.select_related('queue', 'assigned_to').filter(
-        queue__in=user_queues
+        queue__in=user_queues,
+        status__in=Ticket.OPEN_STATUSES,
     )
 
     if queue_filter:
@@ -2255,14 +2255,18 @@ def sla_alert(request):
             pass
 
     if assigned_to_filter:
-        if '-1' in assigned_to_filter:
-            tickets = tickets.filter(assigned_to__isnull=True)
-        else:
-            try:
-                user_ids = [int(u) for u in assigned_to_filter if u != '-1']
-                tickets = tickets.filter(assigned_to__id__in=user_ids)
-            except ValueError:
-                pass
+        try:
+            include_unassigned = '-1' in assigned_to_filter
+            user_ids = [int(u) for u in assigned_to_filter if u != '-1']
+            q_objects = Q()
+            if include_unassigned:
+                q_objects |= Q(assigned_to__isnull=True)
+            if user_ids:
+                q_objects |= Q(assigned_to__id__in=user_ids)
+            if q_objects:
+                tickets = tickets.filter(q_objects)
+        except ValueError:
+            pass
 
     if priority_filter:
         try:

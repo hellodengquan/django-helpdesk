@@ -294,12 +294,23 @@ def get_assignable_users(filter_staff: bool) -> QuerySet:
     return users.order_by(User.USERNAME_FIELD)
 
 
+def _today_date():
+    """Get today's date in a way that is compatible with freezegun and Django's timezone.
+
+    Uses timezone.now() which freezegun can patch, rather than date.today().
+    """
+    now = timezone.now()
+    if timezone.is_aware(now):
+        return timezone.localdate()
+    return now.date()
+
+
 def calculate_working_days(start_date, end_date):
     """Calculate the number of working days between start_date and end_date,
     excluding EscalationExclusion dates.
 
-    This matches the logic used in escalate_tickets.py management command.
-    Both start_date and end_date should be date objects (without time).
+    This matches the logic used in escalate_tickets.py management command exactly:
+    `while workdate < today` — meaning end_date is exclusive.
 
     IMPORTANT: For consistency with the escalate_tickets management command,
     EscalationExclusion dates are checked globally (not per-queue).
@@ -314,9 +325,11 @@ def calculate_working_days(start_date, end_date):
     from helpdesk.models import EscalationExclusion
 
     days = 0
-    current_date = start_date
+    sd = date(start_date.year, start_date.month, start_date.day)
+    ed = date(end_date.year, end_date.month, end_date.day)
+    current_date = sd
 
-    while current_date < end_date:
+    while current_date < ed:
         if not EscalationExclusion.objects.filter(date=current_date).exists():
             days += 1
         current_date = current_date + timedelta(days=1)
@@ -327,14 +340,27 @@ def calculate_working_days(start_date, end_date):
 def calculate_sla_deadline(ticket, from_datetime=None):
     """Calculate the SLA deadline for a ticket based on its queue's escalate_days.
 
-    This function mirrors the logic in escalate_tickets.py management command exactly:
-    - Uses date.today() for date calculations (local date boundary)
-    - Calculates working days by excluding EscalationExclusion dates
-    - Uses timezone.now() for the final datetime comparison
+    This function mirrors the logic in escalate_tickets.py management command exactly.
+
+    The management command runs at time T (now) and determines whether a ticket
+    originated at time O needs escalation:
+      1. today = T's calendar date
+      2. last = today - escalate_days (calendar days)
+      3. Count working days W in [last, today) excluding EscalationExclusion dates
+      4. req_last_escl_date = T - W (calendar day subtraction preserves time)
+      5. Ticket needs escalation iff O <= req_last_escl_date
+
+    The "deadline" for a ticket originated at O is the earliest D such that when
+    the management command runs at time D, it says the ticket needs escalation.
+    That is: find smallest D >= O with O <= D - W_D where
+    W_D = working_days_in([D.date - escalate_days, D.date)).
+
+    Without exclusions, W_D = escalate_days always, so D = O + escalate_days (exact
+    calendar-day addition preserving the time component), which matches the intuitive
+    expectation.
 
     IMPORTANT: For consistency with the escalate_tickets management command,
-    EscalationExclusion dates are checked globally (not per-queue), matching
-    the behavior of `EscalationExclusion.objects.filter(date=workdate).exists()`.
+    EscalationExclusion dates are checked globally (not per-queue).
 
     Args:
         ticket: Ticket object
@@ -354,23 +380,46 @@ def calculate_sla_deadline(ticket, from_datetime=None):
     if from_datetime is None:
         from_datetime = ticket.last_escalation if ticket.last_escalation else ticket.created
 
-    from_date = from_datetime.date() if hasattr(from_datetime, 'date') else from_datetime
-    from_time = from_datetime.time() if hasattr(from_datetime, 'time') else time(0, 0)
+    is_aware = timezone.is_aware(from_datetime)
 
-    workdate = from_date
-    working_days_count = 0
+    if is_aware:
+        tz = timezone.get_current_timezone()
+        origin_local = from_datetime.astimezone(tz)
+        origin_date = date(origin_local.year, origin_local.month, origin_local.day)
+        origin_time = origin_local.timetz()
+    else:
+        if hasattr(from_datetime, 'date'):
+            od = from_datetime.date()
+            origin_date = date(od.year, od.month, od.day)
+        else:
+            origin_date = date(from_datetime.year, from_datetime.month, from_datetime.day)
+        origin_time = from_datetime.time() if hasattr(from_datetime, 'time') else time(0, 0)
 
-    while working_days_count < queue.escalate_days:
-        if not EscalationExclusion.objects.filter(date=workdate).exists():
-            working_days_count += 1
-        if working_days_count < queue.escalate_days:
+    trial_date = origin_date
+
+    max_iterations = queue.escalate_days * 5 + 3650
+    for _ in range(max_iterations):
+        last = trial_date - timedelta(days=queue.escalate_days)
+        workdate = date(last.year, last.month, last.day)
+        working_days = 0
+        trial_start = date(trial_date.year, trial_date.month, trial_date.day)
+
+        while workdate < trial_start:
+            if not EscalationExclusion.objects.filter(date=workdate).exists():
+                working_days += 1
             workdate = workdate + timedelta(days=1)
 
-    deadline = datetime.combine(workdate, from_time)
+        req_origin_date = trial_start - timedelta(days=working_days)
+        if origin_date <= req_origin_date:
+            break
 
-    if timezone.is_aware(timezone.now()):
-        from django.utils.timezone import make_aware
-        deadline = make_aware(deadline)
+        trial_date = trial_date + timedelta(days=1)
+
+    deadline_date = date(trial_date.year, trial_date.month, trial_date.day)
+    deadline = datetime.combine(deadline_date, origin_time)
+
+    if is_aware and not timezone.is_aware(deadline):
+        deadline = timezone.make_aware(deadline)
 
     return deadline
 

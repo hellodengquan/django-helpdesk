@@ -859,8 +859,8 @@ class Ticket(models.Model):
 
     def save(self, *args, **kwargs):
         if not self.id:
-            # This is a new ticket as no ID yet exists.
-            self.created = timezone.now()
+            if not self.created:
+                self.created = timezone.now()
 
         if not self.priority:
             self.priority = 3
