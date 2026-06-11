@@ -789,3 +789,434 @@ class ManagementCommandPermissionTestCase(TransactionTestCase):
                 has_user_option,
                 f"Command '{cmd_name}' should have --user option"
             )
+
+
+class AnonymousUserPermissionTestCase(TestCase):
+    """
+    Boundary tests for anonymous (unauthenticated) user access.
+    Ensures anonymous users get empty or public-only queue sets
+    across all permission service entry points.
+    """
+
+    def setUp(self):
+        self.old_per_queue_setting = helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION
+        helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION = True
+
+        self.queue_private = Queue.objects.create(title="Private Q", slug="priv")
+        self.queue_public = Queue.objects.create(
+            title="Public Q", slug="pub", allow_public_submission=True
+        )
+
+        from django.contrib.auth.models import AnonymousUser
+        self.user_anon = AnonymousUser()
+
+    def tearDown(self):
+        helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION = self.old_per_queue_setting
+
+    def test_anonymous_is_authenticated(self):
+        """Anonymous user is not authenticated."""
+        huser = HelpdeskUser(self.user_anon)
+        self.assertFalse(huser.is_authenticated())
+
+    def test_anonymous_is_active(self):
+        """Anonymous user is not active."""
+        huser = HelpdeskUser(self.user_anon)
+        self.assertFalse(huser.is_active())
+
+    def test_anonymous_is_staff_default_config(self):
+        """Anonymous user is not staff under default config."""
+        original = helpdesk_settings.HELPDESK_ALLOW_NON_STAFF_TICKET_UPDATE
+        try:
+            helpdesk_settings.HELPDESK_ALLOW_NON_STAFF_TICKET_UPDATE = False
+            huser = HelpdeskUser(self.user_anon)
+            self.assertFalse(huser.is_staff())
+        finally:
+            helpdesk_settings.HELPDESK_ALLOW_NON_STAFF_TICKET_UPDATE = original
+
+    def test_anonymous_is_staff_allow_non_staff(self):
+        """Anonymous user is not staff even when HELPDESK_ALLOW_NON_STAFF_TICKET_UPDATE=True."""
+        original = helpdesk_settings.HELPDESK_ALLOW_NON_STAFF_TICKET_UPDATE
+        try:
+            helpdesk_settings.HELPDESK_ALLOW_NON_STAFF_TICKET_UPDATE = True
+            huser = HelpdeskUser(self.user_anon)
+            self.assertFalse(huser.is_staff())
+        finally:
+            helpdesk_settings.HELPDESK_ALLOW_NON_STAFF_TICKET_UPDATE = original
+
+    def test_anonymous_is_superuser(self):
+        """Anonymous user is never superuser."""
+        huser = HelpdeskUser(self.user_anon)
+        self.assertFalse(huser.is_superuser())
+
+    def test_anonymous_has_full_access_per_queue_enabled(self):
+        """Anonymous user has no full access when per-queue permission is enabled."""
+        huser = HelpdeskUser(self.user_anon)
+        self.assertFalse(huser.has_full_access())
+
+    def test_anonymous_get_queues_per_queue_enabled(self):
+        """Anonymous user sees only public queues when per-queue permission is enabled."""
+        huser = HelpdeskUser(self.user_anon)
+        queues = huser.get_queues()
+        self.assertEqual(queues.count(), 1)
+        self.assertIn(self.queue_public, queues)
+        self.assertNotIn(self.queue_private, queues)
+
+    def test_anonymous_get_queues_per_queue_disabled(self):
+        """Anonymous user sees all queues when per-queue permission is disabled (no filter applied)."""
+        helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION = False
+        huser = HelpdeskUser(self.user_anon)
+        queues = huser.get_queues()
+        self.assertEqual(queues.count(), 2)
+
+    def test_anonymous_get_queue_choices(self):
+        """Anonymous user gets only public queue choices."""
+        huser = HelpdeskUser(self.user_anon)
+        choices = huser.get_queue_choices()
+        queue_ids = [c[0] for c in choices if c[0]]
+        self.assertEqual(len(queue_ids), 1)
+        self.assertIn(self.queue_public.id, queue_ids)
+        self.assertNotIn(self.queue_private.id, queue_ids)
+
+    def test_anonymous_can_access_queue_private(self):
+        """Anonymous user cannot access private queues."""
+        huser = HelpdeskUser(self.user_anon)
+        self.assertFalse(huser.can_access_queue(self.queue_private))
+
+    def test_anonymous_can_access_queue_public(self):
+        """Anonymous user can access public queues."""
+        huser = HelpdeskUser(self.user_anon)
+        self.assertTrue(huser.can_access_queue(self.queue_public))
+
+    def test_anonymous_can_access_ticket_in_private_queue(self):
+        """Anonymous user cannot access tickets in private queues."""
+        ticket = Ticket.objects.create(title="Private Ticket", queue=self.queue_private)
+        huser = HelpdeskUser(self.user_anon)
+        self.assertFalse(huser.can_access_ticket(ticket))
+
+    def test_anonymous_can_access_ticket_in_public_queue(self):
+        """Anonymous user can access tickets in public queues."""
+        ticket = Ticket.objects.create(title="Public Ticket", queue=self.queue_public)
+        huser = HelpdeskUser(self.user_anon)
+        self.assertTrue(huser.can_access_ticket(ticket))
+
+    def test_anonymous_get_tickets_in_queues(self):
+        """Anonymous user only sees tickets in public queues."""
+        Ticket.objects.create(title="Private Ticket", queue=self.queue_private)
+        Ticket.objects.create(title="Public Ticket", queue=self.queue_public)
+        huser = HelpdeskUser(self.user_anon)
+        tickets = huser.get_tickets_in_queues()
+        self.assertEqual(tickets.count(), 1)
+        self.assertEqual(tickets.first().queue, self.queue_public)
+
+    def test_anonymous_dashboard_redirects(self):
+        """Anonymous user is redirected from dashboard (not staff)."""
+        client = Client()
+        response = client.get(reverse("helpdesk:dashboard"))
+        self.assertIn(response.status_code, [302, 403])
+
+    def test_anonymous_ticket_list_redirects(self):
+        """Anonymous user is redirected from ticket list."""
+        client = Client()
+        response = client.get(reverse("helpdesk:list"))
+        self.assertIn(response.status_code, [302, 403])
+
+    def test_anonymous_edit_ticket_redirects(self):
+        """Anonymous user is redirected from edit ticket view."""
+        ticket = Ticket.objects.create(title="Test", queue=self.queue_private)
+        client = Client()
+        response = client.get(
+            reverse("helpdesk:edit", kwargs={"ticket_id": ticket.id})
+        )
+        self.assertIn(response.status_code, [302, 403])
+
+    def test_anonymous_get_user_queues_returns_public_only(self):
+        """get_user_queues for anonymous user returns only public queues."""
+        choices = get_user_queues(self.user_anon)
+        queue_ids = [c[0] for c in choices if c[0]]
+        self.assertEqual(len(queue_ids), 1)
+        self.assertIn(self.queue_public.id, queue_ids)
+
+    def test_anonymous_huser_from_request(self):
+        """huser_from_request with anonymous user yields empty queue access."""
+        request = MagicMock()
+        request.user = self.user_anon
+        huser = huser_from_request(request)
+        self.assertFalse(huser.is_staff())
+        queues = huser.get_queues()
+        self.assertEqual(queues.count(), 1)
+        self.assertIn(self.queue_public, queues)
+
+
+class UnauthorizedUserPermissionTestCase(TestCase):
+    """
+    Boundary tests for authenticated but unauthorized users.
+    These are users who are logged in, active, but have no staff flag,
+    no superuser flag, and no queue permissions.
+    Ensures such users get empty or public-only queue sets.
+    """
+
+    def setUp(self):
+        self.old_per_queue_setting = helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION
+        helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION = True
+
+        self.queue_private = Queue.objects.create(title="Private Q", slug="priv")
+        self.queue_public = Queue.objects.create(
+            title="Public Q", slug="pub", allow_public_submission=True
+        )
+
+        self.user_unauthorized = User.objects.create_user(
+            username="unauthorized", password="pass",
+            is_staff=False, is_superuser=False, is_active=True
+        )
+        self.user_inactive = User.objects.create_user(
+            username="inactive", password="pass",
+            is_staff=False, is_superuser=False, is_active=False
+        )
+
+        self.client = Client()
+
+    def tearDown(self):
+        helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION = self.old_per_queue_setting
+
+    def test_unauthorized_is_authenticated(self):
+        """Unauthorized user is authenticated."""
+        huser = HelpdeskUser(self.user_unauthorized)
+        self.assertTrue(huser.is_authenticated())
+
+    def test_unauthorized_is_active(self):
+        """Unauthorized user is active."""
+        huser = HelpdeskUser(self.user_unauthorized)
+        self.assertTrue(huser.is_active())
+
+    def test_unauthorized_is_staff_default_config(self):
+        """Unauthorized user is not staff under default config."""
+        original = helpdesk_settings.HELPDESK_ALLOW_NON_STAFF_TICKET_UPDATE
+        try:
+            helpdesk_settings.HELPDESK_ALLOW_NON_STAFF_TICKET_UPDATE = False
+            huser = HelpdeskUser(self.user_unauthorized)
+            self.assertFalse(huser.is_staff())
+        finally:
+            helpdesk_settings.HELPDESK_ALLOW_NON_STAFF_TICKET_UPDATE = original
+
+    def test_unauthorized_is_staff_allow_non_staff(self):
+        """Unauthorized user IS staff when HELPDESK_ALLOW_NON_STAFF_TICKET_UPDATE=True."""
+        original = helpdesk_settings.HELPDESK_ALLOW_NON_STAFF_TICKET_UPDATE
+        try:
+            helpdesk_settings.HELPDESK_ALLOW_NON_STAFF_TICKET_UPDATE = True
+            huser = HelpdeskUser(self.user_unauthorized)
+            self.assertTrue(huser.is_staff())
+        finally:
+            helpdesk_settings.HELPDESK_ALLOW_NON_STAFF_TICKET_UPDATE = original
+
+    def test_unauthorized_is_superuser(self):
+        """Unauthorized user is never superuser."""
+        huser = HelpdeskUser(self.user_unauthorized)
+        self.assertFalse(huser.is_superuser())
+
+    def test_unauthorized_has_full_access(self):
+        """Unauthorized user has no full access when per-queue permission is enabled."""
+        huser = HelpdeskUser(self.user_unauthorized)
+        self.assertFalse(huser.has_full_access())
+
+    def test_unauthorized_get_queues_per_queue_enabled(self):
+        """Unauthorized user sees only public queues when per-queue permission is enabled."""
+        huser = HelpdeskUser(self.user_unauthorized)
+        queues = huser.get_queues()
+        self.assertEqual(queues.count(), 1)
+        self.assertIn(self.queue_public, queues)
+        self.assertNotIn(self.queue_private, queues)
+
+    def test_unauthorized_get_queues_no_public_queues(self):
+        """Unauthorized user sees zero queues when no public queues exist."""
+        Queue.objects.filter(allow_public_submission=True).update(
+            allow_public_submission=False
+        )
+        huser = HelpdeskUser(self.user_unauthorized)
+        queues = huser.get_queues()
+        self.assertEqual(queues.count(), 0)
+
+    def test_unauthorized_get_queue_choices(self):
+        """Unauthorized user gets only public queue choices."""
+        huser = HelpdeskUser(self.user_unauthorized)
+        choices = huser.get_queue_choices()
+        queue_ids = [c[0] for c in choices if c[0]]
+        self.assertEqual(len(queue_ids), 1)
+        self.assertIn(self.queue_public.id, queue_ids)
+        self.assertNotIn(self.queue_private.id, queue_ids)
+
+    def test_unauthorized_get_queue_choices_no_public_queues(self):
+        """Unauthorized user gets empty choices when no public queues exist."""
+        Queue.objects.filter(allow_public_submission=True).update(
+            allow_public_submission=False
+        )
+        huser = HelpdeskUser(self.user_unauthorized)
+        choices = huser.get_queue_choices()
+        queue_ids = [c[0] for c in choices if c[0]]
+        self.assertEqual(len(queue_ids), 0)
+
+    def test_unauthorized_can_access_queue_private(self):
+        """Unauthorized user cannot access private queues."""
+        huser = HelpdeskUser(self.user_unauthorized)
+        self.assertFalse(huser.can_access_queue(self.queue_private))
+
+    def test_unauthorized_can_access_queue_public(self):
+        """Unauthorized user can access public queues."""
+        huser = HelpdeskUser(self.user_unauthorized)
+        self.assertTrue(huser.can_access_queue(self.queue_public))
+
+    def test_unauthorized_can_access_ticket_in_private_queue(self):
+        """Unauthorized user cannot access tickets in private queues."""
+        ticket = Ticket.objects.create(title="Private Ticket", queue=self.queue_private)
+        huser = HelpdeskUser(self.user_unauthorized)
+        self.assertFalse(huser.can_access_ticket(ticket))
+
+    def test_unauthorized_can_access_ticket_in_public_queue(self):
+        """Unauthorized user can access tickets in public queues."""
+        ticket = Ticket.objects.create(title="Public Ticket", queue=self.queue_public)
+        huser = HelpdeskUser(self.user_unauthorized)
+        self.assertTrue(huser.can_access_ticket(ticket))
+
+    def test_unauthorized_get_tickets_in_queues(self):
+        """Unauthorized user only sees tickets in public queues."""
+        Ticket.objects.create(title="Private Ticket", queue=self.queue_private)
+        Ticket.objects.create(title="Public Ticket", queue=self.queue_public)
+        huser = HelpdeskUser(self.user_unauthorized)
+        tickets = huser.get_tickets_in_queues()
+        self.assertEqual(tickets.count(), 1)
+        self.assertEqual(tickets.first().queue, self.queue_public)
+
+    def test_unauthorized_dashboard_redirects(self):
+        """Unauthorized user is redirected/forbidden from dashboard."""
+        self.client.login(username="unauthorized", password="pass")
+        response = self.client.get(reverse("helpdesk:dashboard"))
+        self.assertIn(response.status_code, [302, 403])
+
+    def test_unauthorized_ticket_list_redirects(self):
+        """Unauthorized user is redirected/forbidden from ticket list."""
+        self.client.login(username="unauthorized", password="pass")
+        response = self.client.get(reverse("helpdesk:list"))
+        self.assertIn(response.status_code, [302, 403])
+
+    def test_unauthorized_edit_ticket_redirects(self):
+        """Unauthorized user is redirected/forbidden from edit ticket view."""
+        ticket = Ticket.objects.create(title="Test", queue=self.queue_private)
+        self.client.login(username="unauthorized", password="pass")
+        response = self.client.get(
+            reverse("helpdesk:edit", kwargs={"ticket_id": ticket.id})
+        )
+        self.assertIn(response.status_code, [302, 403])
+
+    def test_unauthorized_get_user_queues_returns_public_only(self):
+        """get_user_queues for unauthorized user returns only public queues."""
+        choices = get_user_queues(self.user_unauthorized)
+        queue_ids = [c[0] for c in choices if c[0]]
+        self.assertEqual(len(queue_ids), 1)
+        self.assertIn(self.queue_public.id, queue_ids)
+
+    def test_inactive_user_get_queues(self):
+        """Inactive user sees only public queues (not private)."""
+        huser = HelpdeskUser(self.user_inactive)
+        queues = huser.get_queues()
+        self.assertEqual(queues.count(), 1)
+        self.assertIn(self.queue_public, queues)
+        self.assertNotIn(self.queue_private, queues)
+
+    def test_inactive_user_is_staff(self):
+        """Inactive user is not staff regardless of config."""
+        original = helpdesk_settings.HELPDESK_ALLOW_NON_STAFF_TICKET_UPDATE
+        try:
+            helpdesk_settings.HELPDESK_ALLOW_NON_STAFF_TICKET_UPDATE = True
+            huser = HelpdeskUser(self.user_inactive)
+            self.assertFalse(huser.is_staff())
+
+            helpdesk_settings.HELPDESK_ALLOW_NON_STAFF_TICKET_UPDATE = False
+            huser = HelpdeskUser(self.user_inactive)
+            self.assertFalse(huser.is_staff())
+        finally:
+            helpdesk_settings.HELPDESK_ALLOW_NON_STAFF_TICKET_UPDATE = original
+
+    def test_inactive_user_is_superuser(self):
+        """Inactive user is never superuser."""
+        huser = HelpdeskUser(self.user_inactive)
+        self.assertFalse(huser.is_superuser())
+
+    def test_inactive_user_dashboard_redirects(self):
+        """Inactive user is redirected/forbidden from dashboard."""
+        self.client.login(username="inactive", password="pass")
+        response = self.client.get(reverse("helpdesk:dashboard"))
+        self.assertIn(response.status_code, [302, 403])
+
+
+class UnauthorizedManagementCommandTestCase(TransactionTestCase):
+    """
+    Tests for management commands with unauthorized/anonymous users.
+    Verifies that --user with an unauthorized user returns empty queue results,
+    and that --user with a nonexistent user raises CommandError.
+    """
+
+    def setUp(self):
+        self.old_per_queue_setting = helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION
+        helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION = True
+
+        self.queue_private = Queue.objects.create(
+            title="Private Q", slug="priv", escalate_days=5
+        )
+        self.queue_public = Queue.objects.create(
+            title="Public Q", slug="pub", allow_public_submission=True, escalate_days=3
+        )
+
+        call_command("create_queue_permissions", verbosity=0)
+
+        self.user_unauthorized = User.objects.create_user(
+            username="unauthorized", password="pass",
+            is_staff=False, is_superuser=False, is_active=True
+        )
+
+    def tearDown(self):
+        helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION = self.old_per_queue_setting
+
+    def test_escalate_tickets_unauthorized_user_no_private_queues(self):
+        """escalate_tickets --user with unauthorized user skips private queues."""
+        out = StringIO()
+        call_command(
+            "escalate_tickets",
+            user="unauthorized",
+            escalate_verbosely=True,
+            stdout=out
+        )
+        output = out.getvalue()
+        self.assertNotIn("Private Q", output)
+
+    def test_escalate_tickets_unauthorized_user_sees_public_queue(self):
+        """escalate_tickets --user with unauthorized user includes public queues."""
+        out = StringIO()
+        call_command(
+            "escalate_tickets",
+            user="unauthorized",
+            escalate_verbosely=True,
+            stdout=out
+        )
+        output = out.getvalue()
+        self.assertIn("Public Q", output)
+
+    def test_create_queue_permissions_unauthorized_user(self):
+        """create_queue_permissions --user with unauthorized user skips private queues."""
+        out = StringIO()
+        call_command(
+            "create_queue_permissions",
+            user="unauthorized",
+            escalate_verbosely=True,
+            stdout=out
+        )
+        output = out.getvalue()
+        self.assertNotIn("Private Q", output)
+        self.assertIn("Public Q", output)
+
+    def test_unauthorized_user_get_queues_no_public(self):
+        """Unauthorized user gets empty queues when no public queues exist."""
+        Queue.objects.filter(allow_public_submission=True).update(
+            allow_public_submission=False
+        )
+        huser = HelpdeskUser(self.user_unauthorized)
+        queues = huser.get_queues()
+        self.assertEqual(queues.count(), 0)
