@@ -64,7 +64,14 @@ class Command(BaseCommand):
             days = 0
 
             while workdate < today:
-                if not EscalationExclusion.objects.filter(date=workdate).exists():
+                exclusions = EscalationExclusion.objects.filter(date=workdate)
+                is_excluded = False
+                for exclusion in exclusions:
+                    exclusion_queues = exclusion.queues.all()
+                    if exclusion_queues.count() == 0 or queue in exclusion_queues:
+                        is_excluded = True
+                        break
+                if not is_excluded:
                     days += 1
                 workdate = workdate + timedelta(days=1)
 
@@ -96,7 +103,7 @@ class Command(BaseCommand):
 
                 if verbose:
                     self.stdout.write(
-                        f"  - Esclating {ticket.ticket} from {ticket.priority + 1}>{ticket.priority}"
+                        f"  - Escalating {ticket.ticket} from {ticket.priority + 1}>{ticket.priority}"
                     )
 
                 if not notify_only:

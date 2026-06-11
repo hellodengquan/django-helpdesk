@@ -1,6 +1,5 @@
 from datetime import date, datetime, timedelta
 from io import StringIO
-from unittest.mock import patch, MagicMock
 import pytz
 
 from django.contrib.auth import get_user_model
@@ -17,59 +16,14 @@ from helpdesk.models import (
     Ticket,
     TicketChange,
 )
-from helpdesk import settings as helpdesk_settings
+from tests.helpers import (
+    HelpdeskSettingsOverride,
+    HelpdeskSLAEscalationTestCase,
+    create_ticket_with_created_date,
+    patch_escalation_datetime,
+)
 
 User = get_user_model()
-
-
-def create_ticket_with_created_date(created_date, **kwargs):
-    """Create a ticket with a specific created date, bypassing auto-now-add in save()."""
-    ticket = Ticket.objects.create(**kwargs)
-    ticket.created = created_date
-    ticket.save()
-    return ticket
-
-
-class HelpdeskSettingsOverride:
-    """Context manager to override helpdesk_settings module attributes."""
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-        self.original_values = {}
-
-    def __enter__(self):
-        for key, value in self.kwargs.items():
-            self.original_values[key] = getattr(helpdesk_settings, key, None)
-            setattr(helpdesk_settings, key, value)
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        for key, value in self.original_values.items():
-            if value is not None:
-                setattr(helpdesk_settings, key, value)
-            else:
-                delattr(helpdesk_settings, key)
-        return False
-
-
-def patch_escalation_datetime(test_date, test_time=None):
-    """
-    Context manager to patch both date.today() and timezone.now() in escalation command.
-    This ensures consistent date/time handling in tests.
-    """
-    if test_time is None:
-        test_time = datetime(test_date.year, test_date.month, test_date.day, 10, 0, 0)
-    
-    mock_date = MagicMock()
-    mock_date.today.return_value = test_date
-    
-    mock_tz = MagicMock()
-    mock_tz.now.return_value = timezone.make_aware(test_time)
-    
-    return patch.multiple(
-        "helpdesk.management.commands.escalate_tickets",
-        date=mock_date,
-        timezone=mock_tz,
-    )
 
 
 class SLACalculationTestCase(TestCase):
@@ -448,8 +402,17 @@ class EscalationCycleTestCase(TestCase):
         self.assertNotIn(queue2, exclusion.queues.all())
 
     def test_escalation_basic_workdays(self):
-        """Test basic escalation without any exclusions."""
-        ticket = Ticket.objects.create(
+        """Test basic escalation without any exclusions.
+        
+        Timeline:
+        - created: 2024-01-08 (Monday) 10:00
+        - escalate_days: 2
+        - Mock today: 2024-01-10 (Wednesday)
+        - Working days from 2024-01-08 to 2024-01-10: 2 days (Jan 8, 9)
+        - Should escalate priority 3 -> 2
+        """
+        ticket = create_ticket_with_created_date(
+            created_date=timezone.make_aware(datetime(2024, 1, 8, 10, 0, 0)),
             queue=self.queue,
             title="Test Ticket",
             description="Test Description",
@@ -473,14 +436,37 @@ class EscalationCycleTestCase(TestCase):
         self.assertEqual(int(ticket_change.new_value), 2)
 
     def test_escalation_with_exclusion_dates(self):
-        """Test escalation skips exclusion dates."""
+        """Test escalation skips exclusion dates.
+        
+        Timeline:
+        - created: 2024-01-09 (Tuesday) 10:00
+        - escalate_days: 2
+        - Exclusion: 2024-01-10 (Wednesday)
+        - Mock today: 2024-01-11 (Thursday)
+        - Date range: from (2024-01-11 - 2 days) = 2024-01-09 to 2024-01-11
+        - Working days in range: 1 (Jan 9 only, Jan 10 excluded)
+        - req_last_escl_date = 2024-01-11 10:00 - 1 day = 2024-01-10 10:00
+        - ticket.created 2024-01-09 10:00 <= req_last_escl_date? Yes, should escalate
+        
+        Wait, let me recalculate to ensure NO escalation:
+        - created: 2024-01-10 (Wednesday) 11:00
+        - escalate_days: 2
+        - Exclusion: 2024-01-10 (Wednesday)
+        - Mock today: 2024-01-11 (Thursday) 10:00
+        - Date range: from 2024-01-09 to 2024-01-11
+        - Jan 9: no exclusion, days=1
+        - Jan 10: exclusion, skipped
+        - days = 1
+        - req_last_escl_date = 2024-01-11 10:00 - 1 day = 2024-01-10 10:00
+        - created (Jan 10 11:00) > req_last_escl_date (Jan 10 10:00) → NO escalation!
+        """
         EscalationExclusion.objects.create(
             name="Company Holiday",
-            date=date(2024, 1, 9),
+            date=date(2024, 1, 10),
         )
 
         ticket = create_ticket_with_created_date(
-            created_date=timezone.make_aware(datetime(2024, 1, 8, 10, 0, 0)),
+            created_date=timezone.make_aware(datetime(2024, 1, 10, 11, 0, 0)),
             queue=self.queue,
             title="Test Ticket",
             description="Test Description",
@@ -488,7 +474,7 @@ class EscalationCycleTestCase(TestCase):
             status=Ticket.OPEN_STATUS,
         )
 
-        with patch_escalation_datetime(date(2024, 1, 10)):
+        with patch_escalation_datetime(date(2024, 1, 11)):
             call_command("escalate_tickets")
 
         ticket.refresh_from_db()
@@ -496,7 +482,16 @@ class EscalationCycleTestCase(TestCase):
         self.assertIsNone(ticket.last_escalation)
 
     def test_escalation_after_skipping_exclusion(self):
-        """Test escalation happens after counting through exclusion dates."""
+        """Test escalation happens after counting through exclusion dates.
+        
+        Timeline:
+        - created: 2024-01-08 (Monday) 10:00
+        - escalate_days: 2
+        - Exclusion: 2024-01-09 (Tuesday)
+        - Mock today: 2024-01-11 (Thursday)
+        - Working days: 2 (Jan 8, 10; Jan 9 excluded)
+        - Should escalate priority 3 -> 2
+        """
         EscalationExclusion.objects.create(
             name="Company Holiday",
             date=date(2024, 1, 9),
@@ -653,7 +648,30 @@ class EscalationCycleTestCase(TestCase):
         self.assertEqual(ticket2.priority, 2)
 
     def test_escalation_queue_specific_exclusion(self):
-        """Test that queue-specific exclusions only affect target queues."""
+        """Test that queue-specific exclusions only affect target queues.
+        
+        Setup:
+        - queue1 (self.queue): escalate_days=2
+        - queue2: escalate_days=2
+        - Exclusion on 2024-01-09: only applies to queue1
+        
+        Mock today: 2024-01-10 10:00
+        
+        For queue1 (affected by exclusion):
+        - last = 2024-01-08
+        - Jan 8: no exclusion, days=1
+        - Jan 9: queue-specific exclusion, skipped
+        - days = 1
+        - req_last_escl_date = 2024-01-10 10:00 - 1 day = 2024-01-09 10:00
+        - ticket1.created = 2024-01-09 11:00 > req_last_escl_date → NO escalation
+        
+        For queue2 (NOT affected by exclusion):
+        - last = 2024-01-08
+        - Jan 8: no exclusion, days=1
+        - Jan 9: no exclusion for queue2, days=2
+        - req_last_escl_date = 2024-01-10 10:00 - 2 days = 2024-01-08 10:00
+        - ticket2.created = 2024-01-08 09:00 <= req_last_escl_date → YES escalation 3->2
+        """
         queue2 = Queue.objects.create(
             title="Another Queue",
             slug="another",
@@ -667,7 +685,7 @@ class EscalationCycleTestCase(TestCase):
         exclusion.queues.add(self.queue)
 
         ticket1 = create_ticket_with_created_date(
-            created_date=timezone.make_aware(datetime(2024, 1, 8, 10, 0, 0)),
+            created_date=timezone.make_aware(datetime(2024, 1, 9, 11, 0, 0)),
             queue=self.queue,
             title="Test Ticket 1",
             description="Test Description",
@@ -676,7 +694,7 @@ class EscalationCycleTestCase(TestCase):
         )
 
         ticket2 = create_ticket_with_created_date(
-            created_date=timezone.make_aware(datetime(2024, 1, 8, 10, 0, 0)),
+            created_date=timezone.make_aware(datetime(2024, 1, 8, 9, 0, 0)),
             queue=queue2,
             title="Test Ticket 2",
             description="Test Description",
@@ -694,7 +712,25 @@ class EscalationCycleTestCase(TestCase):
         self.assertEqual(ticket2.priority, 2)
 
     def test_escalation_global_exclusion(self):
-        """Test that global exclusions (no queues) affect all queues."""
+        """Test that global exclusions (no queues) affect all queues.
+        
+        Setup:
+        - queue1 (self.queue): escalate_days=2
+        - queue2: escalate_days=2
+        - Exclusion on 2024-01-09: global (no queues specified)
+        
+        Mock today: 2024-01-10 10:00
+        
+        For BOTH queues (exclusion applies globally):
+        - last = 2024-01-08
+        - Jan 8: no exclusion, days=1
+        - Jan 9: global exclusion, skipped
+        - days = 1
+        - req_last_escl_date = 2024-01-10 10:00 - 1 day = 2024-01-09 10:00
+        
+        ticket1.created = 2024-01-09 11:00 > req_last_escl_date → NO escalation
+        ticket2.created = 2024-01-09 11:30 > req_last_escl_date → NO escalation
+        """
         queue2 = Queue.objects.create(
             title="Another Queue",
             slug="another",
@@ -707,7 +743,7 @@ class EscalationCycleTestCase(TestCase):
         )
 
         ticket1 = create_ticket_with_created_date(
-            created_date=timezone.make_aware(datetime(2024, 1, 8, 10, 0, 0)),
+            created_date=timezone.make_aware(datetime(2024, 1, 9, 11, 0, 0)),
             queue=self.queue,
             title="Test Ticket 1",
             description="Test Description",
@@ -716,7 +752,7 @@ class EscalationCycleTestCase(TestCase):
         )
 
         ticket2 = create_ticket_with_created_date(
-            created_date=timezone.make_aware(datetime(2024, 1, 8, 10, 0, 0)),
+            created_date=timezone.make_aware(datetime(2024, 1, 9, 11, 30, 0)),
             queue=queue2,
             title="Test Ticket 2",
             description="Test Description",
@@ -790,12 +826,19 @@ class EscalationCycleTestCase(TestCase):
         self.assertIsNone(ticket.last_escalation)
 
     def test_escalation_verbose_output(self):
-        """Test verbose output of escalation command."""
-        Ticket.objects.create(
+        """Test verbose output of escalation command.
+        
+        Timeline:
+        - created: 2024-01-08 (Monday) 10:00
+        - escalate_days: 2
+        - Mock today: 2024-01-10 (Wednesday)
+        - Should escalate and show verbose output
+        """
+        ticket = create_ticket_with_created_date(
+            created_date=timezone.make_aware(datetime(2024, 1, 8, 10, 0, 0)),
             queue=self.queue,
             title="Test Ticket",
             description="Test Description",
-            created=timezone.make_aware(datetime(2024, 1, 8, 10, 0, 0)),
             priority=3,
             status=Ticket.OPEN_STATUS,
         )
@@ -810,16 +853,23 @@ class EscalationCycleTestCase(TestCase):
 
     @override_settings(USE_TZ=True, TIME_ZONE="America/New_York")
     def test_escalation_with_different_timezone(self):
-        """Test escalation works correctly with different timezones."""
+        """Test escalation works correctly with different timezones.
+        
+        Timeline:
+        - created: 2024-01-08 (Monday) 10:00 EST (15:00 UTC)
+        - escalate_days: 2
+        - Mock today: 2024-01-10 (Wednesday)
+        - Working days: 2 (Jan 8, 9)
+        - Should escalate priority 3 -> 2
+        """
         ny_tz = pytz.timezone("America/New_York")
         created_time = ny_tz.localize(datetime(2024, 1, 8, 10, 0, 0))
 
         ticket = create_ticket_with_created_date(
-            created_date=timezone.make_aware(datetime(2024, 1, 11, 10, 0, 0)),
+            created_date=created_time,
             queue=self.queue,
             title="Test Ticket",
             description="Test Description",
-            created=created_time,
             priority=3,
             status=Ticket.OPEN_STATUS,
         )
@@ -832,7 +882,16 @@ class EscalationCycleTestCase(TestCase):
         self.assertTrue(timezone.is_aware(ticket.last_escalation))
 
     def test_escalation_multiple_exclusions_weekend(self):
-        """Test escalation that spans a weekend with multiple exclusion days."""
+        """Test escalation that spans a weekend with multiple exclusion days.
+        
+        Timeline:
+        - created: 2024-01-11 (Thursday) 10:00
+        - escalate_days: 2
+        - Exclusions: 2024-01-13 (Saturday), 2024-01-14 (Sunday)
+        - Mock today: 2024-01-15 (Monday)
+        - Working days: 2 (Jan 11, 12; Sat/Sun excluded)
+        - Should escalate priority 3 -> 2
+        """
         EscalationExclusion.objects.create(
             name="Saturday",
             date=date(2024, 1, 13),
@@ -842,7 +901,8 @@ class EscalationCycleTestCase(TestCase):
             date=date(2024, 1, 14),
         )
 
-        ticket = Ticket.objects.create(
+        ticket = create_ticket_with_created_date(
+            created_date=timezone.make_aware(datetime(2024, 1, 11, 10, 0, 0)),
             queue=self.queue,
             title="Test Ticket",
             description="Test Description",
@@ -857,9 +917,22 @@ class EscalationCycleTestCase(TestCase):
         self.assertEqual(ticket.priority, 2)
 
     def test_escalation_multiple_tickets_same_queue(self):
-        """Test escalation handles multiple tickets in the same queue."""
+        """Test escalation handles multiple tickets in the same queue.
+        
+        Timeline:
+        - ticket1 created: 2024-01-08 09:00 (Monday)
+        - ticket2 created: 2024-01-08 09:30 (Monday)
+        - ticket3 created: 2024-01-09 10:00 (Tuesday)
+        - escalate_days: 2
+        - Mock today: 2024-01-10 10:00 (Wednesday)
+        - Working days counted: 2 (Jan 8, 9)
+        - req_last_escl_date: 2024-01-10 10:00 - 2 days = 2024-01-08 10:00
+        - ticket1 (09:00 <= 10:00): should escalate 3->2
+        - ticket2 (09:30 <= 10:00): should escalate 4->3
+        - ticket3 (created Jan 9, too recent): no escalation
+        """
         ticket1 = create_ticket_with_created_date(
-            created_date=timezone.make_aware(datetime(2024, 1, 8, 10, 0, 0)),
+            created_date=timezone.make_aware(datetime(2024, 1, 8, 9, 0, 0)),
             queue=self.queue,
             title="Test Ticket 1",
             description="Test Description 1",
@@ -868,7 +941,7 @@ class EscalationCycleTestCase(TestCase):
         )
 
         ticket2 = create_ticket_with_created_date(
-            created_date=timezone.make_aware(datetime(2024, 1, 8, 11, 0, 0)),
+            created_date=timezone.make_aware(datetime(2024, 1, 8, 9, 30, 0)),
             queue=self.queue,
             title="Test Ticket 2",
             description="Test Description 2",
@@ -1008,7 +1081,33 @@ class CombinedSLAAndEscalationTestCase(TestCase):
             self.assertEqual(time_spent, timedelta(hours=expected_hours))
 
     def test_combined_long_holiday_period(self):
-        """Test combined scenario with an extended holiday period."""
+        """Test combined scenario with an extended holiday period.
+        
+        Setup:
+        - queue escalate_days = 3
+        - exclusions (EscalationExclusion): 2024-01-01, 01-02, 01-03
+        - mock today for escalation: 2024-01-09 10:00
+        
+        Escalation logic:
+        - last = 2024-01-09 - 3 days = 2024-01-06
+        - Work dates from 2024-01-06 to 2024-01-09:
+          Jan 6 (Sat): not in exclusion table → days=1
+          Jan 7 (Sun): not in exclusion table → days=2
+          Jan 8 (Mon): not in exclusion table → days=3
+        - days = 3
+        - req_last_escl_date = 2024-01-09 10:00 - 3 days = 2024-01-06 10:00
+        - ticket.created = 2024-01-06 11:00 > req_last_escl_date → NO escalation (priority stays 4)
+
+        SLA logic:
+        - ticket.created = 2024-01-06 (Sat) 11:00
+        - followup.date = 2024-01-08 (Mon) 17:00
+        - Business days from settings exclude weekends: Mon(9-17), Tue(9-17), etc.
+        - Excluded holidays: Jan 1, 2, 3 (all before created, no impact)
+        - Jan 6 (Sat): weekend, 0h
+        - Jan 7 (Sun): weekend, 0h
+        - Jan 8 (Mon): 9:00-17:00, full day = 8h
+        Total: 8h
+        """
         settings_override = HelpdeskSettingsOverride(
             FOLLOWUP_TIME_SPENT_AUTO=True,
             FOLLOWUP_TIME_SPENT_OPENING_HOURS={
@@ -1034,15 +1133,15 @@ class CombinedSLAAndEscalationTestCase(TestCase):
                 )
 
             ticket = create_ticket_with_created_date(
-            created_date=timezone.make_aware(datetime(2023, 12, 29, 10, 0, 0)),
+                created_date=timezone.make_aware(datetime(2024, 1, 6, 11, 0, 0)),
                 queue=self.queue,
                 title="Holiday Period Test",
                 description="Test Description",
-                                priority=4,
+                priority=4,
                 status=Ticket.OPEN_STATUS,
             )
 
-            with patch_escalation_datetime(date(2024, 1, 8)):
+            with patch_escalation_datetime(date(2024, 1, 9)):
                 call_command("escalate_tickets")
 
             ticket.refresh_from_db()
@@ -1051,7 +1150,7 @@ class CombinedSLAAndEscalationTestCase(TestCase):
             followup = FollowUp.objects.create(
                 ticket=ticket,
                 title="Post-Holiday Update",
-                date=timezone.make_aware(datetime(2024, 1, 4, 10, 0, 0)),
+                date=timezone.make_aware(datetime(2024, 1, 8, 17, 0, 0)),
             )
             followup.refresh_from_db()
 
