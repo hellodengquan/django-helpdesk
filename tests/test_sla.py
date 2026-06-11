@@ -417,6 +417,378 @@ class GetTicketSlaStatusTestCase(TestCase):
         self.assertEqual(int(time_remaining.total_seconds()), 0)
 
 
+class GetTicketSlaStatusEdgeCaseTestCase(TestCase):
+    """Boundary edge case tests for get_ticket_sla_status function.
+
+    Covers:
+    1. Queue escalate_days edge cases (None, 0, negative values)
+    2. Priority edge cases (None, 0, out-of-range high values)
+    3. on_hold edge cases (None, False explicit)
+    4. Fallback path when calculate_sla_deadline returns None
+    """
+
+    def setUp(self):
+        self.queue_with_sla = Queue.objects.create(
+            title="Normal SLA Queue",
+            slug="normal-sla",
+            escalate_days=3,
+        )
+        self.queue_no_sla_none = Queue.objects.create(
+            title="No SLA None Queue",
+            slug="no-sla-none",
+            escalate_days=None,
+        )
+        self.queue_no_sla_zero = Queue.objects.create(
+            title="No SLA Zero Queue",
+            slug="no-sla-zero",
+            escalate_days=0,
+        )
+        self.queue_no_sla_field = Queue.objects.create(
+            title="No SLA Unconfigured Queue",
+            slug="no-sla-unconfigured",
+        )
+        self.queue_negative_sla = Queue.objects.create(
+            title="Negative SLA Queue",
+            slug="negative-sla",
+            escalate_days=-1,
+        )
+
+    # --- Group 1: Queue escalate_days boundary tests ---
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_no_sla_queue_escalate_days_none(self):
+        """Queue with escalate_days=None must return 'no_sla'.
+
+        Verifies the first branch of get_ticket_sla_status:
+        if ticket.queue.escalate_days is None ... → ('no_sla', None, None)
+        """
+        ticket = Ticket.objects.create(
+            title="Escalate None Queue Ticket",
+            queue=self.queue_no_sla_none,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            on_hold=False,
+        )
+        status, deadline, time_remaining = get_ticket_sla_status(ticket)
+        self.assertEqual(status, "no_sla")
+        self.assertIsNone(deadline)
+        self.assertIsNone(time_remaining)
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_no_sla_queue_escalate_days_zero(self):
+        """Queue with escalate_days=0 must return 'no_sla'.
+
+        Verifies the first branch of get_ticket_sla_status:
+        if ... ticket.queue.escalate_days == 0 → ('no_sla', None, None)
+        """
+        ticket = Ticket.objects.create(
+            title="Escalate Zero Queue Ticket",
+            queue=self.queue_no_sla_zero,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            on_hold=False,
+        )
+        status, deadline, time_remaining = get_ticket_sla_status(ticket)
+        self.assertEqual(status, "no_sla")
+        self.assertIsNone(deadline)
+        self.assertIsNone(time_remaining)
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_no_sla_queue_escalate_days_unset(self):
+        """Queue without escalate_days field configured (default None) must return 'no_sla'.
+
+        Simulates a queue created without specifying escalate_days at all.
+        The model default is null=True so it defaults to None in DB.
+        """
+        self.assertIsNone(self.queue_no_sla_field.escalate_days)
+        ticket = Ticket.objects.create(
+            title="Escalate Unset Queue Ticket",
+            queue=self.queue_no_sla_field,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            on_hold=False,
+        )
+        status, deadline, time_remaining = get_ticket_sla_status(ticket)
+        self.assertEqual(status, "no_sla")
+        self.assertIsNone(deadline)
+        self.assertIsNone(time_remaining)
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_no_sla_queue_with_priority_1_still_no_sla(self):
+        """Even excluded ticket must return 'no_sla' if queue has no SLA config.
+
+        Critical boundary: queue.escalate_days check is evaluated BEFORE
+        the priority/exclusion check. This test guards against future
+        reordering that would swap 'excluded' in place of 'no_sla'.
+        """
+        ticket = Ticket.objects.create(
+            title="No SLA But Priority 1",
+            queue=self.queue_no_sla_none,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=1,
+            on_hold=False,
+        )
+        status, deadline, time_remaining = get_ticket_sla_status(ticket)
+        self.assertEqual(status, "no_sla")
+        self.assertIsNone(deadline)
+        self.assertIsNone(time_remaining)
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_no_sla_queue_escalate_days_negative(self):
+        """Queue with escalate_days=-1 (or any negative) must return 'no_sla'.
+
+        This is a guard against misconfigured queues (e.g. admin mistakenly
+        entered a negative value). Before the fix, negative values would
+        silently pass the `== 0 or is None` check and produce undefined
+        behavior in calculate_sla_deadline.
+        """
+        ticket = Ticket.objects.create(
+            title="Escalate Negative Queue Ticket",
+            queue=self.queue_negative_sla,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            on_hold=False,
+        )
+        status, deadline, time_remaining = get_ticket_sla_status(ticket)
+        self.assertEqual(status, "no_sla")
+        self.assertIsNone(deadline)
+        self.assertIsNone(time_remaining)
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_sla_deadline_with_negative_escalate_days(self):
+        """calculate_sla_deadline must return None for negative escalate_days.
+
+        Guards against the same boundary at the lower-level function, since
+        calculate_sla_deadline can be called independently by other code.
+        """
+        ticket = Ticket.objects.create(
+            title="Negative Escalate Deadline Check",
+            queue=self.queue_negative_sla,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            on_hold=False,
+        )
+        self.assertIsNone(calculate_sla_deadline(ticket))
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_no_sla_queue_escalate_days_negative_extreme(self):
+        """Even extreme negative escalate_days (e.g. -999) must safely return no_sla.
+
+        Ensures the guard uses <= 0 comparison, not a specific sentinel value.
+        """
+        queue_extreme_neg = Queue.objects.create(
+            title="Extreme Negative SLA",
+            slug="extreme-neg-sla",
+            escalate_days=-999,
+        )
+        ticket = Ticket.objects.create(
+            title="Extreme Neg SLA Ticket",
+            queue=queue_extreme_neg,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            on_hold=False,
+        )
+        status, deadline, time_remaining = get_ticket_sla_status(ticket)
+        self.assertEqual(status, "no_sla")
+        self.assertIsNone(deadline)
+        self.assertIsNone(time_remaining)
+
+    # --- Group 2: Priority edge cases (unspecified / abnormal values) ---
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_priority_not_1_not_excluded_priority_2(self):
+        """Priority 2 is NOT excluded (only priority == 1 is excluded)."""
+        created = timezone.make_aware(datetime(2026, 6, 11, 9, 0, 0))
+        ticket = Ticket.objects.create(
+            title="Priority 2 Ticket",
+            queue=self.queue_with_sla,
+            created=created,
+            status=Ticket.OPEN_STATUS,
+            priority=2,
+            on_hold=False,
+        )
+        status, deadline, time_remaining = get_ticket_sla_status(ticket)
+        self.assertNotEqual(status, "excluded")
+        self.assertIn(status, ("ok", "warning", "overdue"))
+        self.assertIsNotNone(deadline)
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_priority_highest_choice_5_not_excluded(self):
+        """Priority 5 (lowest configured choice) must NOT be excluded.
+
+        Verifies that the check is strictly `priority == 1` and not
+        e.g. `priority <= 1` or `priority in some range`.
+        """
+        created = timezone.make_aware(datetime(2026, 6, 11, 9, 0, 0))
+        ticket = Ticket.objects.create(
+            title="Priority 5 Ticket",
+            queue=self.queue_with_sla,
+            created=created,
+            status=Ticket.OPEN_STATUS,
+            priority=5,
+            on_hold=False,
+        )
+        status, deadline, time_remaining = get_ticket_sla_status(ticket)
+        self.assertNotEqual(status, "excluded")
+        self.assertIn(status, ("ok", "warning", "overdue"))
+        self.assertIsNotNone(deadline)
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_priority_out_of_range_high_not_excluded(self):
+        """Priority beyond configured range (e.g. 99) must NOT be excluded.
+
+        Guards against regression where future code might add
+        `priority not in ALLOWED_RANGE → excluded` without SLA review.
+        Out-of-range values should still get an SLA deadline.
+        """
+        created = timezone.make_aware(datetime(2026, 6, 11, 9, 0, 0))
+        ticket = Ticket.objects.create(
+            title="Out-of-range High Priority",
+            queue=self.queue_with_sla,
+            created=created,
+            status=Ticket.OPEN_STATUS,
+            priority=99,
+            on_hold=False,
+        )
+        status, deadline, time_remaining = get_ticket_sla_status(ticket)
+        self.assertNotEqual(status, "excluded")
+        self.assertIn(status, ("ok", "warning", "overdue"))
+        self.assertIsNotNone(deadline)
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_priority_zero_not_excluded(self):
+        """Priority=0 (common default-injection bug) must NOT be excluded.
+
+        Priority 0 is an edge case that can arise from:
+        - Form field default mishaps
+        - Integer coercion of empty strings
+        - Legacy data migration errors
+        It must still get SLA evaluated, not silently excluded.
+        """
+        created = timezone.make_aware(datetime(2026, 6, 11, 9, 0, 0))
+        ticket = Ticket.objects.create(
+            title="Priority Zero Ticket",
+            queue=self.queue_with_sla,
+            created=created,
+            status=Ticket.OPEN_STATUS,
+            priority=0,
+            on_hold=False,
+        )
+        status, deadline, time_remaining = get_ticket_sla_status(ticket)
+        self.assertNotEqual(status, "excluded")
+        self.assertIn(status, ("ok", "warning", "overdue"))
+        self.assertIsNotNone(deadline)
+
+    # --- Group 3: on_hold edge cases ---
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_on_hold_explicit_false_not_excluded(self):
+        """on_hold explicitly set to False must NOT be excluded.
+
+        Guards against broken truthy checks like `if ticket.on_hold:`
+        that would treat False correctly but fail on None differently.
+        The code uses: `is_on_hold = ticket.on_hold is not None and ticket.on_hold`
+        so both False and None → not excluded → confirmed.
+        """
+        created = timezone.make_aware(datetime(2026, 6, 11, 9, 0, 0))
+        ticket = Ticket.objects.create(
+            title="Explicit on_hold=False",
+            queue=self.queue_with_sla,
+            created=created,
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            on_hold=False,
+        )
+        status, deadline, time_remaining = get_ticket_sla_status(ticket)
+        self.assertNotEqual(status, "excluded")
+        self.assertIn(status, ("ok", "warning", "overdue"))
+        self.assertIsNotNone(deadline)
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_on_hold_default_false_not_excluded(self):
+        """on_hold left unset (DB default False) must NOT be excluded.
+
+        on_hold is a BooleanField with default=False and no null=True,
+        so it can never literally be None in the database. However the
+        status function still guards with `on_hold is not None and on_hold`
+        for defensive programming (e.g. unsaved instances, mocked data).
+        This test verifies the common case: creating a ticket without
+        specifying on_hold triggers the default, and the ticket is SLAed.
+        """
+        created = timezone.make_aware(datetime(2026, 6, 11, 9, 0, 0))
+        ticket = Ticket.objects.create(
+            title="on_hold=Default (not set)",
+            queue=self.queue_with_sla,
+            created=created,
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+        )
+        self.assertIs(ticket.on_hold, False)
+        status, deadline, time_remaining = get_ticket_sla_status(ticket)
+        self.assertNotEqual(status, "excluded")
+        self.assertIn(status, ("ok", "warning", "overdue"))
+        self.assertIsNotNone(deadline)
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_on_hold_true_excluded_even_with_overdue(self):
+        """on_hold=True must return 'excluded' even if ticket would be overdue.
+
+        Confirms exclusion short-circuits SLA calculation entirely.
+        Without exclusion: created=June 1 → deadline=June 4 → way overdue.
+        With on_hold=True → excluded regardless of SLA timing.
+        """
+        ticket = Ticket.objects.create(
+            title="On-Hold Would-Be-Overdue Ticket",
+            queue=self.queue_with_sla,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            on_hold=True,
+        )
+        status, deadline, time_remaining = get_ticket_sla_status(ticket)
+        self.assertEqual(status, "excluded")
+        self.assertIsNone(deadline)
+        self.assertIsNone(time_remaining)
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_in_memory_ticket_on_hold_none_safe(self):
+        """Defensive: an in-memory ticket with on_hold=None must not crash.
+
+        In normal DB flow on_hold is never None (BooleanField NOT NULL).
+        But the guard `ticket.on_hold is not None and ticket.on_hold` was
+        written specifically for edge cases like unsaved instances or
+        mocked objects. This test exercises that branch to keep the guard
+        honest during future refactors.
+        """
+        ticket = Ticket(
+            title="In-memory ticket",
+            queue=self.queue_with_sla,
+            created=timezone.make_aware(datetime(2026, 6, 11, 9, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+        )
+        object.__setattr__(ticket, "on_hold", None)
+        try:
+            status, deadline, time_remaining = get_ticket_sla_status(ticket)
+        except Exception as exc:
+            self.fail(
+                f"get_ticket_sla_status raised on in-memory on_hold=None: {exc!r}"
+            )
+        self.assertNotEqual(
+            status, "excluded",
+            "on_hold=None must not trigger the exclusion branch"
+        )
+        self.assertIn(status, ("ok", "warning", "overdue"))
+        self.assertIsNotNone(deadline)
+
+
 class SlaAlertViewFilterTestCase(TestCase):
     """Test cases for SLA alert view filtering."""
 

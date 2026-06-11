@@ -374,7 +374,7 @@ def calculate_sla_deadline(ticket, from_datetime=None):
 
     queue = ticket.queue
 
-    if queue.escalate_days is None or queue.escalate_days == 0:
+    if queue.escalate_days is None or queue.escalate_days <= 0:
         return None
 
     if from_datetime is None:
@@ -440,7 +440,7 @@ def get_ticket_sla_status(ticket):
     """
     from helpdesk.models import Ticket
 
-    if ticket.queue.escalate_days is None or ticket.queue.escalate_days == 0:
+    if ticket.queue.escalate_days is None or ticket.queue.escalate_days <= 0:
         return ('no_sla', None, None)
 
     is_on_hold = ticket.on_hold is not None and ticket.on_hold

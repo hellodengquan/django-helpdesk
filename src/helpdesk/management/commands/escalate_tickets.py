@@ -47,9 +47,8 @@ class Command(BaseCommand):
 
         queue_slugs = options["queues"]
         # Only include queues with escalation configured
-        queues = Queue.objects.filter(escalate_days__isnull=False).exclude(
-            escalate_days=0
-        )
+        # Guard against NULL, zero, and negative values.
+        queues = Queue.objects.filter(escalate_days__gt=0)
         if queue_slugs is not None:
             queues = queues.filter(slug__in=queue_slugs)
 
