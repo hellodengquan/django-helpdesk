@@ -1220,3 +1220,506 @@ class UnauthorizedManagementCommandTestCase(TransactionTestCase):
         huser = HelpdeskUser(self.user_unauthorized)
         queues = huser.get_queues()
         self.assertEqual(queues.count(), 0)
+
+
+class RoleSwitchUnitTestCase(TestCase):
+    """
+    Unit tests for role switching within a session.
+    Verifies that HelpdeskUser methods correctly reflect
+    role changes (staff↔superuser, permission gain/loss, etc.).
+    """
+
+    def setUp(self):
+        self.old_per_queue_setting = helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION
+        helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION = True
+
+        self.queue_1 = Queue.objects.create(title="Queue 1", slug="q1")
+        self.queue_2 = Queue.objects.create(title="Queue 2", slug="q2")
+        self.queue_3 = Queue.objects.create(title="Queue 3", slug="q3")
+        self.queue_public = Queue.objects.create(
+            title="Queue Public", slug="qpub", allow_public_submission=True
+        )
+
+        # User who starts as regular staff with only queue_1 permission
+        self.user = User.objects.create_user(
+            username="switch_user", password="pass",
+            is_staff=True, is_superuser=False
+        )
+        p1 = Permission.objects.get(codename=self.queue_1.permission_name[9:])
+        self.user.user_permissions.add(p1)
+
+    def tearDown(self):
+        helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION = self.old_per_queue_setting
+
+    def test_staff_to_superuser_get_queues_expands(self):
+        """Promoting staff to superuser expands visible queues from 2 to all 4."""
+        huser = HelpdeskUser(self.user)
+        queues_before = huser.get_queues()
+        self.assertEqual(queues_before.count(), 2)
+        queue_ids_before = set(queues_before.values_list("id", flat=True))
+        self.assertIn(self.queue_1.id, queue_ids_before)
+        self.assertIn(self.queue_public.id, queue_ids_before)
+        self.assertNotIn(self.queue_2.id, queue_ids_before)
+
+        self.user.is_superuser = True
+        self.user.save()
+
+        huser_after = HelpdeskUser(self.user)
+        queues_after = huser_after.get_queues()
+        self.assertEqual(queues_after.count(), 4)
+        queue_ids_after = set(queues_after.values_list("id", flat=True))
+        self.assertIn(self.queue_1.id, queue_ids_after)
+        self.assertIn(self.queue_2.id, queue_ids_after)
+        self.assertIn(self.queue_3.id, queue_ids_after)
+        self.assertIn(self.queue_public.id, queue_ids_after)
+
+    def test_superuser_to_staff_get_queues_contracts(self):
+        """Demoting superuser to staff contracts visible queues from 4 to 2."""
+        self.user.is_superuser = True
+        self.user.save()
+
+        huser_before = HelpdeskUser(self.user)
+        queues_before = huser_before.get_queues()
+        self.assertEqual(queues_before.count(), 4)
+
+        self.user.is_superuser = False
+        self.user.save()
+
+        huser_after = HelpdeskUser(self.user)
+        queues_after = huser_after.get_queues()
+        self.assertEqual(queues_after.count(), 2)
+        queue_ids_after = set(queues_after.values_list("id", flat=True))
+        self.assertIn(self.queue_1.id, queue_ids_after)
+        self.assertIn(self.queue_public.id, queue_ids_after)
+        self.assertNotIn(self.queue_2.id, queue_ids_after)
+
+    def test_staff_gain_permission_adds_queue(self):
+        """Staff gaining a new queue permission sees that queue added."""
+        huser_before = HelpdeskUser(self.user)
+        queues_before = huser_before.get_queues()
+        self.assertEqual(queues_before.count(), 2)
+        self.assertNotIn(self.queue_2, queues_before)
+
+        p2 = Permission.objects.get(codename=self.queue_2.permission_name[9:])
+        self.user.user_permissions.add(p2)
+        # Refresh user object to clear Django's permission cache
+        self.user = User.objects.get(pk=self.user.pk)
+
+        huser_after = HelpdeskUser(self.user)
+        queues_after = huser_after.get_queues()
+        self.assertEqual(queues_after.count(), 3)
+        self.assertIn(self.queue_1, queues_after)
+        self.assertIn(self.queue_2, queues_after)
+        self.assertIn(self.queue_public, queues_after)
+        self.assertNotIn(self.queue_3, queues_after)
+
+    def test_staff_lose_permission_removes_queue(self):
+        """Staff losing a queue permission no longer sees that queue."""
+        p2 = Permission.objects.get(codename=self.queue_2.permission_name[9:])
+        self.user.user_permissions.add(p2)
+        self.user = User.objects.get(pk=self.user.pk)
+
+        huser_before = HelpdeskUser(self.user)
+        queues_before = huser_before.get_queues()
+        self.assertEqual(queues_before.count(), 3)
+        self.assertIn(self.queue_2, queues_before)
+
+        self.user.user_permissions.remove(p2)
+        self.user = User.objects.get(pk=self.user.pk)
+
+        huser_after = HelpdeskUser(self.user)
+        queues_after = huser_after.get_queues()
+        self.assertEqual(queues_after.count(), 2)
+        self.assertNotIn(self.queue_2, queues_after)
+
+    def test_staff_lose_all_permissions_only_public_left(self):
+        """Staff losing all queue permissions sees only public queues."""
+        p1 = Permission.objects.get(codename=self.queue_1.permission_name[9:])
+        self.user.user_permissions.remove(p1)
+        self.user = User.objects.get(pk=self.user.pk)
+
+        huser = HelpdeskUser(self.user)
+        queues = huser.get_queues()
+        self.assertEqual(queues.count(), 1)
+        self.assertEqual(queues.first(), self.queue_public)
+
+    def test_staff_to_superuser_has_full_access(self):
+        """Promoting staff to superuser flips has_full_access from False to True."""
+        huser_before = HelpdeskUser(self.user)
+        self.assertFalse(huser_before.has_full_access())
+
+        self.user.is_superuser = True
+        self.user.save()
+
+        huser_after = HelpdeskUser(self.user)
+        self.assertTrue(huser_after.has_full_access())
+
+    def test_superuser_to_staff_loses_full_access(self):
+        """Demoting superuser to staff flips has_full_access from True to False."""
+        self.user.is_superuser = True
+        self.user.save()
+
+        huser_before = HelpdeskUser(self.user)
+        self.assertTrue(huser_before.has_full_access())
+
+        self.user.is_superuser = False
+        self.user.save()
+
+        huser_after = HelpdeskUser(self.user)
+        self.assertFalse(huser_after.has_full_access())
+
+    def test_staff_to_superuser_can_access_all_queues(self):
+        """Promoted superuser can access queues they previously couldn't."""
+        huser_before = HelpdeskUser(self.user)
+        self.assertTrue(huser_before.can_access_queue(self.queue_1))
+        self.assertFalse(huser_before.can_access_queue(self.queue_2))
+        self.assertFalse(huser_before.can_access_queue(self.queue_3))
+
+        self.user.is_superuser = True
+        self.user.save()
+
+        huser_after = HelpdeskUser(self.user)
+        self.assertTrue(huser_after.can_access_queue(self.queue_1))
+        self.assertTrue(huser_after.can_access_queue(self.queue_2))
+        self.assertTrue(huser_after.can_access_queue(self.queue_3))
+
+    def test_superuser_to_staff_loses_queue_access(self):
+        """Demoted staff loses access to queues they don't have permission for."""
+        self.user.is_superuser = True
+        self.user.save()
+
+        huser_before = HelpdeskUser(self.user)
+        self.assertTrue(huser_before.can_access_queue(self.queue_2))
+        self.assertTrue(huser_before.can_access_queue(self.queue_3))
+
+        self.user.is_superuser = False
+        self.user.save()
+
+        huser_after = HelpdeskUser(self.user)
+        self.assertFalse(huser_after.can_access_queue(self.queue_2))
+        self.assertFalse(huser_after.can_access_queue(self.queue_3))
+        self.assertTrue(huser_after.can_access_queue(self.queue_1))
+
+    def test_staff_to_superuser_get_queue_choices_expands(self):
+        """Promoting staff to superuser increases queue choices from 3 to 5."""
+        huser_before = HelpdeskUser(self.user)
+        choices_before = huser_before.get_queue_choices()
+        self.assertEqual(len(choices_before), 3)
+
+        self.user.is_superuser = True
+        self.user.save()
+
+        huser_after = HelpdeskUser(self.user)
+        choices_after = huser_after.get_queue_choices()
+        self.assertEqual(len(choices_after), 5)
+        self.assertEqual(choices_after[0], ("", "--------"))
+
+    def test_normal_user_to_staff_gains_staff_status(self):
+        """Normal user promoted to staff gains is_staff status."""
+        normal_user = User.objects.create_user(
+            username="normal", password="pass",
+            is_staff=False, is_superuser=False
+        )
+        huser_before = HelpdeskUser(normal_user)
+        self.assertFalse(huser_before.is_staff())
+
+        normal_user.is_staff = True
+        normal_user.save()
+
+        huser_after = HelpdeskUser(normal_user)
+        self.assertTrue(huser_after.is_staff())
+
+    def test_staff_to_normal_user_loses_staff_status(self):
+        """Staff demoted to normal user loses is_staff status."""
+        huser_before = HelpdeskUser(self.user)
+        self.assertTrue(huser_before.is_staff())
+
+        self.user.is_staff = False
+        self.user.save()
+
+        huser_after = HelpdeskUser(self.user)
+        self.assertFalse(huser_after.is_staff())
+
+    def test_normal_user_to_staff_gains_full_access_per_queue_disabled(self):
+        """When per-queue is disabled, promoting to staff gives full access."""
+        helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION = False
+        normal_user = User.objects.create_user(
+            username="normal2", password="pass",
+            is_staff=False, is_superuser=False
+        )
+        huser_before = HelpdeskUser(normal_user)
+        self.assertFalse(huser_before.has_full_access())
+
+        normal_user.is_staff = True
+        normal_user.save()
+
+        huser_after = HelpdeskUser(normal_user)
+        self.assertTrue(huser_after.has_full_access())
+
+    def test_inactive_to_active_gains_staff(self):
+        """Activating a staff account grants is_staff status."""
+        inactive_staff = User.objects.create_user(
+            username="inactive_staff", password="pass",
+            is_staff=True, is_active=False
+        )
+        huser_before = HelpdeskUser(inactive_staff)
+        self.assertFalse(huser_before.is_staff())
+
+        inactive_staff.is_active = True
+        inactive_staff.save()
+
+        huser_after = HelpdeskUser(inactive_staff)
+        self.assertTrue(huser_after.is_staff())
+
+    def test_active_to_inactive_loses_superuser(self):
+        """Deactivating a superuser account revokes is_superuser status."""
+        superuser = User.objects.create_user(
+            username="super_active", password="pass",
+            is_staff=True, is_superuser=True, is_active=True
+        )
+        huser_before = HelpdeskUser(superuser)
+        self.assertTrue(huser_before.is_superuser())
+
+        superuser.is_active = False
+        superuser.save()
+
+        huser_after = HelpdeskUser(superuser)
+        self.assertFalse(huser_after.is_superuser())
+
+    def test_get_tickets_in_queues_refreshes_after_role_change(self):
+        """get_tickets_in_queues reflects newly accessible queues after promotion."""
+        Ticket.objects.create(title="T in Q1", queue=self.queue_1)
+        Ticket.objects.create(title="T in Q2", queue=self.queue_2)
+        Ticket.objects.create(title="T in Q3", queue=self.queue_3)
+
+        huser_before = HelpdeskUser(self.user)
+        tickets_before = huser_before.get_tickets_in_queues()
+        self.assertEqual(tickets_before.count(), 1)
+
+        self.user.is_superuser = True
+        self.user.save()
+
+        huser_after = HelpdeskUser(self.user)
+        tickets_after = huser_after.get_tickets_in_queues()
+        self.assertEqual(tickets_after.count(), 3)
+
+    def test_can_access_ticket_refreshes_after_role_change(self):
+        """can_access_ticket returns True for previously inaccessible tickets after promotion."""
+        ticket_q2 = Ticket.objects.create(title="T in Q2", queue=self.queue_2)
+
+        huser_before = HelpdeskUser(self.user)
+        self.assertFalse(huser_before.can_access_ticket(ticket_q2))
+
+        self.user.is_superuser = True
+        self.user.save()
+
+        huser_after = HelpdeskUser(self.user)
+        self.assertTrue(huser_after.can_access_ticket(ticket_q2))
+
+    def test_multiple_role_switches_stable(self):
+        """Multiple back-and-forth role switches produce consistent results."""
+        for i in range(3):
+            self.user.is_superuser = True
+            self.user.save()
+            huser_super = HelpdeskUser(self.user)
+            self.assertEqual(huser_super.get_queues().count(), 4)
+            self.assertTrue(huser_super.has_full_access())
+
+            self.user.is_superuser = False
+            self.user.save()
+            huser_staff = HelpdeskUser(self.user)
+            self.assertEqual(huser_staff.get_queues().count(), 2)
+            self.assertFalse(huser_staff.has_full_access())
+
+    def test_per_queue_disabled_then_enabled(self):
+        """Toggling per-queue setting changes queue visibility for staff."""
+        helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION = False
+        huser_before = HelpdeskUser(self.user)
+        queues_before = huser_before.get_queues()
+        self.assertEqual(queues_before.count(), 4)
+
+        helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION = True
+        huser_after = HelpdeskUser(self.user)
+        queues_after = huser_after.get_queues()
+        self.assertEqual(queues_after.count(), 2)
+
+
+class RoleSwitchIntegrationTestCase(TestCase):
+    """
+    Integration tests for role switching within a session.
+    Verifies that view-level responses correctly reflect
+    role changes when the same user logs in with updated permissions.
+    """
+
+    def setUp(self):
+        self.old_per_queue_setting = helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION
+        helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION = True
+
+        self.queue_1 = Queue.objects.create(title="Queue 1", slug="q1")
+        self.queue_2 = Queue.objects.create(title="Queue 2", slug="q2")
+        self.queue_3 = Queue.objects.create(title="Queue 3", slug="q3")
+
+        self.user = User.objects.create_user(
+            username="switch_user", password="pass",
+            is_staff=True, is_superuser=False
+        )
+        p1 = Permission.objects.get(codename=self.queue_1.permission_name[9:])
+        self.user.user_permissions.add(p1)
+
+        self.client = Client()
+
+    def tearDown(self):
+        helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION = self.old_per_queue_setting
+
+    def test_dashboard_staff_to_superuser_shows_more_tickets(self):
+        """Dashboard shows more tickets after user is promoted to superuser."""
+        Ticket.objects.create(title="T1 Q1", queue=self.queue_1)
+        Ticket.objects.create(title="T2 Q1", queue=self.queue_1)
+        Ticket.objects.create(title="T1 Q2", queue=self.queue_2)
+        Ticket.objects.create(title="T1 Q3", queue=self.queue_3)
+
+        self.client.login(username="switch_user", password="pass")
+        response_before = self.client.get(reverse("helpdesk:dashboard"))
+        self.assertEqual(response_before.status_code, 200)
+        unassigned_before = response_before.context["unassigned_tickets"]
+        self.assertEqual(len(unassigned_before), 2)
+
+        self.user.is_superuser = True
+        self.user.save()
+
+        self.client.login(username="switch_user", password="pass")
+        response_after = self.client.get(reverse("helpdesk:dashboard"))
+        self.assertEqual(response_after.status_code, 200)
+        unassigned_after = response_after.context["unassigned_tickets"]
+        self.assertEqual(len(unassigned_after), 4)
+
+    def test_dashboard_superuser_to_staff_shows_fewer_tickets(self):
+        """Dashboard shows fewer tickets after user is demoted from superuser."""
+        Ticket.objects.create(title="T1 Q1", queue=self.queue_1)
+        Ticket.objects.create(title="T1 Q2", queue=self.queue_2)
+
+        self.user.is_superuser = True
+        self.user.save()
+
+        self.client.login(username="switch_user", password="pass")
+        response_before = self.client.get(reverse("helpdesk:dashboard"))
+        self.assertEqual(response_before.status_code, 200)
+        self.assertEqual(len(response_before.context["unassigned_tickets"]), 2)
+
+        self.user.is_superuser = False
+        self.user.save()
+
+        self.client.login(username="switch_user", password="pass")
+        response_after = self.client.get(reverse("helpdesk:dashboard"))
+        self.assertEqual(response_after.status_code, 200)
+        self.assertEqual(len(response_after.context["unassigned_tickets"]), 1)
+
+    def test_edit_ticket_form_staff_to_superuser_more_choices(self):
+        """Edit ticket form shows more queue options after promotion to superuser."""
+        ticket = Ticket.objects.create(title="Test Ticket", queue=self.queue_1)
+
+        self.client.login(username="switch_user", password="pass")
+        response_before = self.client.get(
+            reverse("helpdesk:edit", kwargs={"ticket_id": ticket.id})
+        )
+        self.assertEqual(response_before.status_code, 200)
+        form_before = response_before.context["form"]
+        queue_count_before = len(
+            [c for c in form_before.fields["queue"].choices if c[0]]
+        )
+        self.assertEqual(queue_count_before, 1)
+
+        self.user.is_superuser = True
+        self.user.save()
+
+        self.client.login(username="switch_user", password="pass")
+        response_after = self.client.get(
+            reverse("helpdesk:edit", kwargs={"ticket_id": ticket.id})
+        )
+        self.assertEqual(response_after.status_code, 200)
+        form_after = response_after.context["form"]
+        queue_count_after = len(
+            [c for c in form_after.fields["queue"].choices if c[0]]
+        )
+        self.assertEqual(queue_count_after, 3)
+
+    def test_staff_gain_permission_dashboard_shows_more(self):
+        """Dashboard reflects newly granted queue permission (more tickets)."""
+        Ticket.objects.create(title="T Q1", queue=self.queue_1)
+        Ticket.objects.create(title="T Q2", queue=self.queue_2)
+
+        self.client.login(username="switch_user", password="pass")
+        response_before = self.client.get(reverse("helpdesk:dashboard"))
+        self.assertEqual(len(response_before.context["unassigned_tickets"]), 1)
+
+        p2 = Permission.objects.get(codename=self.queue_2.permission_name[9:])
+        self.user.user_permissions.add(p2)
+
+        self.client.login(username="switch_user", password="pass")
+        response_after = self.client.get(reverse("helpdesk:dashboard"))
+        self.assertEqual(len(response_after.context["unassigned_tickets"]), 2)
+
+    def test_normal_user_to_staff_gains_dashboard_access(self):
+        """Normal user promoted to staff gains access to dashboard."""
+        normal_user = User.objects.create_user(
+            username="normal_user", password="pass",
+            is_staff=False, is_superuser=False
+        )
+
+        self.client.login(username="normal_user", password="pass")
+        response_before = self.client.get(reverse("helpdesk:dashboard"))
+        self.assertIn(response_before.status_code, [302, 403])
+
+        normal_user.is_staff = True
+        normal_user.save()
+
+        self.client.login(username="normal_user", password="pass")
+        response_after = self.client.get(reverse("helpdesk:dashboard"))
+        self.assertEqual(response_after.status_code, 200)
+
+    def test_staff_to_normal_user_loses_dashboard_access(self):
+        """Staff demoted to normal user loses access to dashboard."""
+        self.client.login(username="switch_user", password="pass")
+        response_before = self.client.get(reverse("helpdesk:dashboard"))
+        self.assertEqual(response_before.status_code, 200)
+
+        self.user.is_staff = False
+        self.user.save()
+
+        self.client.login(username="switch_user", password="pass")
+        response_after = self.client.get(reverse("helpdesk:dashboard"))
+        self.assertIn(response_after.status_code, [302, 403])
+
+    def test_get_user_queues_reflects_role_switch(self):
+        """get_user_queues helper returns updated choices after role switch."""
+        choices_before = get_user_queues(self.user)
+        queue_ids_before = [c[0] for c in choices_before if c[0]]
+        self.assertEqual(len(queue_ids_before), 1)
+        self.assertIn(self.queue_1.id, queue_ids_before)
+
+        self.user.is_superuser = True
+        self.user.save()
+
+        choices_after = get_user_queues(self.user)
+        queue_ids_after = [c[0] for c in choices_after if c[0]]
+        self.assertEqual(len(queue_ids_after), 3)
+        self.assertIn(self.queue_1.id, queue_ids_after)
+        self.assertIn(self.queue_2.id, queue_ids_after)
+        self.assertIn(self.queue_3.id, queue_ids_after)
+
+    def test_huser_from_request_reflects_role_switch(self):
+        """huser_from_request with updated user reflects role changes."""
+        request = MagicMock()
+        request.user = self.user
+
+        huser_before = huser_from_request(request)
+        self.assertFalse(huser_before.is_superuser())
+        self.assertEqual(huser_before.get_queues().count(), 1)
+
+        self.user.is_superuser = True
+        self.user.save()
+        request.user = self.user
+
+        huser_after = huser_from_request(request)
+        self.assertTrue(huser_after.is_superuser())
+        self.assertEqual(huser_after.get_queues().count(), 3)
