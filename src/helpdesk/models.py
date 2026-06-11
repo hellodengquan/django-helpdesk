@@ -2468,11 +2468,15 @@ class EmailRoutingRule(models.Model):
         return [k.strip() for k in raw.split(",") if k.strip()]
 
     @staticmethod
-    def _match_pattern(pattern, text, match_type, case_sensitive=False):
+    def _match_pattern(pattern, text, match_type, case_sensitive=None):
         if not pattern:
             return True
         if text is None:
             return False
+
+        if case_sensitive is None:
+            case_sensitive = match_type == MATCH_TYPE_EXACT
+
         if not case_sensitive:
             pattern = pattern.lower()
             text = text.lower()
