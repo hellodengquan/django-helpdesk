@@ -75,6 +75,11 @@ def get_search_cache_suffix():
     return "_postgres"
 
 
+def get_search_cache_key(base_key):
+    suffix = get_search_cache_suffix()
+    return f"{base_key}{suffix}"
+
+
 def _get_fallback_annotation_fields():
     fields = {}
     for field_path in SEARCH_FIELDS:
@@ -184,11 +189,14 @@ class __Query__:
         self.huser = huser
         self.params = query_params if query_params else query_from_base64(base64query)
         self.base64 = base64query if base64query else query_to_base64(query_params)
-        self.result = None
+        self._result_cache = {}
 
     def get_search_filter_args(self):
         search = self.params.get("search_string", "")
         return get_search_filter_args(search)
+
+    def _get_cache_key(self):
+        return get_search_cache_key("result")
 
     def __run__(self, queryset):
         """
@@ -248,9 +256,14 @@ class __Query__:
         return queryset.distinct()
 
     def get(self):
+        cache_key = self._get_cache_key()
+        if cache_key in self._result_cache:
+            return self._result_cache[cache_key]
         # Prefilter the allowed tickets
         tickets = self.huser.get_tickets_in_queues().select_related()
-        return self.__run__(tickets)
+        result = self.__run__(tickets)
+        self._result_cache[cache_key] = result
+        return result
 
     def get_datatables_context(self, *, column_lookup=None, **kwargs):
         """

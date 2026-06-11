@@ -12,6 +12,8 @@ from helpdesk.query import (
     _get_fallback_search_filter_args,
     get_search_sort_key,
     get_search_cache_suffix,
+    get_search_cache_key,
+    get_query_class,
     SEARCH_BACKEND_POSTGRES,
     SEARCH_BACKEND_FALLBACK,
     apply_search_annotations,
@@ -424,3 +426,155 @@ class BackendIsolationTests(TestCase):
         fallback_suffix = "_fallback"
         postgres_suffix = "_postgres"
         self.assertNotEqual(fallback_suffix, postgres_suffix)
+
+
+class CacheBackendIsolationTests(TestCase):
+    def setUp(self):
+        self.queue = Queue.objects.create(
+            title="Test Cache Queue",
+            slug="test_cache_queue",
+            allow_public_submission=True,
+        )
+        self.user = get_staff_user()
+        self.ticket = Ticket.objects.create(
+            title="Cache Test Ticket",
+            queue=self.queue,
+            description="Testing cache isolation",
+        )
+        self.ticket.save()
+
+    def test_get_search_cache_key_fallback(self):
+        key = get_search_cache_key("my_query")
+        self.assertTrue(key.endswith("_fallback"))
+        self.assertIn("my_query", key)
+
+    @override_settings(
+        DATABASES={
+            "default": {
+                "ENGINE": "django.db.backends.postgresql",
+                "NAME": "test_db",
+            }
+        }
+    )
+    def test_get_search_cache_key_postgres(self):
+        key = get_search_cache_key("my_query")
+        self.assertTrue(key.endswith("_postgres"))
+        self.assertIn("my_query", key)
+
+    def test_cache_keys_differ_between_backends(self):
+        fallback_key = get_search_cache_key("test_query")
+        with self.settings(
+            DATABASES={
+                "default": {
+                    "ENGINE": "django.db.backends.postgresql",
+                    "NAME": "test_db",
+                }
+            }
+        ):
+            postgres_key = get_search_cache_key("test_query")
+        self.assertNotEqual(fallback_key, postgres_key)
+        self.assertIn("fallback", fallback_key)
+        self.assertIn("postgres", postgres_key)
+
+    def test_query_class_has_result_cache(self):
+        from helpdesk.user import HelpdeskUser
+
+        QueryClass = get_query_class()
+        query = QueryClass(HelpdeskUser(self.user), query_params={"search_string": ""})
+        self.assertTrue(hasattr(query, "_result_cache"))
+        self.assertIsInstance(query._result_cache, dict)
+
+    def test_query_cache_uses_backend_specific_key(self):
+        from helpdesk.user import HelpdeskUser
+
+        QueryClass = get_query_class()
+        query = QueryClass(HelpdeskUser(self.user), query_params={"search_string": ""})
+        cache_key = query._get_cache_key()
+        self.assertIn("fallback", cache_key)
+
+    def test_different_backends_have_separate_cache_entries(self):
+        from helpdesk.user import HelpdeskUser
+
+        QueryClass = get_query_class()
+        query = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": "Cache Test"},
+        )
+        fallback_cache_key = query._get_cache_key()
+
+        result = query.get()
+        self.assertIn(fallback_cache_key, query._result_cache)
+        fallback_count = len(query._result_cache)
+
+        with self.settings(
+            DATABASES={
+                "default": {
+                    "ENGINE": "django.db.backends.postgresql",
+                    "NAME": "test_db",
+                }
+            }
+        ):
+            postgres_cache_key = query._get_cache_key()
+            self.assertNotEqual(fallback_cache_key, postgres_cache_key)
+            self.assertNotIn(postgres_cache_key, query._result_cache)
+
+        self.assertEqual(len(query._result_cache), fallback_count)
+
+    def test_cache_suffix_function_consistency(self):
+        suffix = get_search_cache_suffix()
+        backend = get_search_backend()
+        if backend == SEARCH_BACKEND_FALLBACK:
+            self.assertEqual(suffix, "_fallback")
+        else:
+            self.assertEqual(suffix, "_postgres")
+
+    def test_cache_key_contains_base_key(self):
+        base_key = "custom_search_key"
+        cache_key = get_search_cache_key(base_key)
+        self.assertTrue(cache_key.startswith(base_key))
+
+    def test_empty_base_key_still_has_suffix(self):
+        cache_key = get_search_cache_key("")
+        self.assertTrue(cache_key.endswith("_fallback"))
+
+    def test_same_base_key_different_backends_different_keys(self):
+        base = "same_query"
+        key1 = get_search_cache_key(base)
+        with self.settings(
+            DATABASES={
+                "default": {
+                    "ENGINE": "django.db.backends.postgresql",
+                    "NAME": "test_db",
+                }
+            }
+        ):
+            key2 = get_search_cache_key(base)
+        self.assertNotEqual(key1, key2)
+
+    def test_backend_isolation_prevents_cache_pollution(self):
+        from helpdesk.user import HelpdeskUser
+
+        QueryClass = get_query_class()
+        query = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": "Cache"},
+        )
+
+        result_fallback = query.get()
+        fallback_key = query._get_cache_key()
+        self.assertIn(fallback_key, query._result_cache)
+
+        with self.settings(
+            DATABASES={
+                "default": {
+                    "ENGINE": "django.db.backends.postgresql",
+                    "NAME": "test_db",
+                }
+            }
+        ):
+            postgres_key = query._get_cache_key()
+            self.assertNotIn(postgres_key, query._result_cache)
+            self.assertEqual(len(query._result_cache), 1)
+
+        self.assertEqual(len(query._result_cache), 1)
+        self.assertIn(fallback_key, query._result_cache)
