@@ -79,7 +79,15 @@ from helpdesk.models import (
     TicketDependency,
     UserSettings,
 )
-from helpdesk.query import get_query_class, query_from_base64, query_to_base64
+from helpdesk.query import (
+    get_query_class,
+    query_from_base64,
+    query_to_base64,
+    get_search_backend,
+    is_fallback_search_backend,
+    SEARCH_BACKEND_POSTGRES,
+    SEARCH_BACKEND_FALLBACK,
+)
 from helpdesk.user import HelpdeskUser
 from helpdesk.update_ticket import (
     update_ticket,
@@ -1214,16 +1222,12 @@ def ticket_list(request):
     )
 
     search_message = ""
-    if query_params["search_string"] and settings.DATABASES["default"][
-        "ENGINE"
-    ].endswith("sqlite"):
+    if query_params["search_string"] and is_fallback_search_backend():
         search_message = _(
-            "<p><strong>Note:</strong> Your keyword search is case sensitive "
-            "because of your database. This means the search will <strong>not</strong> "
-            "be accurate. By switching to a different database system you will gain "
-            "better searching! For more information, read the "
-            '<a href="http://docs.djangoproject.com/en/dev/ref/databases/#sqlite-string-matching">'
-            "Django Documentation on string matching in SQLite</a>."
+            "<p><strong>Note:</strong> Your keyword search is using fallback mode "
+            "for case-insensitive searching. Search results may be slightly slower "
+            "than on native database systems that support case-insensitive matching. "
+            "For better search performance, consider switching to PostgreSQL."
         )
 
     kbitem_choices = []

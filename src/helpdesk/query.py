@@ -1,6 +1,8 @@
 from base64 import b64decode, b64encode
 from django.db.models import Q, Max
 from django.db.models import F, Window, Subquery, OuterRef
+from django.db.models.functions import Lower, Cast
+from django.db.models import CharField
 from .models import FollowUp
 from django.urls import reverse
 from django.utils.html import escape
@@ -28,7 +30,102 @@ def query_from_base64(b64data):
     return query
 
 
-def get_search_filter_args(search):
+SEARCH_BACKEND_POSTGRES = "postgres"
+SEARCH_BACKEND_FALLBACK = "fallback"
+
+SEARCH_FIELDS = [
+    "id",
+    "title",
+    "description",
+    "priority",
+    "resolution",
+    "submitter_email",
+    "assigned_to__email",
+    "ticketcustomfieldvalue__value",
+    "created",
+    "due_date",
+]
+
+SEARCH_QUEUE_FIELD = "queue__title"
+SEARCH_PRIORITY_FIELD = "priority"
+
+
+def get_search_backend():
+    from django.conf import settings
+
+    engine = settings.DATABASES["default"]["ENGINE"]
+    if "postgres" in engine:
+        return SEARCH_BACKEND_POSTGRES
+    return SEARCH_BACKEND_FALLBACK
+
+
+def is_fallback_search_backend():
+    return get_search_backend() == SEARCH_BACKEND_FALLBACK
+
+
+def get_search_sort_key(field_name):
+    if is_fallback_search_backend():
+        return f"{field_name}_search_fallback"
+    return field_name
+
+
+def get_search_cache_suffix():
+    if is_fallback_search_backend():
+        return "_fallback"
+    return "_postgres"
+
+
+def _get_fallback_annotation_fields():
+    fields = {}
+    for field_path in SEARCH_FIELDS:
+        parts = field_path.split("__")
+        if len(parts) == 1:
+            field_name = field_path
+            alias = f"{field_name}_search_fallback"
+            fields[alias] = Lower(Cast(field_name, output_field=CharField()))
+        else:
+            alias = f"{field_path.replace('__', '_')}_search_fallback"
+            fields[alias] = Lower(Cast(field_path, output_field=CharField()))
+    queue_alias = f"{SEARCH_QUEUE_FIELD.replace('__', '_')}_search_fallback"
+    fields[queue_alias] = Lower(Cast(SEARCH_QUEUE_FIELD, output_field=CharField()))
+    return fields
+
+
+def apply_search_annotations(queryset):
+    if not is_fallback_search_backend():
+        return queryset
+    return queryset.annotate(**_get_fallback_annotation_fields())
+
+
+def _get_fallback_field_lookup(field_path):
+    alias = field_path.replace("__", "_") + "_search_fallback"
+    return f"{alias}__contains"
+
+
+def _get_fallback_search_filter_args(search):
+    if not search:
+        return Q()
+    search_lower = search.lower()
+    if search_lower.startswith("queue:"):
+        lookup = _get_fallback_field_lookup(SEARCH_QUEUE_FIELD)
+        return Q(**{lookup: search_lower[len("queue:") :]})
+    if search_lower.startswith("priority:"):
+        lookup = _get_fallback_field_lookup(SEARCH_PRIORITY_FIELD)
+        return Q(**{lookup: search_lower[len("priority:") :]})
+    my_filter = Q()
+    for subsearch in search_lower.split("or"):
+        subsearch = subsearch.strip()
+        if not subsearch:
+            continue
+        sub_filter = Q()
+        for field_path in SEARCH_FIELDS:
+            lookup = _get_fallback_field_lookup(field_path)
+            sub_filter |= Q(**{lookup: subsearch})
+        my_filter |= sub_filter
+    return my_filter
+
+
+def _get_postgres_search_filter_args(search):
     if not search:
         return Q()
     if search.startswith("queue:"):
@@ -40,19 +137,18 @@ def get_search_filter_args(search):
         subsearch = subsearch.strip()
         if not subsearch:
             continue
-        my_filter |= (
-            Q(id__icontains=subsearch)
-            | Q(title__icontains=subsearch)
-            | Q(description__icontains=subsearch)
-            | Q(priority__icontains=subsearch)
-            | Q(resolution__icontains=subsearch)
-            | Q(submitter_email__icontains=subsearch)
-            | Q(assigned_to__email__icontains=subsearch)
-            | Q(ticketcustomfieldvalue__value__icontains=subsearch)
-            | Q(created__icontains=subsearch)
-            | Q(due_date__icontains=subsearch)
-        )
+        sub_filter = Q()
+        for field_path in SEARCH_FIELDS:
+            sub_filter |= Q(**{f"{field_path}__icontains": subsearch})
+        my_filter |= sub_filter
     return my_filter
+
+
+def get_search_filter_args(search):
+    backend = get_search_backend()
+    if backend == SEARCH_BACKEND_POSTGRES:
+        return _get_postgres_search_filter_args(search)
+    return _get_fallback_search_filter_args(search)
 
 
 DATATABLES_ORDER_COLUMN_CHOICES = Choices(
@@ -137,6 +233,7 @@ class __Query__:
                 # Now remove the matched null keys
                 for null_key in matched_null_keys:
                     del null_filters[null_key]
+        queryset = apply_search_annotations(queryset)
         queryset = queryset.filter(
             *q_args,
             (Q(**value_filters) & Q(**null_filters)) & self.get_search_filter_args(),
@@ -207,6 +304,8 @@ class __Query__:
                 .distinct()
             )
         )
+
+        queryset = apply_search_annotations(queryset)
 
         total = queryset.count()
 
