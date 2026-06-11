@@ -775,3 +775,123 @@ class TicketDetailMacroIntegrationTestCase(TestCase):
         self.shared_macro.refresh_from_db()
         self.assertEqual(self.shared_macro.usage_count, 3)
         self.assertEqual(MacroUsage.objects.filter(macro=self.shared_macro).count(), 3)
+
+    def test_end_to_end_macro_use_error_scenarios(self):
+        self.client.logout()
+        self.client.login(username="otherstaff", password="pass")
+
+        response = self.client.post(
+            reverse(
+                "helpdesk:macro_use",
+                kwargs={"macro_id": self.personal_macro.id, "ticket_id": self.ticket.id},
+            ),
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(MacroUsage.objects.count(), 0)
+
+        self.client.login(username="staffuser", password="pass")
+
+        response = self.client.post(
+            reverse(
+                "helpdesk:macro_use",
+                kwargs={"macro_id": 99999, "ticket_id": self.ticket.id},
+            ),
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(MacroUsage.objects.count(), 0)
+
+        response = self.client.post(
+            reverse(
+                "helpdesk:macro_use",
+                kwargs={"macro_id": self.shared_macro.id, "ticket_id": 99999},
+            ),
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(MacroUsage.objects.count(), 0)
+
+    def test_end_to_end_macro_use_archived_macro(self):
+        archived_macro = Macro.objects.create(
+            name="Archived Macro",
+            body="This macro is archived",
+            author=self.other_user,
+            is_shared=True,
+            status=Macro.ARCHIVED_STATUS,
+        )
+
+        response = self.client.post(
+            reverse(
+                "helpdesk:macro_use",
+                kwargs={"macro_id": archived_macro.id, "ticket_id": self.ticket.id},
+            ),
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(MacroUsage.objects.count(), 0)
+
+    def test_end_to_end_macro_use_unauthenticated(self):
+        self.client.logout()
+
+        response = self.client.post(
+            reverse(
+                "helpdesk:macro_use",
+                kwargs={"macro_id": self.shared_macro.id, "ticket_id": self.ticket.id},
+            ),
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/login/", response.url)
+        self.assertEqual(MacroUsage.objects.count(), 0)
+
+    def test_ticket_detail_template_contains_error_callback(self):
+        response = self.client.get(reverse("helpdesk:view", kwargs={"ticket_id": self.ticket.id}))
+        content = response.content.decode("utf-8")
+
+        self.assertIn("Macro usage tracking failed", content)
+        self.assertIn("Usage of this macro was not counted", content)
+        self.assertIn("do not have permission to use this macro", content)
+        self.assertIn("Server error prevented this macro usage", content)
+        self.assertIn("alert-warning", content)
+        self.assertIn("alert-dismissible", content)
+
+    def test_end_to_end_macro_use_wrong_queue_macro(self):
+        wrong_queue = Queue.objects.create(title="Wrong Queue", slug="wrong")
+        restricted_macro = Macro.objects.create(
+            name="Restricted Queue Macro",
+            body="Only for wrong queue",
+            author=self.other_user,
+            is_shared=True,
+        )
+        restricted_macro.queues.add(wrong_queue)
+
+        response = self.client.post(
+            reverse(
+                "helpdesk:macro_use",
+                kwargs={"macro_id": restricted_macro.id, "ticket_id": self.ticket.id},
+            ),
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(MacroUsage.objects.count(), 0)
+
+    def test_end_to_end_macro_use_method_not_get(self):
+        response = self.client.get(
+            reverse(
+                "helpdesk:macro_use",
+                kwargs={"macro_id": self.shared_macro.id, "ticket_id": self.ticket.id},
+            ),
+        )
+        self.assertEqual(response.status_code, 405)
+
+    def test_end_to_end_macro_use_error_increments_nothing(self):
+        initial_count = self.shared_macro.usage_count
+        initial_usage = MacroUsage.objects.count()
+
+        self.client.logout()
+        self.client.login(username="otherstaff", password="pass")
+        self.client.post(
+            reverse(
+                "helpdesk:macro_use",
+                kwargs={"macro_id": self.personal_macro.id, "ticket_id": self.ticket.id},
+            ),
+        )
+
+        self.shared_macro.refresh_from_db()
+        self.assertEqual(self.shared_macro.usage_count, initial_count)
+        self.assertEqual(MacroUsage.objects.count(), initial_usage)

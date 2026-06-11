@@ -376,7 +376,24 @@ $( function() {
                       url: '{% url "helpdesk:macro_use" macro_id=0 ticket_id=0 %}'.replace('/0/use/0/', '/' + macroId + '/use/' + ticketId + '/'),
                       method: 'POST',
                       data: { csrfmiddlewaretoken: csrfToken },
-                      dataType: 'json'
+                      dataType: 'json',
+                      error: function(xhr, status, error) {
+                          console.warn('Macro usage tracking failed:', status, error);
+                          var msg = '{% trans "Warning: Usage of this macro was not counted in statistics due to a temporary error." %}';
+                          if (xhr.status === 403) {
+                              msg = '{% trans "Warning: You do not have permission to use this macro, so usage was not recorded." %}';
+                          } else if (xhr.status >= 500) {
+                              msg = '{% trans "Warning: Server error prevented this macro usage from being recorded in statistics." %}';
+                          }
+                          var notification = $('<div class="alert alert-warning alert-dismissible fade show mt-2" role="alert">' +
+                              '<i class="fas fa-exclamation-triangle"></i> ' + msg +
+                              '<button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>' +
+                              '</div>');
+                          $('#followup-area').after(notification);
+                          setTimeout(function() {
+                              notification.alert('close');
+                          }, 8000);
+                      }
                   });
 
                   btn.removeClass('btn-outline-secondary').addClass('btn-success');
