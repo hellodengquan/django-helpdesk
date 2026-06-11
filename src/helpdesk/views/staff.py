@@ -118,22 +118,8 @@ else:
     )
 
 
-def _get_queue_choices(queues):
-    """Return list of `choices` array for html form for given queues
-
-    idea is to return only one choice if there is only one queue or add empty
-    choice at the beginning of the list, if there are more queues
-    """
-    queue_choices = []
-    if len(queues) > 1:
-        queue_choices = [("", "--------")]
-    queue_choices += [(q.id, q.title) for q in queues]
-    return queue_choices
-
-
 def get_user_queues(user) -> dict[str, str]:
-    queues = HelpdeskUser(user).get_queues()
-    return _get_queue_choices(queues)
+    return HelpdeskUser(user).get_queue_choices()
 
 
 def get_form_extra_kwargs(user) -> dict[str, object]:
@@ -429,7 +415,7 @@ def followup_delete(request, ticket_id, followup_id):
     """followup delete for superuser"""
 
     ticket = get_object_or_404(Ticket, id=ticket_id)
-    if not request.user.is_superuser:
+    if not HelpdeskUser(request.user).is_superuser():
         return HttpResponseRedirect(reverse("helpdesk:view", args=[ticket.id]))
 
     followup = get_object_or_404(FollowUp, id=followup_id)
@@ -1487,7 +1473,8 @@ unhold_ticket = staff_member_required(unhold_ticket)
 
 @helpdesk_staff_member_required
 def rss_list(request):
-    return render(request, "helpdesk/rss_list.html", {"queues": Queue.objects.all()})
+    huser = HelpdeskUser(request.user)
+    return render(request, "helpdesk/rss_list.html", {"queues": huser.get_queues()})
 
 
 rss_list = staff_member_required(rss_list)
@@ -1495,10 +1482,11 @@ rss_list = staff_member_required(rss_list)
 
 @helpdesk_staff_member_required
 def report_index(request):
+    huser = HelpdeskUser(request.user)
     number_tickets = Ticket.objects.all().count()
     saved_query = request.GET.get("saved_query", None)
 
-    user_queues = HelpdeskUser(request.user).get_queues()
+    user_queues = huser.get_queues()
     Tickets = Ticket.objects.filter(queue__in=user_queues)
     basic_ticket_stats = calc_basic_ticket_stats(Tickets)
 
@@ -1507,10 +1495,8 @@ def report_index(request):
     #          Open  Resolved
     # Queue 1    10     4
     # Queue 2     4    12
-    Queues = user_queues if user_queues else Queue.objects.all()
-
     dash_tickets = []
-    for queue in Queues:
+    for queue in user_queues:
         dash_ticket = {
             "queue": queue.id,
             "name": queue.title,
@@ -1550,10 +1536,11 @@ def get_report_queryset_or_redirect(request, report):
     ):
         return None, None, HttpResponseRedirect(reverse("helpdesk:report_index"))
 
+    huser = HelpdeskUser(request.user)
     report_queryset = (
         Ticket.objects.all()
         .select_related()
-        .filter(queue__in=HelpdeskUser(request.user).get_queues())
+        .filter(queue__in=huser.get_queues())
     )
 
     try:

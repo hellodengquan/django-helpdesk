@@ -14,6 +14,28 @@ class HelpdeskUser:
     def __init__(self, user):
         self.user = user
 
+    def is_authenticated(self):
+        return self.user.is_authenticated
+
+    def is_active(self):
+        return self.user.is_active
+
+    def is_staff(self):
+        if callable(helpdesk_settings.HELPDESK_ALLOW_NON_STAFF_TICKET_UPDATE):
+            return helpdesk_settings.HELPDESK_ALLOW_NON_STAFF_TICKET_UPDATE(self.user)
+        if helpdesk_settings.HELPDESK_ALLOW_NON_STAFF_TICKET_UPDATE:
+            return self.is_authenticated() and self.is_active()
+        return self.is_authenticated() and self.is_active() and self.user.is_staff
+
+    def is_superuser(self):
+        return self.is_authenticated() and self.is_active() and self.user.is_superuser
+
+    def is_team_member(self, kbitem):
+        if not helpdesk_settings.HELPDESK_KB_ENABLED:
+            return False
+        team = kbitem.get_team()
+        return bool(team and team.is_member(self.user))
+
     def get_queues(self):
         """Return the list of Queues the user can access.
 
@@ -25,7 +47,7 @@ class HelpdeskUser:
         public_ids = [q.pk for q in Queue.objects.filter(allow_public_submission=True)]
         limit_queues_by_user = (
             helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION
-            and not user.is_superuser
+            and not self.is_superuser()
         )
         if limit_queues_by_user:
             id_list = [q.pk for q in all_queues if user.has_perm(q.permission_name)]
@@ -33,6 +55,19 @@ class HelpdeskUser:
             return all_queues.filter(pk__in=id_list)
         else:
             return all_queues
+
+    def get_queue_choices(self):
+        """Return list of choices for html form for queues the user can access.
+
+        Returns only one choice if there is only one queue or add empty
+        choice at the beginning of the list, if there are more queues.
+        """
+        queues = self.get_queues()
+        queue_choices = []
+        if len(queues) > 1:
+            queue_choices = [("", "--------")]
+        queue_choices += [(q.id, q.title) for q in queues]
+        return queue_choices
 
     def get_allowed_kb_categories(self):
         categories = []
@@ -46,7 +81,7 @@ class HelpdeskUser:
         kbitems = []
         if helpdesk_settings.HELPDESK_KB_ENABLED:
             for item in KBItem.objects.all():
-                if item.get_team() and item.get_team().is_member(self.user):
+                if self.is_team_member(item):
                     kbitems.append(item)
         return kbitems
 
@@ -54,7 +89,7 @@ class HelpdeskUser:
         return Ticket.objects.filter(queue__in=self.get_queues())
 
     def has_full_access(self):
-        if self.user.is_superuser:
+        if self.is_superuser():
             return True
         if helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION:
             return False

@@ -30,7 +30,8 @@ def index(request):
 
 def category(request, slug, iframe=False):
     category = get_object_or_404(KBCategory, slug__iexact=slug)
-    if not user.huser_from_request(request).can_access_kbcategory(category):
+    huser = user.huser_from_request(request)
+    if not huser.can_access_kbcategory(category):
         raise Http404
     items = category.kbitem_set.filter(enabled=True)
     selected_item = request.GET.get("kbitem", None)
@@ -46,7 +47,7 @@ def category(request, slug, iframe=False):
     template = "helpdesk/kb_category.html"
     if iframe:
         template = "helpdesk/kb_category_iframe.html"
-    staff = request.user.is_authenticated and request.user.is_staff
+    staff = huser.is_staff()
     return render(
         request,
         template,
