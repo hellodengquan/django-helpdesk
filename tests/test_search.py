@@ -1000,3 +1000,228 @@ class CacheInvalidationTests(TestCase):
 
         stored_version = cache.get(SEARCH_CACHE_VERSION_KEY)
         self.assertEqual(stored_version, 1)
+
+
+class TicketDeletionCacheInvalidationTests(TestCase):
+    def setUp(self):
+        self.queue = Queue.objects.create(
+            title="Deletion Test Queue",
+            slug="deletion_test_queue",
+            allow_public_submission=True,
+        )
+        self.user = get_staff_user()
+        cache = _get_django_cache()
+        cache.delete(SEARCH_CACHE_VERSION_KEY)
+
+    def test_hard_delete_invalidates_search_cache(self):
+        ticket = Ticket.objects.create(
+            title="Hard Delete Test Ticket",
+            queue=self.queue,
+            description="Will be hard deleted",
+        )
+        ticket.save()
+        old_version = get_search_cache_version()
+        ticket.delete()
+        new_version = get_search_cache_version()
+        self.assertGreater(new_version, old_version)
+
+    def test_hard_delete_invalidates_both_backends(self):
+        ticket = Ticket.objects.create(
+            title="Both Backends Test",
+            queue=self.queue,
+            description="Testing both backends invalidation",
+        )
+        ticket.save()
+        cache = _get_django_cache()
+        fallback_key = "helpdesk:search:invalidate:fallback"
+        postgres_key = "helpdesk:search:invalidate:postgres"
+        cache.delete(fallback_key)
+        cache.delete(postgres_key)
+        ticket.delete()
+        fallback_version = cache.get(fallback_key)
+        postgres_version = cache.get(postgres_key)
+        self.assertIsNotNone(fallback_version)
+        self.assertIsNotNone(postgres_version)
+        self.assertEqual(fallback_version, postgres_version)
+
+    def test_bulk_delete_triggers_invalidation(self):
+        tickets = []
+        for i in range(3):
+            t = Ticket.objects.create(
+                title=f"Bulk Delete Ticket {i}",
+                queue=self.queue,
+                description=f"Bulk delete test {i}",
+            )
+            tickets.append(t)
+        old_version = get_search_cache_version()
+        Ticket.objects.filter(queue=self.queue).delete()
+        new_version = get_search_cache_version()
+        self.assertGreater(new_version, old_version)
+
+    def test_soft_delete_via_duplicate_status_invalidates_cache(self):
+        ticket1 = Ticket.objects.create(
+            title="Original Ticket",
+            queue=self.queue,
+            description="The main ticket",
+        )
+        ticket2 = Ticket.objects.create(
+            title="Duplicate Ticket",
+            queue=self.queue,
+            description="Will be soft deleted",
+        )
+        old_version = get_search_cache_version()
+        ticket2.merged_to = ticket1
+        ticket2.status = Ticket.DUPLICATE_STATUS
+        ticket2.save()
+        new_version = get_search_cache_version()
+        self.assertGreater(new_version, old_version)
+
+    def test_soft_delete_only_merged_to_invalidates_cache(self):
+        ticket1 = Ticket.objects.create(
+            title="Target Ticket",
+            queue=self.queue,
+            description="Merge target",
+        )
+        ticket2 = Ticket.objects.create(
+            title="To Be Merged",
+            queue=self.queue,
+            description="Will have merged_to set",
+        )
+        old_version = get_search_cache_version()
+        ticket2.merged_to = ticket1
+        ticket2.save()
+        new_version = get_search_cache_version()
+        self.assertGreater(new_version, old_version)
+
+    def test_soft_delete_only_status_duplicate_invalidates_cache(self):
+        ticket = Ticket.objects.create(
+            title="Status Change Ticket",
+            queue=self.queue,
+            description="Only status will change",
+        )
+        old_version = get_search_cache_version()
+        ticket.status = Ticket.DUPLICATE_STATUS
+        ticket.save()
+        new_version = get_search_cache_version()
+        self.assertGreater(new_version, old_version)
+
+    def test_cache_keys_updated_after_hard_delete(self):
+        from helpdesk.user import HelpdeskUser
+
+        ticket = Ticket.objects.create(
+            title="Cache Keys Update Test",
+            queue=self.queue,
+            description="Cache keys should change after delete",
+        )
+        ticket.save()
+        QueryClass = get_query_class()
+        query = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": "Cache Keys"},
+        )
+        old_process_key = query._get_process_cache_key()
+        ticket.delete()
+        new_process_key = query._get_process_cache_key()
+        self.assertNotEqual(old_process_key, new_process_key)
+
+    def test_cache_keys_updated_after_soft_delete(self):
+        from helpdesk.user import HelpdeskUser
+
+        ticket1 = Ticket.objects.create(
+            title="Main Ticket",
+            queue=self.queue,
+            description="Main ticket for merge",
+        )
+        ticket2 = Ticket.objects.create(
+            title="Merge Source",
+            queue=self.queue,
+            description="Will be merged",
+        )
+        QueryClass = get_query_class()
+        query = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": ""},
+        )
+        old_process_key = query._get_process_cache_key()
+        ticket2.merged_to = ticket1
+        ticket2.status = Ticket.DUPLICATE_STATUS
+        ticket2.save()
+        new_process_key = query._get_process_cache_key()
+        self.assertNotEqual(old_process_key, new_process_key)
+
+    def test_new_ticket_not_in_search_after_hard_delete(self):
+        from helpdesk.user import HelpdeskUser
+
+        ticket = Ticket.objects.create(
+            title="Ghost Ticket Test",
+            queue=self.queue,
+            description="This ticket will be deleted",
+        )
+        ticket.save()
+        QueryClass = get_query_class()
+        query_before = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": "Ghost"},
+        )
+        results_before = list(query_before.get())
+        self.assertIn(ticket, results_before)
+        ticket_id = ticket.id
+        ticket.delete()
+        query_after = QueryClass(
+            HelpdeskUser(self.user),
+            query_params={"search_string": "Ghost"},
+        )
+        results_after = list(query_after.get())
+        self.assertNotIn(ticket, results_after)
+
+    def test_soft_deleted_ticket_duplicate_status_updated(self):
+        ticket1 = Ticket.objects.create(
+            title="Surviving Ticket",
+            queue=self.queue,
+            description="The one that survives",
+        )
+        ticket2 = Ticket.objects.create(
+            title="Disappearing Ticket",
+            queue=self.queue,
+            description="Will become duplicate",
+        )
+        ticket2.merged_to = ticket1
+        ticket2.status = Ticket.DUPLICATE_STATUS
+        ticket2.save()
+        ticket2.refresh_from_db()
+        self.assertEqual(ticket2.status, Ticket.DUPLICATE_STATUS)
+        self.assertEqual(ticket2.merged_to_id, ticket1.id)
+
+    def test_pre_delete_signal_triggers_invalidation(self):
+        ticket = Ticket.objects.create(
+            title="Pre Delete Signal",
+            queue=self.queue,
+            description="Testing pre_delete signal",
+        )
+        ticket.save()
+        old_version = get_search_cache_version()
+        ticket.delete()
+        new_version = get_search_cache_version()
+        self.assertGreater(new_version, old_version)
+
+    def test_multiple_soft_deletes_all_invalidate(self):
+        ticket_main = Ticket.objects.create(
+            title="Main",
+            queue=self.queue,
+            description="Main ticket",
+        )
+        tickets = []
+        for i in range(3):
+            t = Ticket.objects.create(
+                title=f"Duplicate {i}",
+                queue=self.queue,
+                description=f"Will be duplicate {i}",
+            )
+            tickets.append(t)
+        old_version = get_search_cache_version()
+        for t in tickets:
+            t.merged_to = ticket_main
+            t.status = Ticket.DUPLICATE_STATUS
+            t.save()
+        new_version = get_search_cache_version()
+        self.assertGreaterEqual(new_version - old_version, len(tickets))

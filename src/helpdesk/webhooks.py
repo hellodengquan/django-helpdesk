@@ -2,7 +2,7 @@ import requests
 import requests.exceptions
 import logging
 from django.dispatch import receiver
-from django.db.models.signals import post_save, post_delete
+from django.db.models.signals import post_save, post_delete, pre_save, pre_delete
 
 from . import settings
 from .signals import new_ticket_done, update_ticket_done
@@ -89,6 +89,31 @@ def invalidate_search_cache_on_ticket_save(sender, instance, created, **kwargs):
 @receiver(post_delete, sender=Ticket)
 def invalidate_search_cache_on_ticket_delete(sender, instance, **kwargs):
     invalidate_search_cache()
+
+
+@receiver(pre_delete, sender=Ticket)
+def invalidate_search_cache_on_ticket_pre_delete(sender, instance, **kwargs):
+    invalidate_search_cache_for_ticket(instance.id)
+    invalidate_search_cache()
+
+
+@receiver(pre_save, sender=Ticket)
+def invalidate_search_cache_on_ticket_soft_delete(sender, instance, **kwargs):
+    if instance.pk is None:
+        return
+    try:
+        old_instance = Ticket.objects.get(pk=instance.pk)
+    except Ticket.DoesNotExist:
+        return
+    status_changed = old_instance.status != instance.status
+    merged_to_changed = (old_instance.merged_to_id != instance.merged_to_id)
+    duplicate_status = instance.DUPLICATE_STATUS
+    became_duplicate = (
+        status_changed and instance.status == duplicate_status
+    ) or merged_to_changed
+    if became_duplicate or merged_to_changed:
+        invalidate_search_cache_for_ticket(instance.id)
+        invalidate_search_cache()
 
 
 @receiver(post_save, sender=FollowUp)

@@ -85,6 +85,8 @@ from helpdesk.query import (
     query_to_base64,
     get_search_backend,
     is_fallback_search_backend,
+    invalidate_search_cache,
+    invalidate_search_cache_for_ticket,
     SEARCH_BACKEND_POSTGRES,
     SEARCH_BACKEND_FALLBACK,
 )
@@ -329,7 +331,10 @@ def delete_ticket(request, ticket_id):
             {"ticket": ticket, "next": request.GET.get("next", "home")},
         )
     else:
+        invalidate_search_cache_for_ticket(ticket.id)
+        invalidate_search_cache()
         ticket.delete()
+        invalidate_search_cache()
         redirect_to = "helpdesk:home"
         if request.POST.get("next") == "dashboard":
             redirect_to = "helpdesk:dashboard"
@@ -969,6 +974,7 @@ def redirect_from_chosen_ticket(
                 custom_field_value.save(update_fields=["value"])
     # Save changes
     chosen_ticket.save()
+    invalidate_search_cache_for_ticket(chosen_ticket.id)
 
     # For other tickets, save the link to the ticket in which they have been merged to
     # and set status to DUPLICATE
@@ -976,6 +982,7 @@ def redirect_from_chosen_ticket(
         ticket.merged_to = chosen_ticket
         ticket.status = Ticket.DUPLICATE_STATUS
         ticket.save()
+        invalidate_search_cache_for_ticket(ticket.id)
 
         # Send mail to submitter email and ticket CC to let them
         # know ticket has been merged
@@ -1011,6 +1018,7 @@ def redirect_from_chosen_ticket(
             )
         for ticketcc in ticket.ticketcc_set.all():
             chosen_ticket.add_email_to_ticketcc_if_not_in(ticketcc=ticketcc)
+    invalidate_search_cache()
     return redirect(chosen_ticket)
 
 
