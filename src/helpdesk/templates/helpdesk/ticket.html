@@ -122,6 +122,33 @@
                 <dd class='form_help_text'>{% trans "Selecting a pre-set reply will over-write your comment below. You can then modify the pre-set reply to your liking before saving this update." %}</dd>
                 {% endif %}
 
+                {% if available_macros %}
+                <dt>
+                    <label>{% trans "Quick Reply Macro" %}</label>
+                    <span class='form_optional'>{% trans "(Optional)" %}</span>
+                </dt>
+                <dd>
+                    <div id="macro-panel" class="mb-2">
+                        <div class="d-flex flex-wrap gap-1">
+                            {% for macro in available_macros %}
+                            <button type="button" class="btn btn-outline-secondary btn-sm macro-btn"
+                                    data-macro-id="{{ macro.id }}"
+                                    data-macro-name="{{ macro.name|escape }}"
+                                    title="{% if macro.description %}{{ macro.description }}{% else %}{% trans 'Click to use this macro' %}{% endif %}">
+                                <i class="fas fa-bolt"></i>
+                                {{ macro.name }}
+                                {% if not macro.is_shared %}<span class="badge bg-secondary ms-1">{% trans "Mine" %}</span>{% endif %}
+                            </button>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </dd>
+                <dd class='form_help_text'>
+                    {% trans "Click a macro button to insert its content into the comment box. You can edit the text before submitting. Macros auto-fill ticket details using templates." %}
+                    <a href="{% url 'helpdesk:macro_list' %}">{% trans "Manage macros" %}</a>
+                </dd>
+                {% endif %}
+
                 <dt>
                     <label for='commentBox'>{% trans "Comment / Resolution" %}</label>
                 </dt>
@@ -314,6 +341,53 @@ $( function() {
               });
           }
       });
+
+      {% if available_macros %}
+      $('.macro-btn').on('click', function() {
+          var btn = $(this);
+          var macroId = btn.data('macro-id');
+          var macroName = btn.data('macro-name');
+          var ticketId = {{ ticket.id }};
+          var csrfToken = document.querySelector('[name=csrfmiddlewaretoken]').value;
+
+          btn.prop('disabled', true);
+          btn.html('<i class="fas fa-spinner fa-spin"></i> {% trans "Loading..." %}');
+
+          $.ajax({
+              url: '{% url "helpdesk:macro_render" %}',
+              method: 'POST',
+              data: {
+                  macro_id: macroId,
+                  ticket_id: ticketId,
+                  csrfmiddlewaretoken: csrfToken
+              },
+              dataType: 'json',
+              success: function(response) {
+                  var commentBox = $('#commentBox');
+                  var currentContent = commentBox.val();
+                  if (currentContent.trim() !== '') {
+                      commentBox.val(currentContent + '\n\n' + response.rendered_body);
+                  } else {
+                      commentBox.val(response.rendered_body);
+                  }
+                  commentBox.trigger('focus');
+
+                  btn.removeClass('btn-outline-secondary').addClass('btn-success');
+                  btn.html('<i class="fas fa-check"></i> ' + macroName);
+                  setTimeout(function() {
+                      btn.removeClass('btn-success').addClass('btn-outline-secondary');
+                      btn.html('<i class="fas fa-bolt"></i> ' + macroName);
+                      btn.prop('disabled', false);
+                  }, 1500);
+              },
+              error: function(xhr) {
+                  alert('{% trans "Failed to render macro. Please try again." %}');
+                  btn.html('<i class="fas fa-bolt"></i> ' + macroName);
+                  btn.prop('disabled', false);
+              }
+          });
+      });
+      {% endif %}
 
       // Preset name of checklist when a template is selected
       $('#id_checklist_template').on('change', function() {

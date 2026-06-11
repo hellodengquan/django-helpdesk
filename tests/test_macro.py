@@ -536,3 +536,148 @@ class MacroViewTestCase(TestCase):
         self.assertTrue(
             MacroUsage.objects.filter(macro=macro, ticket=self.ticket, user=self.user).exists()
         )
+
+
+class TicketDetailMacroIntegrationTestCase(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.User = get_user_model()
+        cls.user = cls.User.objects.create_user("staffuser", password="pass")
+        cls.user.is_staff = True
+        cls.user.save()
+
+        cls.other_user = cls.User.objects.create_user("otherstaff", password="pass")
+        cls.other_user.is_staff = True
+        cls.other_user.save()
+
+        cls.queue = Queue.objects.create(title="Support Queue", slug="support")
+        cls.other_queue = Queue.objects.create(title="Billing Queue", slug="billing")
+
+        cls.ticket = Ticket.objects.create(
+            title="Login Issue",
+            queue=cls.queue,
+            submitter_email="customer@example.com",
+        )
+
+        cls.shared_macro = Macro.objects.create(
+            name="Greeting",
+            body="Hello {{ submitter_name }},\n\nThank you for contacting us about: {{ ticket.title }}.\n\nBest regards,\n{{ user.get_full_name }}",
+            author=cls.other_user,
+            is_shared=True,
+        )
+
+        cls.personal_macro = Macro.objects.create(
+            name="My Quick Reply",
+            body="Hi {{ submitter_name }},\nWe're looking into this.",
+            author=cls.user,
+            is_shared=False,
+        )
+
+        cls.other_queue_macro = Macro.objects.create(
+            name="Billing Only",
+            body="Billing response",
+            author=cls.other_user,
+            is_shared=True,
+        )
+        cls.other_queue_macro.queues.add(cls.other_queue)
+
+    def setUp(self):
+        self.client.login(username="staffuser", password="pass")
+
+    def test_ticket_detail_has_available_macros_in_context(self):
+        response = self.client.get(reverse("helpdesk:view", kwargs={"ticket_id": self.ticket.id}))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("available_macros", response.context)
+
+        macro_names = [m.name for m in response.context["available_macros"]]
+        self.assertIn("Greeting", macro_names)
+        self.assertIn("My Quick Reply", macro_names)
+        self.assertNotIn("Billing Only", macro_names)
+
+    def test_ticket_detail_renders_macro_panel(self):
+        response = self.client.get(reverse("helpdesk:view", kwargs={"ticket_id": self.ticket.id}))
+        content = response.content.decode("utf-8")
+        self.assertIn("macro-btn", content)
+        self.assertIn("Quick Reply Macro", content)
+        self.assertIn("Greeting", content)
+        self.assertIn("My Quick Reply", content)
+
+    def test_ticket_detail_no_macros_for_other_queue(self):
+        ticket = Ticket.objects.create(
+            title="Billing Ticket",
+            queue=self.other_queue,
+        )
+        response = self.client.get(reverse("helpdesk:view", kwargs={"ticket_id": ticket.id}))
+        macro_names = [m.name for m in response.context["available_macros"]]
+        self.assertIn("Billing Only", macro_names)
+        self.assertIn("Greeting", macro_names)
+        self.assertIn("My Quick Reply", macro_names)
+
+    def test_ticket_detail_macro_panel_shows_queue_filtered_macros(self):
+        queue_limited = Queue.objects.create(title="Limited Queue", slug="limited")
+        limited_macro = Macro.objects.create(
+            name="Limited Only",
+            body="Limited",
+            author=self.user,
+            is_shared=True,
+        )
+        limited_macro.queues.add(queue_limited)
+        ticket_limited = Ticket.objects.create(title="Limited Ticket", queue=queue_limited)
+
+        response = self.client.get(reverse("helpdesk:view", kwargs={"ticket_id": ticket_limited.id}))
+        macro_names = [m.name for m in response.context["available_macros"]]
+        self.assertIn("Limited Only", macro_names)
+        self.assertIn("Greeting", macro_names)
+        self.assertIn("My Quick Reply", macro_names)
+
+        other_ticket = Ticket.objects.create(title="Support Ticket", queue=self.queue)
+        response2 = self.client.get(reverse("helpdesk:view", kwargs={"ticket_id": other_ticket.id}))
+        macro_names2 = [m.name for m in response2.context["available_macros"]]
+        self.assertNotIn("Limited Only", macro_names2)
+        self.assertIn("Greeting", macro_names2)
+
+    def test_ticket_detail_macro_panel_empty_when_no_macros_at_all(self):
+        new_user = self.User.objects.create_user("newstaff", password="pass")
+        new_user.is_staff = True
+        new_user.save()
+        self.client.login(username="newstaff", password="pass")
+
+        isolated_queue = Queue.objects.create(title="Isolated Queue", slug="isolated")
+        restricted_macro = Macro.objects.create(
+            name="Restricted",
+            body="Restricted",
+            author=self.other_user,
+            is_shared=True,
+        )
+        restricted_macro.queues.add(self.queue)
+
+        isolated_ticket = Ticket.objects.create(title="Isolated", queue=isolated_queue)
+        response = self.client.get(reverse("helpdesk:view", kwargs={"ticket_id": isolated_ticket.id}))
+        macro_names = [m.name for m in response.context["available_macros"]]
+        self.assertNotIn("Restricted", macro_names)
+        self.assertNotIn("My Quick Reply", macro_names)
+
+    def test_ticket_detail_macro_buttons_have_correct_data_attributes(self):
+        response = self.client.get(reverse("helpdesk:view", kwargs={"ticket_id": self.ticket.id}))
+        content = response.content.decode("utf-8")
+        self.assertIn(f'data-macro-id="{self.shared_macro.id}"', content)
+        self.assertIn(f'data-macro-id="{self.personal_macro.id}"', content)
+        self.assertIn('data-macro-name="Greeting"', content)
+
+    def test_ticket_detail_personal_macro_has_mine_badge(self):
+        response = self.client.get(reverse("helpdesk:view", kwargs={"ticket_id": self.ticket.id}))
+        content = response.content.decode("utf-8")
+        self.assertIn("Mine", content)
+
+    def test_end_to_end_macro_render_fills_comment(self):
+        response = self.client.post(
+            reverse("helpdesk:macro_render"),
+            data={
+                "macro_id": self.shared_macro.id,
+                "ticket_id": self.ticket.id,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        json_data = response.json()
+        self.assertIn("Login Issue", json_data["rendered_body"])
+        self.assertIn("customer", json_data["rendered_body"])

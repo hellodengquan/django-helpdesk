@@ -525,6 +525,8 @@ def view_ticket(request, ticket_id):
     # add custom fields to further details panel
     customfields_form = EditTicketCustomFieldForm(None, instance=ticket)
 
+    available_macros = get_available_macros_for_user(request.user, queue=ticket.queue)
+
     return render(
         request,
         "helpdesk/ticket.html",
@@ -543,6 +545,7 @@ def view_ticket(request, ticket_id):
             "assignable_users": get_assignable_users(
                 helpdesk_settings.HELPDESK_STAFF_ONLY_TICKET_OWNERS
             ),
+            "available_macros": available_macros,
             **extra_context_kwargs,
         },
     )
