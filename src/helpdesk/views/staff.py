@@ -12,6 +12,7 @@ from ..templated_email import send_templated_mail
 from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime, timedelta
+import logging
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.decorators import user_passes_test
@@ -103,6 +104,8 @@ from rest_framework import status
 from rest_framework.decorators import api_view
 import typing
 from django.utils.timezone import now
+
+logger = logging.getLogger(__name__)
 
 
 if helpdesk_settings.HELPDESK_KB_ENABLED:
@@ -2375,44 +2378,152 @@ def macro_use(request, macro_id, ticket_id):
     """
     Record that a macro was used on a ticket.
     Returns the rendered body.
+
+    Logs all key events (success, permission denied, rendering errors,
+    recording errors) with macro/user/ticket context for auditing and
+    diagnostics.
     """
-    macro = get_object_or_404(Macro, id=macro_id)
-    ticket = get_object_or_404(Ticket, id=ticket_id)
+    log_context = {
+        "macro_id": macro_id,
+        "ticket_id": ticket_id,
+        "user_id": getattr(request.user, "id", None),
+        "username": getattr(request.user, "username", None),
+        "remote_addr": getattr(request, "META", {}).get("REMOTE_ADDR"),
+    }
 
-    if not can_use_macro(macro, request.user, ticket):
-        raise PermissionDenied()
+    try:
+        try:
+            macro = Macro.objects.get(id=macro_id)
+        except Macro.DoesNotExist:
+            logger.warning(
+                "macro_use: macro not found | macro_id=%s ticket_id=%s user=%s",
+                macro_id, ticket_id, request.user.username,
+                extra=log_context,
+            )
+            raise Http404("Macro %s does not exist." % macro_id)
 
-    rendered_body = render_macro(macro.body, ticket, request.user)
+        log_context["macro_name"] = macro.name
+        log_context["macro_is_shared"] = macro.is_shared
 
-    from helpdesk.lib import macro_template_context
-    context_data = macro_template_context(ticket, request.user)
+        try:
+            ticket = Ticket.objects.get(id=ticket_id)
+        except Ticket.DoesNotExist:
+            logger.warning(
+                "macro_use: ticket not found | macro_id=%s ticket_id=%s user=%s",
+                macro_id, ticket_id, request.user.username,
+                extra=log_context,
+            )
+            raise Http404("Ticket %s does not exist." % ticket_id)
 
-    safe_context = {}
-    for key, value in context_data.items():
-        if isinstance(value, (str, int, float, bool, type(None))):
-            safe_context[key] = value
-        elif isinstance(value, dict):
-            safe_context[key] = {
-                k: v for k, v in value.items()
-                if isinstance(v, (str, int, float, bool, type(None)))
+        log_context["ticket_title"] = ticket.title
+        log_context["queue_id"] = ticket.queue_id
+        log_context["queue_name"] = ticket.queue.title
+
+        if not can_use_macro(macro, request.user, ticket):
+            logger.warning(
+                "macro_use: permission denied | macro=%s ticket=%d user=%s "
+                "is_shared=%s author_id=%s",
+                macro.name, ticket.id, request.user.username,
+                macro.is_shared, macro.author_id,
+                extra=log_context,
+            )
+            raise PermissionDenied(
+                _("You do not have permission to use this macro on this ticket.")
+            )
+
+        try:
+            rendered_body = render_macro(macro.body, ticket, request.user)
+        except Exception as exc:
+            logger.error(
+                "macro_use: template rendering failed | macro=%s ticket=%d user=%s "
+                "error=%s",
+                macro.name, ticket.id, request.user.username, str(exc),
+                exc_info=True,
+                extra=log_context,
+            )
+            return JsonResponse(
+                {
+                    "error": _("Failed to render macro template."),
+                    "detail": str(exc) if settings.DEBUG else None,
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        from helpdesk.lib import macro_template_context
+        context_data = macro_template_context(ticket, request.user)
+
+        safe_context = {}
+        for key, value in context_data.items():
+            if isinstance(value, (str, int, float, bool, type(None))):
+                safe_context[key] = value
+            elif isinstance(value, dict):
+                safe_context[key] = {
+                    k: v for k, v in value.items()
+                    if isinstance(v, (str, int, float, bool, type(None)))
+                }
+
+        try:
+            MacroUsage.record_usage(
+                macro=macro,
+                user=request.user,
+                ticket=ticket,
+                rendered_body=rendered_body,
+                context=safe_context,
+            )
+        except Exception as exc:
+            logger.error(
+                "macro_use: failed to record usage | macro=%s ticket=%d user=%s "
+                "error=%s",
+                macro.name, ticket.id, request.user.username, str(exc),
+                exc_info=True,
+                extra=log_context,
+            )
+            return JsonResponse(
+                {
+                    "error": _("Macro content was rendered but usage was not recorded."),
+                    "detail": str(exc) if settings.DEBUG else None,
+                    "rendered_body": rendered_body,
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        logger.info(
+            "macro_use: recorded successfully | macro=%s ticket=%d user=%s "
+            "is_shared=%s usage_count=%d",
+            macro.name, ticket.id, request.user.username,
+            macro.is_shared, macro.usage_count,
+            extra=log_context,
+        )
+
+        return JsonResponse(
+            {
+                "macro_id": macro.id,
+                "macro_name": macro.name,
+                "rendered_body": rendered_body,
+                "ticket_id": ticket.id,
             }
+        )
 
-    MacroUsage.record_usage(
-        macro=macro,
-        user=request.user,
-        ticket=ticket,
-        rendered_body=rendered_body,
-        context=safe_context,
-    )
-
-    return JsonResponse(
-        {
-            "macro_id": macro.id,
-            "macro_name": macro.name,
-            "rendered_body": rendered_body,
-            "ticket_id": ticket.id,
-        }
-    )
+    except PermissionDenied:
+        raise
+    except Http404:
+        raise
+    except Exception as exc:
+        logger.error(
+            "macro_use: unexpected error | macro_id=%s ticket_id=%s user=%s error=%s",
+            macro_id, ticket_id,
+            getattr(request.user, "username", None),
+            str(exc),
+            exc_info=True,
+            extra=log_context,
+        )
+        return JsonResponse(
+            {
+                "error": _("An unexpected error occurred while processing the macro."),
+                "detail": str(exc) if settings.DEBUG else None,
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 @helpdesk_staff_member_required

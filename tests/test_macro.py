@@ -1,6 +1,7 @@
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.urls import reverse
+from unittest.mock import patch
 from helpdesk.models import Macro, MacroUsage, Queue, ReplyDraft, Ticket
 from helpdesk.lib import render_macro, get_available_macros_for_user, can_use_macro
 from django.utils import timezone
@@ -895,3 +896,182 @@ class TicketDetailMacroIntegrationTestCase(TestCase):
         self.shared_macro.refresh_from_db()
         self.assertEqual(self.shared_macro.usage_count, initial_count)
         self.assertEqual(MacroUsage.objects.count(), initial_usage)
+
+    def test_macro_use_logs_on_success(self):
+        with patch("helpdesk.views.staff.logger") as mock_logger:
+            self.client.post(
+                reverse(
+                    "helpdesk:macro_use",
+                    kwargs={"macro_id": self.shared_macro.id, "ticket_id": self.ticket.id},
+                ),
+            )
+            self.assertTrue(mock_logger.info.called)
+            info_calls = " ".join(
+                [str(c.args) for c in mock_logger.info.call_args_list]
+            )
+            self.assertIn("recorded successfully", info_calls)
+
+    def test_macro_use_logs_on_permission_denied(self):
+        self.client.logout()
+        self.client.login(username="otherstaff", password="pass")
+
+        with patch("helpdesk.views.staff.logger") as mock_logger:
+            self.client.post(
+                reverse(
+                    "helpdesk:macro_use",
+                    kwargs={"macro_id": self.personal_macro.id, "ticket_id": self.ticket.id},
+                ),
+            )
+            self.assertTrue(mock_logger.warning.called)
+            warn_calls = " ".join(
+                [str(c.args) for c in mock_logger.warning.call_args_list]
+            )
+            self.assertIn("permission denied", warn_calls)
+
+    def test_macro_use_logs_on_macro_not_found(self):
+        with patch("helpdesk.views.staff.logger") as mock_logger:
+            self.client.post(
+                reverse(
+                    "helpdesk:macro_use",
+                    kwargs={"macro_id": 99999, "ticket_id": self.ticket.id},
+                ),
+            )
+            self.assertTrue(mock_logger.warning.called)
+            warn_calls = " ".join(
+                [str(c.args) for c in mock_logger.warning.call_args_list]
+            )
+            self.assertIn("macro not found", warn_calls)
+
+    def test_macro_use_logs_on_ticket_not_found(self):
+        with patch("helpdesk.views.staff.logger") as mock_logger:
+            self.client.post(
+                reverse(
+                    "helpdesk:macro_use",
+                    kwargs={"macro_id": self.shared_macro.id, "ticket_id": 99999},
+                ),
+            )
+            self.assertTrue(mock_logger.warning.called)
+            warn_calls = " ".join(
+                [str(c.args) for c in mock_logger.warning.call_args_list]
+            )
+            self.assertIn("ticket not found", warn_calls)
+
+    def test_macro_use_500_when_render_fails(self):
+        with patch(
+            "helpdesk.views.staff.render_macro",
+            side_effect=Exception("Template syntax error"),
+        ) as mock_render:
+            with patch("helpdesk.views.staff.logger") as mock_logger:
+                response = self.client.post(
+                    reverse(
+                        "helpdesk:macro_use",
+                        kwargs={
+                            "macro_id": self.shared_macro.id,
+                            "ticket_id": self.ticket.id,
+                        },
+                    ),
+                )
+
+        self.assertEqual(response.status_code, 500)
+        json_data = response.json()
+        self.assertIn("error", json_data)
+        self.assertEqual(MacroUsage.objects.count(), 0)
+        self.assertTrue(mock_logger.error.called)
+        error_calls = " ".join(
+            [str(c.args) for c in mock_logger.error.call_args_list]
+        )
+        self.assertIn("template rendering failed", error_calls)
+
+    def test_macro_use_500_when_record_usage_fails(self):
+        with patch(
+            "helpdesk.models.MacroUsage.record_usage",
+            side_effect=Exception("Database write failed"),
+        ):
+            with patch("helpdesk.views.staff.logger") as mock_logger:
+                response = self.client.post(
+                    reverse(
+                        "helpdesk:macro_use",
+                        kwargs={
+                            "macro_id": self.shared_macro.id,
+                            "ticket_id": self.ticket.id,
+                        },
+                    ),
+                )
+
+        self.assertEqual(response.status_code, 500)
+        json_data = response.json()
+        self.assertIn("error", json_data)
+        self.assertIn("rendered_body", json_data)
+        self.assertNotEqual(json_data["rendered_body"], "")
+        self.shared_macro.refresh_from_db()
+        self.assertEqual(self.shared_macro.usage_count, 0)
+        self.assertTrue(mock_logger.error.called)
+        error_calls = " ".join(
+            [str(c.args) for c in mock_logger.error.call_args_list]
+        )
+        self.assertIn("failed to record usage", error_calls)
+
+    def test_macro_use_500_response_body_on_unexpected_error(self):
+        with patch(
+            "helpdesk.views.staff.Macro.objects.get",
+            side_effect=Exception("Unexpected DB error"),
+        ):
+            with patch("helpdesk.views.staff.logger") as mock_logger:
+                response = self.client.post(
+                    reverse(
+                        "helpdesk:macro_use",
+                        kwargs={
+                            "macro_id": self.shared_macro.id,
+                            "ticket_id": self.ticket.id,
+                        },
+                    ),
+                )
+
+        self.assertEqual(response.status_code, 500)
+        json_data = response.json()
+        self.assertIn("error", json_data)
+        self.assertEqual(MacroUsage.objects.count(), 0)
+        self.assertTrue(mock_logger.error.called)
+        error_calls = " ".join(
+            [str(c.args) for c in mock_logger.error.call_args_list]
+        )
+        self.assertIn("unexpected error", error_calls)
+
+    def test_macro_use_log_contains_user_context(self):
+        with patch("helpdesk.views.staff.logger") as mock_logger:
+            response = self.client.post(
+                reverse(
+                    "helpdesk:macro_use",
+                    kwargs={"macro_id": self.shared_macro.id, "ticket_id": self.ticket.id},
+                ),
+            )
+            self.assertEqual(response.status_code, 200)
+
+            info_call_extra = mock_logger.info.call_args.kwargs.get("extra", {})
+            self.assertEqual(info_call_extra.get("macro_id"), self.shared_macro.id)
+            self.assertEqual(info_call_extra.get("ticket_id"), self.ticket.id)
+            self.assertEqual(info_call_extra.get("user_id"), self.user.id)
+            self.assertEqual(info_call_extra.get("username"), "staffuser")
+            self.assertEqual(info_call_extra.get("macro_name"), "Greeting")
+            self.assertEqual(info_call_extra.get("ticket_title"), "Login Issue")
+            self.assertEqual(info_call_extra.get("queue_name"), "Support Queue")
+
+    def test_macro_use_500_render_failure_preserves_rendered_body(self):
+        with patch(
+            "helpdesk.models.MacroUsage.record_usage",
+            side_effect=Exception("DB down"),
+        ):
+            response = self.client.post(
+                reverse(
+                    "helpdesk:macro_use",
+                    kwargs={
+                        "macro_id": self.shared_macro.id,
+                        "ticket_id": self.ticket.id,
+                    },
+                ),
+            )
+
+        self.assertEqual(response.status_code, 500)
+        json_data = response.json()
+        self.assertIn("Login Issue", json_data["rendered_body"])
+        self.assertIn("customer", json_data["rendered_body"])
