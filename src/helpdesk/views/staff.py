@@ -446,6 +446,8 @@ def view_ticket(request, ticket_id):
     ticket = get_object_or_404(Ticket, id=ticket_id)
     ticket_perm_check(request, ticket)
 
+    sla_status, sla_deadline, sla_time_remaining = get_ticket_sla_status(ticket)
+
     if "take" in request.GET:
         update_ticket(request.user, ticket, owner=request.user.id)
         return return_to_ticket(request.user, ticket)
@@ -535,6 +537,9 @@ def view_ticket(request, ticket_id):
             "assignable_users": get_assignable_users(
                 helpdesk_settings.HELPDESK_STAFF_ONLY_TICKET_OWNERS
             ),
+            "sla_status": sla_status,
+            "sla_deadline": sla_deadline,
+            "sla_time_remaining": sla_time_remaining,
             **extra_context_kwargs,
         },
     )

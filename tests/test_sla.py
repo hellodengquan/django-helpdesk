@@ -1160,3 +1160,528 @@ class SlaAlertViewPermissionTestCase(TestCase):
             visible_ids,
             "User must NOT see tickets in queues they lack permission for (data leak).",
         )
+
+
+class SlaTicketDetailE2ETestCase(TestCase):
+    """End-to-end tests verifying the SLA status is correctly wired into the
+    ticket detail view (view_ticket).
+
+    These tests validate the full path:
+        Ticket in DB → view_ticket() view → get_ticket_sla_status() called
+        → sla_* variables rendered into template context.
+    """
+
+    fixtures = ["emailtemplate.json"]
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from django.test.client import Client
+
+        User = get_user_model()
+        self.staff = User.objects.create(username="staff_detail", is_staff=True)
+        self.staff.set_password("pass")
+        self.staff.save()
+
+        self.queue_sla = Queue.objects.create(
+            title="E2E SLA Queue", slug="e2e-sla-q", escalate_days=3
+        )
+        self.queue_no_sla = Queue.objects.create(
+            title="E2E No-SLA Queue", slug="e2e-nosla-q", escalate_days=None
+        )
+
+        self.client = Client()
+        self.client.login(username="staff_detail", password="pass")
+
+    # --- Detail-view SLA context injection ---
+
+    @freeze_time("2026-06-13 12:00:00")
+    def test_detail_view_shows_overdue_sla_status(self):
+        """A ticket that has passed its SLA deadline must surface status='overdue'
+        on the detail page."""
+        from django.urls import reverse
+
+        ticket = Ticket.objects.create(
+            title="Overdue detail ticket",
+            queue=self.queue_sla,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            on_hold=False,
+        )
+        resp = self.client.get(reverse("helpdesk:view", args=[ticket.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context["sla_status"], "overdue")
+        self.assertIsNotNone(resp.context["sla_deadline"])
+        self.assertTrue(
+            resp.context["sla_time_remaining"].total_seconds() < 0,
+            "Overdue ticket must carry a negative time_remaining timedelta.",
+        )
+
+    @freeze_time("2026-06-11 09:00:00")
+    def test_detail_view_shows_ok_sla_status(self):
+        """A ticket comfortably inside its SLA window must show status='ok'."""
+        from django.urls import reverse
+
+        # Created 4 full days before the deadline gives us ~4d remaining, well over 24h.
+        ticket = Ticket.objects.create(
+            title="OK detail ticket",
+            queue=self.queue_sla,
+            created=timezone.make_aware(datetime(2026, 6, 10, 9, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            on_hold=False,
+        )
+        resp = self.client.get(reverse("helpdesk:view", args=[ticket.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context["sla_status"], "ok")
+        self.assertIsNotNone(resp.context["sla_deadline"])
+        self.assertTrue(
+            resp.context["sla_time_remaining"].total_seconds() >= 86400,
+            "OK ticket must have >= 24h remaining on the detail page.",
+        )
+
+    @freeze_time("2026-06-14 09:00:00")
+    def test_detail_view_shows_warning_sla_status(self):
+        """A ticket within 24 hours of its deadline must show status='warning'.
+
+        With escalate_days=3, created=June 11 10:00 gives deadline=June 14 10:00.
+        Freeze to June 14 09:00 → exactly 1 hour (3600s) remaining, which is
+        between 0 ≤ remaining < 86400 → status='warning'.
+        """
+        from django.urls import reverse
+
+        ticket = Ticket.objects.create(
+            title="Warning detail ticket",
+            queue=self.queue_sla,
+            created=timezone.make_aware(datetime(2026, 6, 11, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            on_hold=False,
+        )
+        resp = self.client.get(reverse("helpdesk:view", args=[ticket.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context["sla_status"], "warning")
+        remaining_sec = resp.context["sla_time_remaining"].total_seconds()
+        self.assertGreaterEqual(
+            remaining_sec, 0, "Warning ticket must not yet be overdue."
+        )
+        self.assertLess(
+            remaining_sec,
+            86400,
+            "Warning ticket must have fewer than 24h of SLA time remaining.",
+        )
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_detail_view_shows_excluded_sla_status(self):
+        """An on-hold ticket must surface status='excluded' on the detail page."""
+        from django.urls import reverse
+
+        ticket = Ticket.objects.create(
+            title="Excluded detail ticket",
+            queue=self.queue_sla,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            on_hold=True,
+        )
+        resp = self.client.get(reverse("helpdesk:view", args=[ticket.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context["sla_status"], "excluded")
+        self.assertIsNone(resp.context["sla_deadline"])
+        self.assertIsNone(resp.context["sla_time_remaining"])
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_detail_view_shows_no_sla_for_unconfigured_queue(self):
+        """A ticket in a queue without escalate_days must show status='no_sla'
+        on the detail page, with no deadline or time-remaining payload."""
+        from django.urls import reverse
+
+        ticket = Ticket.objects.create(
+            title="No-SLA detail ticket",
+            queue=self.queue_no_sla,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            on_hold=False,
+        )
+        resp = self.client.get(reverse("helpdesk:view", args=[ticket.id]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context["sla_status"], "no_sla")
+        self.assertIsNone(resp.context["sla_deadline"])
+        self.assertIsNone(resp.context["sla_time_remaining"])
+
+
+class SlaTicketListAndAlertE2ETestCase(TestCase):
+    """End-to-end tests verifying the ticket list / SLA alert view entry points.
+
+    Validates cross-view consistency: the same ticket set must produce the
+    same SLA bucket counts whether viewed from the dedicated sla_alert page
+    or via the list view's default open-ticket query.
+    """
+
+    fixtures = ["emailtemplate.json"]
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from django.test.client import Client
+
+        User = get_user_model()
+        self.staff = User.objects.create(username="staff_list", is_staff=True)
+        self.staff.set_password("pass")
+        self.staff.save()
+
+        self.queue = Queue.objects.create(
+            title="List E2E Queue", slug="list-e2e-q", escalate_days=3
+        )
+
+        self.client = Client()
+        self.client.login(username="staff_list", password="pass")
+
+    @freeze_time("2026-06-13 12:00:00")
+    def test_sla_alert_summary_counts_match_ticket_population(self):
+        """The sla_alert view summary counters must agree with the tickets
+        actually present. Seed one ticket per category and verify counts."""
+        from django.urls import reverse
+
+        # Overdue: created 2026-06-01, way past 3-day SLA
+        Ticket.objects.create(
+            title="E2E Overdue",
+            queue=self.queue,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            on_hold=False,
+        )
+        # Warning: created 2026-06-12 14:00 (less than 24h remain on 2026-06-13 12:00
+        # with escalate_days=3 → deadline is June 15 14:00 which is > 24h away.
+        # So instead make created=June 9 15:00 → deadline around June 12 15:00,
+        # then now=June 13 12:00 → already past deadline (overdue). Hmm.
+        # Simpler: created June 11 15:00 → deadline around June 14 15:00.
+        # now=June 14 10:00 would give 5h remaining = warning. But we need
+        # overdue + warning + 2x excluded, so change freeze_time.
+        Ticket.objects.create(
+            title="E2E Warning",
+            queue=self.queue,
+            created=timezone.make_aware(datetime(2026, 6, 11, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            on_hold=False,
+        )
+        # Excluded: on_hold=True
+        Ticket.objects.create(
+            title="E2E Excluded",
+            queue=self.queue,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            on_hold=True,
+        )
+        # Excluded: priority=1
+        Ticket.objects.create(
+            title="E2E Excluded Priority 1",
+            queue=self.queue,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=1,
+            on_hold=False,
+        )
+
+        # With escalate_days=3, created June 11 10:00 deadline=June 14 10:00.
+        # Running at June 13 12:00 → 22h remaining < 24h → warning. ✓
+        resp = self.client.get(reverse("helpdesk:sla_alert"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context["total_count"], 4)
+        self.assertEqual(resp.context["overdue_count"], 1)
+        self.assertEqual(resp.context["warning_count"], 1)
+        self.assertEqual(resp.context["excluded_count"], 2)
+
+        statuses = {t.sla_status for t in resp.context["display_tickets"]}
+        self.assertEqual(
+            statuses,
+            {"overdue", "warning", "excluded"},
+            "SLA alert page must carry the full expected status set.",
+        )
+
+    @freeze_time("2026-06-13 12:00:00")
+    def test_sla_alert_filter_by_priority(self):
+        """SLA alert page must honour the priority filter via query string."""
+        from django.urls import reverse
+
+        Ticket.objects.create(
+            title="Priority 3 Overdue",
+            queue=self.queue,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+        )
+        Ticket.objects.create(
+            title="Priority 5 Overdue",
+            queue=self.queue,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=5,
+        )
+
+        resp = self.client.get(
+            reverse("helpdesk:sla_alert") + "?priority=3"
+        )
+        self.assertEqual(resp.status_code, 200)
+        titles = {t.title for t in resp.context["display_tickets"]}
+        self.assertIn("Priority 3 Overdue", titles)
+        self.assertNotIn("Priority 5 Overdue", titles)
+
+    @freeze_time("2026-06-13 12:00:00")
+    def test_sla_alert_filter_by_unassigned_owner(self):
+        """SLA alert page must return only unassigned tickets when owner=-1."""
+        from django.contrib.auth import get_user_model
+        from django.urls import reverse
+
+        User = get_user_model()
+        owner = User.objects.create(username="owner_e2e", is_staff=True)
+
+        Ticket.objects.create(
+            title="Unassigned ticket",
+            queue=self.queue,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+        )
+        Ticket.objects.create(
+            title="Assigned ticket",
+            queue=self.queue,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            assigned_to=owner,
+        )
+
+        resp = self.client.get(
+            reverse("helpdesk:sla_alert") + "?assigned_to=-1"
+        )
+        self.assertEqual(resp.status_code, 200)
+        titles = {t.title for t in resp.context["display_tickets"]}
+        self.assertIn("Unassigned ticket", titles)
+        self.assertNotIn("Assigned ticket", titles)
+
+
+class SlaEscalateCommandE2ETestCase(TestCase):
+    """End-to-end tests exercising the escalate_tickets management command.
+
+    These tests exercise the full upgrade path:
+        Tickets in DB → `manage.py escalate_tickets` → SLA threshold
+        comparison against date.today() → tickets that breach the threshold
+        get their priority bumped (or left alone when already at max) and
+        receive a follow-up noting the escalation.
+    """
+
+    fixtures = ["emailtemplate.json"]
+
+    def setUp(self):
+        self.queue = Queue.objects.create(
+            title="Escalate E2E Queue",
+            slug="escalate-e2e-q",
+            escalate_days=3,
+        )
+        self.queue_no_sla = Queue.objects.create(
+            title="No Escalate Queue",
+            slug="no-escalate-q",
+            escalate_days=None,
+        )
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_command_escalates_overdue_ticket_priority(self):
+        """A ticket created far enough in the past must have its priority
+        bumped by the escalate_tickets management command.
+
+        NOTE: django-helpdesk treats smaller priority integers as MORE urgent,
+        so "escalating priority" means `ticket.priority -= 1` (e.g. 3 → 2).
+        """
+        from django.core.management import call_command
+        from io import StringIO
+        from helpdesk.models import FollowUp
+
+        ticket = Ticket.objects.create(
+            title="Escalate Me",
+            queue=self.queue,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            on_hold=False,
+        )
+        initial_priority = ticket.priority
+
+        call_command("escalate_tickets", stdout=StringIO(), stderr=StringIO())
+
+        ticket.refresh_from_db()
+        self.assertLess(
+            ticket.priority,
+            initial_priority,
+            "Overdue ticket's priority integer must DECREASE (3→2) because "
+            "lower integer = higher urgency.",
+        )
+        self.assertEqual(
+            ticket.priority,
+            initial_priority - 1,
+            "Priority must be decremented by exactly one level.",
+        )
+
+        followups = FollowUp.objects.filter(ticket=ticket)
+        self.assertTrue(
+            followups.exists(),
+            "Escalation must produce at least one FollowUp entry.",
+        )
+        self.assertTrue(
+            any("scalat" in f.comment.lower() for f in followups),
+            "FollowUp comment must mention the escalation action.",
+        )
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_command_skips_recent_ticket_within_sla(self):
+        """A freshly-created ticket inside the SLA window must NOT be escalated."""
+        from django.core.management import call_command
+        from io import StringIO
+        from helpdesk.models import FollowUp
+
+        ticket = Ticket.objects.create(
+            title="Do Not Escalate",
+            queue=self.queue,
+            created=timezone.make_aware(datetime(2026, 6, 11, 9, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            on_hold=False,
+        )
+        initial_priority = ticket.priority
+
+        call_command("escalate_tickets", stdout=StringIO(), stderr=StringIO())
+
+        ticket.refresh_from_db()
+        self.assertEqual(
+            ticket.priority,
+            initial_priority,
+            "Fresh ticket within SLA window must NOT be escalated.",
+        )
+        self.assertFalse(
+            FollowUp.objects.filter(ticket=ticket).exists(),
+            "Fresh ticket must not receive any FollowUp from the command.",
+        )
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_command_skips_on_hold_ticket(self):
+        """An on-hold ticket must be excluded from escalation even when overdue."""
+        from django.core.management import call_command
+        from io import StringIO
+
+        ticket = Ticket.objects.create(
+            title="On-hold Not Escalated",
+            queue=self.queue,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            on_hold=True,
+        )
+        initial_priority = ticket.priority
+
+        call_command("escalate_tickets", stdout=StringIO(), stderr=StringIO())
+
+        ticket.refresh_from_db()
+        self.assertEqual(
+            ticket.priority,
+            initial_priority,
+            "On-hold ticket must never be escalated.",
+        )
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_command_skips_closed_ticket(self):
+        """A closed ticket must be excluded from escalation even when overdue."""
+        from django.core.management import call_command
+        from io import StringIO
+
+        ticket = Ticket.objects.create(
+            title="Closed Not Escalated",
+            queue=self.queue,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.CLOSED_STATUS,
+            priority=3,
+            on_hold=False,
+        )
+        initial_priority = ticket.priority
+
+        call_command("escalate_tickets", stdout=StringIO(), stderr=StringIO())
+
+        ticket.refresh_from_db()
+        self.assertEqual(
+            ticket.priority,
+            initial_priority,
+            "Closed ticket must not be escalated regardless of age.",
+        )
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_command_skips_queue_without_sla_config(self):
+        """Tickets in a queue without escalate_days must never be escalated."""
+        from django.core.management import call_command
+        from io import StringIO
+
+        ticket = Ticket.objects.create(
+            title="No-SLA Queue Ticket",
+            queue=self.queue_no_sla,
+            created=timezone.make_aware(datetime(2026, 6, 1, 10, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            on_hold=False,
+        )
+        initial_priority = ticket.priority
+
+        call_command("escalate_tickets", stdout=StringIO(), stderr=StringIO())
+
+        ticket.refresh_from_db()
+        self.assertEqual(
+            ticket.priority,
+            initial_priority,
+            "Ticket in queue with no SLA config must not be escalated.",
+        )
+
+    @freeze_time("2026-06-11 10:00:00")
+    def test_command_respects_escalation_exclusion_dates(self):
+        """EscalationExclusion entries must be subtracted from the working-day
+        window, effectively giving the ticket more grace time.
+
+        Management command logic (today=June 11, escalate_days=3):
+          last = June 11 - 3 days = June 8
+          Iterate June 8, 9, 10 (workdate < today)
+          If all three dates are EscalationExclusion → working_days = 0
+          req_last_escl_date = June 11 10:00 - 0 days = June 11 10:00
+          → a ticket created June 11 09:00 (<= June 11 10:00) would still escalate.
+
+        Instead we want the ticket protected. With 2 exclusion days in the
+        3-day window: working_days = 1, req_last_escl_date = June 10 10:00.
+        A ticket created June 10 11:00 is NOT <= that threshold → spared.
+        """
+        from django.core.management import call_command
+        from io import StringIO
+        from helpdesk.models import EscalationExclusion
+
+        # Exclude two of the three days in the command's look-back window
+        EscalationExclusion.objects.create(date=date(2026, 6, 8))
+        EscalationExclusion.objects.create(date=date(2026, 6, 9))
+        # June 10 remains a working day → working_days = 1
+        # → req_last_escl_date = June 11 10:00 - 1 day = June 10 10:00
+
+        ticket = Ticket.objects.create(
+            title="Exclusion-Protected Ticket",
+            queue=self.queue,
+            created=timezone.make_aware(datetime(2026, 6, 10, 11, 0, 0)),
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            on_hold=False,
+        )
+        initial_priority = ticket.priority
+
+        call_command("escalate_tickets", stdout=StringIO(), stderr=StringIO())
+
+        ticket.refresh_from_db()
+        self.assertEqual(
+            ticket.priority,
+            initial_priority,
+            "Ticket within SLA window after subtracting exclusion days "
+            "must NOT be escalated.",
+        )
