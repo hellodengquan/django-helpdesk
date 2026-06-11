@@ -443,6 +443,238 @@ except imaplib.IMAP4.abort as e1:
 | 附件 ValidationError → 工单已创建 | 工单+FollowUp 已保存，但附件丢失，无回滚 |
 | OAuth 令牌无缓存 | 每次拉取都重新获取令牌，增加延迟和失败概率 |
 
+### 3.6 坏邮件解析的健壮性边界
+
+#### 3.6.1 单封邮件的异常捕获边界
+
+四种拉取协议对单封邮件处理的异常捕获范围各不相同：
+
+| 异常类型 | POP3 | IMAP | OAuth | Local |
+|----------|------|------|-------|-------|
+| `IgnoreTicketException` | ✅ 捕获，保留邮件 | ✅ 捕获，保留邮件 | ✅ 捕获，保留邮件 | ✅ 捕获，保留文件 |
+| `DeleteIgnoredTicketException` | ✅ 捕获，删除邮件 | ✅ 捕获，删除邮件 | ✅ 捕获，删除邮件 | ✅ 捕获，删除文件 |
+| `TypeError` | ❌ 不捕获 | ✅ 捕获，记 error 日志，保留邮件保留 | ✅ 捕获，记 error 日志，邮件保留 | ❌ 不捕获 |
+| `MessageParseError` (MIME 损坏) | ❌ 不捕获 | ❌ 不捕获 | ❌ 不捕获 | ❌ 不捕获 |
+| `UnicodeError` / 编码错误 | ❌ 不捕获（大部分编码问题被兜底） | ❌ 不捕获（大部分编码问题被兜底） | ❌ 不捕获 | ❌ 不捕获 |
+| `ValidationError` (附件) | ❌ 不捕获（但在函数内被 try-except 包住） | ❌ 不捕获（但在函数内被 try-except 包住） | ❌ 不捕获 | ❌ 不捕获 |
+| `MemoryError` (超大邮件) | ❌ 不捕获 | ❌ 不捕获 | ❌ 不捕获 | ❌ 不捕获 |
+| 其他任意未捕获异常 | ❌ 冒泡到外层 | ❌ 部分被外层 IMAP4.error 可能捕获 | ❌ 部分被外层 IMAP4.error 可能捕获 | ❌ 冒泡到外层 |
+
+**关键结论**：只有 `IgnoreTicketException` 和 `DeleteIgnoredTicketException` 在所有协议中都被逐封捕获。其他绝大多数异常都会冒泡。
+
+**代码证据**：
+- POP3 (`email.py:166-190`)：只有两个 except 分支
+- IMAP (`email.py:232-261`)：三个 except 分支，多了一个 `TypeError`
+- OAuth (`email.py:332-365`)：同 IMAP
+- Local (`email.py:468-498`)：只有两个 except 分支
+
+IMAP/OAuth 外层还有一个 `except imaplib.IMAP4.error` 包裹整个 search + 循环，但只捕获 IMAP 协议层面的错误，不捕获业务逻辑抛出的 Python 异常。
+
+#### 3.6.2 场景一：MIME 结构损坏
+
+**触发路径**：
+
+```
+email.message_from_string(message, EmailMessage, policy=policy.default)
+  ↓
+如果邮件格式严重损坏（缺少必要的 MIME 边界、畸形头部等
+  ↓
+抛出 email.errors.MessageParseError（或其子类 MessageError）
+  ↓
+extract_email_metadata() 内未捕获
+  ↓
+pop3_sync/imap_sync 单封邮件循环未捕获
+  ↓
+向上冒泡
+```
+
+**代码位置**：`email.py:1072-1073`
+
+```python
+message_obj: EmailMessage = email.message_from_string(
+    message, EmailMessage, policy=policy.default
+)
+```
+
+使用 `policy=policy.default` 是**严格模式**，对损坏邮件的容错性比 `policy.compat32` 低很多。
+
+**异常传播后果**：
+
+| 协议 | 传播结果 |
+|------|----------|
+| **POP3** | 冒泡 → `process_queue()` 无捕获 → `process_email()` 的 `except Exception` 捕获 → **该 Queue 本轮停止，`email_box_last_check` 不更新 → 继续下一个 Queue |
+| **IMAP** | 冒泡 → 外层 `except imaplib.IMAP4.error` **不捕获**（MessageParseError 不属于 IMAP4.error → 继续冒泡到 `process_email()` → 同上 |
+| **OAuth** | 同 IMAP |
+| **Local** | 冒泡 → `process_queue()` 无捕获 → `process_email()` 捕获 → 同上 |
+
+**对队列的影响**：
+- ✅ 其他 Queue 不受影响（`process_email()` 最外层有 `except Exception`）
+- ❌ 当前 Queue **后面的所有邮件都不会被处理
+- ❌ 已处理过的邮件（在损坏邮件之前的）已正常删除
+- ❌ 损坏的邮件保留在服务器，下次轮询还会再次尝试 → **无限重试
+- ❌ 每次重试都失败 → 该 Queue 永久卡在这封坏邮件上
+
+**部分损坏的 MIME（能解析出部分内容）：
+- 正文提取失败有兜底：`extract_email_message_content()` 中如果 `part.get_body()` 返回 None → 返回 `(None, None)` → 后续用空字符串继续
+- 附件提取失败有兜底：`extract_attachments()` 递归中如果某个 part 解析失败可能抛出异常 → 整体中断
+
+#### 3.6.3 场景二：编码不匹配
+
+**多层编码兜底机制非常完善，大部分编码问题都有 fallback**：
+
+**第 1 层：拉取阶段**
+```python
+# email.py:165 (POP3), 231 (IMAP), 330 (OAuth), 467 (Local)
+full_message = encoding.force_str(data[0][1], errors="replace")
+```
+`errors="replace"` → 无法解码的字节用 替换字符替代，**永远不会抛出 UnicodeError。
+
+**第 2 层：主题解码**
+```python
+# email.py:501-509 (decodeUnknown)
+def decodeUnknown(charset, string):
+    if string and not isinstance(string, str):
+        if not charset:
+            try:
+                return str(string, encoding="utf-8", errors="replace")
+            except UnicodeError:
+                return str(string, encoding="iso8859-1", errors="replace")
+        return str(string, encoding=charset, errors="replace")
+    return string
+```
+全部使用 `errors="replace"`，且无字符集时先试 UTF-8，失败回退到 ISO-8859-1。
+
+**第 3 层：邮件头解码**
+```python
+# email.py:512-519
+def decode_mail_headers(string):
+    decoded = email.header.decode_header(string)
+    return " ".join([
+        str(msg, encoding=charset, errors="replace") if charset else str(msg)
+        for msg, charset in decoded
+    ])
+```
+同样 `errors="replace"`。
+
+**第 4 层：正文解码**
+```python
+# email.py:805-811
+def get_email_body_from_part_payload(part) -> str:
+    try:
+        return encoding.smart_str(part.get_payload(decode=True))
+    except UnicodeDecodeError:
+        return encoding.smart_str(part.get_payload(decode=False))
+```
+解码失败就不解码，直接返回原始字节串。
+
+**但仍可能抛出编码异常的边缘情况**：
+
+1. **无效字符集名称**：
+   - `charset = "invalid-charset-xyz"`
+   - `str(string, encoding=charset, errors="replace")` 会抛出 `LookupError: unknown encoding`
+   - `decodeUnknown()` 未捕获 `LookupError`
+   - 异常会冒泡
+
+2. **Base64 解码失败**：
+   - `part.get_payload(decode=True)` 在 base64 数据损坏时可能抛出 `binascii.Error`
+   - `mime_content_to_string()` 未捕获
+   - 异常会冒泡
+
+3. **Quoted-Printable 解码失败**：
+   - 同理可能抛出 `binascii.Error`
+   - 未捕获
+
+**编码异常的传播后果**：与 MIME 损坏相同 → 当前 Queue 停止，后续邮件全部跳过。
+
+#### 3.6.4 场景三：大体积邮件 / 大附件
+
+**代码中完全没有大小限制**：
+
+- **整封邮件全部读入内存：`full_message` 是完整的邮件字符串
+- **附件全部读入内存：`SimpleUploadedFile(name, payload_bytes, ...)`
+- **原始邮件备份也在内存：`add_file_if_always_save_incoming_email_message()` 又复制一份
+
+**可能触发的问题**：
+
+1. **内存不足 (MemoryError)**
+   - 超大邮件（比如几十上百 MB 的附件
+   - 整个邮件内容全部加载到内存
+   - 可能导致 OOM，进程被系统 kill
+   - **无日志，无痕迹，`email_box_last_check` 不更新
+
+2. **磁盘空间不足**
+   - 附件保存到磁盘时可能失败
+   - `att.save()` 抛出异常
+   - 但在 `create_object_from_email_message()` 中被 `except ValidationError` 只捕获 `ValidationError`
+   - 如果是 `OSError`/`IOError` 等磁盘错误，**不会被捕获**，会冒泡
+
+3. **Django 文件字段 max_length 限制**
+   - `Attachment.file` 是 `FileField(max_length=1000)`
+   - 文件名路径超过 1000 字符可能抛出 `ValidationError`
+   - 会被 `process_attachments()` 的 `full_clean()` 捕获 → 收集到 errors → 抛出 `ValidationError`
+   - **但这个 ValidationError 会被 `create_object_from_email_message()` 中的 `except ValidationError as e: logger.error(str(e))` 捕获
+   - 所以：工单和 FollowUp 已保存，附件丢失（即残缺工单）
+
+**大邮件对队列的影响**：
+- 如果抛出可捕获的异常（如 ValidationError）→ 单封邮件处理完，继续下一封
+- 如果抛出未捕获的异常（如 OOM、OSError）→ 当前 Queue 停摆，后续邮件全部跳过
+- 如果 OOM 导致进程直接退出 → 所有 Queue 都停摆
+
+#### 3.6.5 异常传播链路总览
+
+```
+单封邮件处理开始
+  │
+  ├─→ IgnoreTicketException → 捕获 → 邮件保留 → 继续下一封
+  │
+  ├─→ DeleteIgnoredTicketException → 捕获 → 邮件删除 → 继续下一封
+  │
+  ├─→ TypeError (仅 IMAP/OAuth) → 捕获 → 记 error 日志 → 邮件保留 → 继续下一封
+  │
+  ├─→ ValidationError (附件) → 在 create_object_from_email_message 内捕获
+  │                          → 记 error 日志 → 工单已创建 → 邮件删除 → 继续下一封
+  │
+  └─→ 其他所有异常 (MessageParseError, LookupError, OSError, MemoryError ...)
+        ↓
+     单封邮件循环未捕获
+        ↓
+     pop3_sync / imap_sync / imap_oauth_sync / local 处理函数
+        ↓
+     冒泡到 process_queue()
+        ↓
+     process_queue() 无外层 try-except
+        ↓
+     冒泡到 process_email() 的 except Exception as e
+        ↓
+     记 error 日志 + exc_info 堆栈
+        ↓
+     该 Queue 的 email_box_last_check 不更新
+        ↓
+     继续遍历下一个 Queue
+```
+
+**唯一的例外**：IMAP/OAuth 的 `server.authenticate()` 失败（`IMAP4.abort`）→ 直接 `sys.exit()` → 整个进程退出，所有 Queue 停摆。
+
+#### 3.6.6 对队列健壮性的影响
+
+| 异常类型 | 单封邮件隔离 | 当前 Queue 停摆 | 其他 Queue 受影响 | 邮件保留/删除 | 可重试 |
+|----------|--------------|--------------|----------------|--------------|---------|
+| IgnoreTicketException | ✅ | ❌ | ❌ | 保留 | 是（每次都忽略） |
+| DeleteIgnoredTicketException | ✅ | ❌ | ❌ | 删除 | 否 |
+| TypeError (IMAP/OAuth) | ✅ | ❌ | ❌ | 保留 | 是（每次都失败） |
+| MIME 结构损坏 | ❌ | ✅ | ❌ | 保留（损坏的那封及之后的） | 是（无限重试） |
+| 编码不匹配（LookupError 等） | ❌ | ✅ | ❌ | 保留 | 是（无限重试） |
+| 大附件 ValidationError | ✅（残缺工单） | ❌ | ❌ | 删除 | 否（工单已建，附件丢了） |
+| OOM 超大邮件 | ❌ | ✅（进程退出所有 Queue） | ✅（进程退出所有都停摆） | 保留 | 是（每次都 OOM） |
+| 磁盘满 OSError | ❌ | ✅ | ❌ | 删除？（取决于异常抛出时机） | 部分 |
+| IMAP/OAuth 认证失败 | ❌ | ✅ | ✅（sys.exit 所有都停摆） | 全部保留 | 是 |
+
+**健壮性总结**：
+- **最危险的是 MIME 结构损坏：一封坏邮件就能让整个 Queue 的邮件处理卡死
+- **最隐蔽的是大附件 ValidationError：邮件被删了，但附件没了，表面上工单是正常的
+- **最严重的是 OOM 和 IMAP 认证失败：所有 Queue 全部停摆
+- **只有 Ignore/DeleteIgnore 是设计完善的：逐封隔离，互不影响
+
 ---
 
 ## 4. 审计字段分析
