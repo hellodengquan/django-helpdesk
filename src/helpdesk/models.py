@@ -1251,8 +1251,9 @@ class Attachment(models.Model):
                 or "application/octet-stream"
             )
 
+        is_new = self._state.adding
         saved_file_name = None
-        if self.file and not self._state.adding:
+        if self.file:
             try:
                 from django.db.models.fields.files import FieldFile
 
@@ -1264,14 +1265,18 @@ class Attachment(models.Model):
         try:
             return super(Attachment, self).save(*args, **kwargs)
         except Exception:
-            try:
-                if self.file and self.file.name and self.file.name != saved_file_name:
-                    self.file.delete(save=False)
-            except Exception as e:
-                logger.warning(
-                    "Failed to clean up attachment file after save failure: %s",
-                    str(e),
-                )
+            file_name_changed = self.file and self.file.name and self.file.name != saved_file_name
+            if is_new or file_name_changed:
+                try:
+                    if self.file and self.file.name:
+                        from django.core.files.storage import default_storage
+                        if default_storage.exists(self.file.name):
+                            self.file.delete(save=False)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to clean up attachment file after save failure: %s",
+                        str(e),
+                    )
             raise
 
     def get_filename(self):
@@ -1332,8 +1337,14 @@ class FollowUpAttachment(Attachment):
         )
         att_path = os.path.join(settings.MEDIA_ROOT, path)
         if settings.STORAGES == "django.core.files.storage.FileSystemStorage":
-            if not os.path.exists(att_path):
-                os.makedirs(att_path, helpdesk_settings.HELPDESK_ATTACHMENT_DIR_PERMS)
+            try:
+                os.makedirs(att_path, helpdesk_settings.HELPDESK_ATTACHMENT_DIR_PERMS, exist_ok=True)
+            except OSError:
+                import logging
+                logging.getLogger("helpdesk").warning(
+                    "Failed to create attachment directory '%s'", att_path
+                )
+                raise
         return os.path.join(path, filename)
 
 
@@ -1350,8 +1361,14 @@ class KBIAttachment(Attachment):
         )
         att_path = os.path.join(settings.MEDIA_ROOT, path)
         if settings.STORAGES == "django.core.files.storage.FileSystemStorage":
-            if not os.path.exists(att_path):
-                os.makedirs(att_path, helpdesk_settings.HELPDESK_ATTACHMENT_DIR_PERMS)
+            try:
+                os.makedirs(att_path, helpdesk_settings.HELPDESK_ATTACHMENT_DIR_PERMS, exist_ok=True)
+            except OSError:
+                import logging
+                logging.getLogger("helpdesk").warning(
+                    "Failed to create attachment directory '%s'", att_path
+                )
+                raise
         return os.path.join(path, filename)
 
 

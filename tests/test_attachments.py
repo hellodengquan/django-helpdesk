@@ -444,6 +444,229 @@ class AttachmentCleanupTests(TestCase):
         )
 
 
+@override_settings(MEDIA_ROOT=MEDIA_DIR)
+class ConcurrentUploadConflictTests(TestCase):
+    """Regression tests for orphan files left behind during concurrent upload conflicts."""
+
+    fixtures = ["emailtemplate.json"]
+
+    def setUp(self):
+        self.queue = models.Queue.objects.create(
+            title="Concurrent Queue",
+            slug="conc_q",
+            allow_public_submission=True,
+        )
+        self.ticket = models.Ticket.objects.create(
+            queue=self.queue,
+            title="Concurrent Upload Ticket",
+            description="Test concurrent uploads",
+        )
+        self.followup = models.FollowUp.objects.create(
+            ticket=self.ticket,
+            title="Concurrent FollowUp",
+            comment="Concurrent test",
+        )
+        User = get_user_model()
+        self.user = User.objects.create(
+            username="conc_user",
+            is_staff=True,
+        )
+        self.user.set_password("pass")
+        self.user.save()
+
+    def _count_files_in_media_dir(self):
+        count = 0
+        if os.path.exists(MEDIA_DIR):
+            for root, dirs, files in os.walk(MEDIA_DIR):
+                count += len(files)
+        return count
+
+    def test_same_filename_concurrent_uploads_no_orphan(self):
+        """When two attachments with the same filename are saved to the same followup,
+        Django auto-renames the second file. If the second save fails, no orphan file
+        should be left behind."""
+        file_content_a = b"content from upload A"
+        file_content_b = b"content from upload B"
+
+        file_a = SimpleUploadedFile("shared_name.txt", file_content_a, "text/plain")
+        att_a = models.FollowUpAttachment(
+            followup=self.followup,
+            file=file_a,
+        )
+        att_a.save()
+        self.assertTrue(
+            models.FollowUpAttachment.objects.filter(pk=att_a.pk).exists()
+        )
+
+        initial_file_count = self._count_files_in_media_dir()
+
+        file_b = SimpleUploadedFile("shared_name.txt", file_content_b, "text/plain")
+        att_b = models.FollowUpAttachment(
+            followup=self.followup,
+            file=file_b,
+        )
+
+        with mock.patch(
+            "django.db.models.Model.save",
+            side_effect=Exception("Simulated concurrent DB write failure"),
+        ):
+            with self.assertRaises(Exception):
+                att_b.save()
+
+        final_file_count = self._count_files_in_media_dir()
+        self.assertEqual(
+            initial_file_count,
+            final_file_count,
+            "Orphan file left behind when concurrent upload with same filename fails",
+        )
+
+    def test_same_filename_concurrent_uploads_both_succeed(self):
+        """When two attachments with the same filename are saved to the same followup
+        and both succeed, Django auto-renames and both files should exist."""
+        file_content_a = b"content from upload A"
+        file_content_b = b"content from upload B"
+
+        file_a = SimpleUploadedFile("dup_name.txt", file_content_a, "text/plain")
+        att_a = models.FollowUpAttachment(
+            followup=self.followup,
+            file=file_a,
+        )
+        att_a.save()
+
+        file_b = SimpleUploadedFile("dup_name.txt", file_content_b, "text/plain")
+        att_b = models.FollowUpAttachment(
+            followup=self.followup,
+            file=file_b,
+        )
+        att_b.save()
+
+        self.assertEqual(
+            2,
+            models.FollowUpAttachment.objects.filter(
+                followup=self.followup
+            ).count(),
+            "Both attachments should be saved even with same filename",
+        )
+        self.assertNotEqual(
+            att_a.file.name,
+            att_b.file.name,
+            "Django should auto-rename conflicting filenames",
+        )
+
+        att_a_file = att_a.file.name
+        att_b_file = att_b.file.name
+        att_a.delete()
+        att_b.delete()
+
+        from django.core.files.storage import default_storage
+
+        self.assertFalse(
+            default_storage.exists(att_a_file),
+            "File for attachment A should be deleted",
+        )
+        self.assertFalse(
+            default_storage.exists(att_b_file),
+            "File for attachment B (auto-renamed) should be deleted",
+        )
+
+    def test_makedirs_concurrent_creation_no_orphan(self):
+        """When os.makedirs is called concurrently and one fails with FileExistsError,
+        the attachment file should be cleaned up."""
+        file_content = b"test makedirs conflict"
+        test_file = SimpleUploadedFile("makedirs_test.txt", file_content, "text/plain")
+        initial_file_count = self._count_files_in_media_dir()
+
+        att = models.FollowUpAttachment(
+            followup=self.followup,
+            file=test_file,
+        )
+
+        with mock.patch(
+            "os.makedirs",
+            side_effect=FileExistsError("Directory created by concurrent request"),
+        ):
+            with self.assertRaises((FileExistsError, Exception)):
+                att.save()
+
+        final_file_count = self._count_files_in_media_dir()
+        self.assertEqual(
+            initial_file_count,
+            final_file_count,
+            "Orphan file left behind when makedirs fails due to concurrent creation",
+        )
+
+    def test_update_ticket_concurrent_filename_conflict_no_orphan(self):
+        """When update_ticket is called concurrently and a filename conflict occurs,
+        the auto-renamed file should be cleaned up if the database save fails."""
+        from helpdesk.update_ticket import update_ticket
+
+        first_file = SimpleUploadedFile("conflict.txt", b"first upload", "text/plain")
+        update_ticket(
+            self.user,
+            self.ticket,
+            comment="First upload",
+            files=[first_file],
+        )
+
+        initial_file_count = self._count_files_in_media_dir()
+        initial_att_count = models.FollowUpAttachment.objects.filter(
+            followup__ticket=self.ticket
+        ).count()
+
+        second_file = SimpleUploadedFile("conflict.txt", b"second upload", "text/plain")
+
+        with mock.patch(
+            "helpdesk.update_ticket.add_staff_subscription",
+            side_effect=Exception("Simulated concurrent write failure"),
+        ):
+            with self.assertRaises(Exception):
+                update_ticket(
+                    self.user,
+                    self.ticket,
+                    comment="Second upload (concurrent)",
+                    files=[second_file],
+                )
+
+        final_file_count = self._count_files_in_media_dir()
+        final_att_count = models.FollowUpAttachment.objects.filter(
+            followup__ticket=self.ticket
+        ).count()
+
+        self.assertEqual(
+            initial_file_count,
+            final_file_count,
+            "Orphan file left behind after concurrent filename conflict in update_ticket",
+        )
+        self.assertEqual(
+            initial_att_count,
+            final_att_count,
+            "Database records not rolled back after concurrent filename conflict",
+        )
+
+    def test_process_attachments_filename_conflict_save_failure(self):
+        """When process_attachments encounters a filename conflict and the subsequent
+        database save fails, the auto-renamed file should be cleaned up."""
+        first_file = SimpleUploadedFile("proc_conflict.txt", b"first", "text/plain")
+        lib.process_attachments(self.followup, [first_file])
+
+        initial_file_count = self._count_files_in_media_dir()
+
+        second_file = SimpleUploadedFile("proc_conflict.txt", b"second", "text/plain")
+
+        with mock.patch(
+            "django.db.models.Model.save",
+            side_effect=Exception("DB save failed on conflicting filename"),
+        ):
+            result = lib.process_attachments(self.followup, [second_file])
+
+        final_file_count = self._count_files_in_media_dir()
+        self.assertEqual(
+            initial_file_count,
+            final_file_count,
+            "Orphan file left behind when process_attachments fails on filename conflict",
+        )
+
+
 def tearDownModule():
     try:
         shutil.rmtree(MEDIA_DIR)
