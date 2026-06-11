@@ -182,9 +182,12 @@ def pop3_sync(q, logger, server):
             )
             server.dele(msgNum)
         except BypassTicketException as btex:
-            logger.warning(
-                "Message %s bypassed (kept in POP3 mailbox): %s",
+            _log_bypass_event(
+                logger,
+                q,
                 msgNum,
+                btex.sender_email,
+                btex.subject,
                 btex.reason,
             )
         else:
@@ -254,9 +257,12 @@ def imap_sync(q, logger, server):
                         "Message %s was ignored and deleted from IMAP server" % num
                     )
                 except BypassTicketException as btex:
-                    logger.warning(
-                        "Message %s bypassed (kept in IMAP mailbox): %s",
+                    _log_bypass_event(
+                        logger,
+                        q,
                         num,
+                        btex.sender_email,
+                        btex.subject,
                         btex.reason,
                     )
                 except TypeError as te:
@@ -362,9 +368,12 @@ def imap_oauth_sync(q, logger, server):
                     )
 
                 except BypassTicketException as btex:
-                    logger.warning(
-                        "Message %s bypassed (kept in IMAP mailbox): %s",
+                    _log_bypass_event(
+                        logger,
+                        q,
                         num,
+                        btex.sender_email,
+                        btex.subject,
                         btex.reason,
                     )
 
@@ -503,9 +512,12 @@ def process_queue(q, logger):
                         "Message %d was ignored and deleted local directory", i
                     )
                 except BypassTicketException as btex:
-                    logger.warning(
-                        "Message %d bypassed (kept in local directory): %s",
+                    _log_bypass_event(
+                        logger,
+                        q,
                         i,
+                        btex.sender_email,
+                        btex.subject,
                         btex.reason,
                     )
                 else:
@@ -526,6 +538,36 @@ def process_queue(q, logger):
                             "Message %d was not successfully processed, and will be left in local directory",
                             i,
                         )
+
+
+def _log_bypass_event(
+    logger: logging.Logger,
+    queue: Queue,
+    message_identifier: str,
+    sender_email: str,
+    subject: str,
+    bypass_reason: str,
+) -> None:
+    """
+    Emit a channel-level structured WARNING log when a BypassTicketException
+    is raised.  The ``helpdesk.routing`` logger already records the detailed
+    per-rule diagnostics with ``event=email_routing_bypass``; this companion
+    entry on the per-queue logger adds the queue slug and protocol-specific
+    message id so operators can correlate the two.
+    """
+    queue_slug = getattr(queue, "slug", "") or ""
+    clean_subject = (subject or "").replace("\n", " ").replace("\r", " ")
+    if len(clean_subject) > 200:
+        clean_subject = clean_subject[:197] + "..."
+    logger.warning(
+        "event=email_channel_bypass "
+        "queue=%s message_id=%s sender=%s subject=%r bypass_reason=%s",
+        queue_slug,
+        message_identifier,
+        sender_email,
+        clean_subject,
+        bypass_reason,
+    )
 
 
 def decodeUnknown(charset, string):
@@ -1209,14 +1251,21 @@ def extract_email_metadata(
     }
 
     if ticket_id is None:
-        payload, _matched_rule = apply_routing(
-            payload,
-            sender_email=sender_email,
-            subject=subject,
-            body=(filtered_body or full_body or ""),
-            queue=original_queue,
-            bypass_on_no_match=helpdesk_settings.HELPDESK_EMAIL_ROUTING_BYPASS_ON_NO_MATCH,
-        )
+        try:
+            payload, _matched_rule = apply_routing(
+                payload,
+                sender_email=sender_email,
+                subject=subject,
+                body=(filtered_body or full_body or ""),
+                queue=original_queue,
+                bypass_on_no_match=helpdesk_settings.HELPDESK_EMAIL_ROUTING_BYPASS_ON_NO_MATCH,
+            )
+        except BypassTicketException as btex:
+            if not btex.sender_email:
+                btex.sender_email = sender_email
+            if not btex.subject:
+                btex.subject = subject
+            raise
         queue = payload["queue"]
 
     return create_object_from_email_message(

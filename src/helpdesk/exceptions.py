@@ -24,7 +24,15 @@ class BypassTicketException(Exception):
       2. No routing rule matched the email (default fallback for unrouted mail).
     """
 
-    def __init__(self, reason: str = "No matching routing rule", rule=None):
+    def __init__(
+        self,
+        reason: str = "No matching routing rule",
+        rule=None,
+        sender_email: str = "",
+        subject: str = "",
+    ):
         self.reason = reason
         self.rule = rule
+        self.sender_email = sender_email
+        self.subject = subject
         super().__init__(reason)
