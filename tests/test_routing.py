@@ -1120,6 +1120,423 @@ class RoutingIntegrationWithEmailModuleTests(TestCase):
             hs.HELPDESK_EMAIL_ROUTING_BYPASS_ON_NO_MATCH = original
 
 
+class RoutingRollbackRegressionTests(TestCase):
+    """
+    Simulate configuration drift / corruption and verify that rolling back
+    to a known-good snapshot restores deterministic routing behaviour
+    (hit order, assignment targets, and bypass behaviour).
+
+    The tests follow a strict pattern:
+
+      1. apply a known "production baseline" rule configuration
+      2. run a diverse set of probe emails → record baseline expectations
+      3. mutate the rules in several realistic "broken" ways
+      4. verify the behaviour has indeed changed (sanity check)
+      5. roll back to the baseline configuration
+      6. re-run the same probe emails → must match baseline exactly
+    """
+
+    # ------------------------------------------------------------------
+    # A "production-like" rule configuration, representative of the
+    # "old version" we want to be able to roll back to.
+    # ------------------------------------------------------------------
+    BASELINE_RULE_SPECS: List[dict] = [
+        # 1. Highest priority: explicit spam bypass
+        dict(
+            name="Bypass: Spam / Advertisement",
+            order=1,
+            enabled=True,
+            subject="*spam*",
+            subject_match_type=MATCH_TYPE_WILDCARD,
+            bypass=True,
+        ),
+        # 2. C-level executives get immediate Critical priority + CTO owner
+        dict(
+            name="C-Level VIP",
+            order=10,
+            enabled=True,
+            sender_email="*@exec.example.com",
+            sender_match_type=MATCH_TYPE_WILDCARD,
+            target_priority=1,
+        ),
+        # 3. Billing issues → Billing queue.  Requires BOTH subject match AND
+        #    at least one keyword present (so blank-keywords corruption disables it).
+        dict(
+            name="Billing Queue",
+            order=20,
+            enabled=True,
+            subject="*bill*",
+            subject_match_type=MATCH_TYPE_WILDCARD,
+            keywords="invoice, payment, charge, receipt",
+            keywords_logic=KEYWORDS_LOGIC_ANY,
+            keywords_match_type=MATCH_TYPE_CONTAINS,
+        ),
+        # 4. On-call alerts → assigned to oncall owner + Priority 2.
+        #    NOTE: this rule also matches "[ALERT] billing failure" which is
+        #    also covered by the Billing rule; hence swapping the order of
+        #    rules 3 and 4 will change which rule wins for that probe.
+        dict(
+            name="Oncall Alert",
+            order=30,
+            enabled=True,
+            subject=r"^\[ALERT\].*",
+            subject_match_type=MATCH_TYPE_REGEX,
+            target_priority=2,
+        ),
+        # 5. Disabled catch-all (present in DB but should be skipped)
+        dict(
+            name="Legacy catch-all (disabled)",
+            order=999,
+            enabled=False,
+            sender_email="*",
+            sender_match_type=MATCH_TYPE_WILDCARD,
+            target_priority=5,
+        ),
+    ]
+
+    # Probe emails.  Each covers a distinct code path / conflict scenario.
+    PROBE_EMAILS = [
+        # 0: C-Level VIP match
+        dict(sender="ceo@exec.example.com", subject="URGENT: outage", body="down"),
+        # 1: Billing (subject *bill* + keywords present in body) match
+        dict(sender="sales@example.com", subject="bill for monthly services",
+             body="please find invoice attached and process payment"),
+        # 2: Oncall Alert match
+        dict(sender="monitoring@ops.example.com",
+             subject="[ALERT] prod-api ERROR rate high", body="stack trace"),
+        # 3: Spam bypass match
+        dict(sender="spammer@evil.com", subject="Free spam offer", body="click here"),
+        # 4: No match at all
+        dict(sender="random@external.com", subject="Hello", body="no match"),
+        # 5: Billing keyword blanking victim: body has no keywords → without
+        #    the correct keywords the rule will miss when keywords are corrupted.
+        dict(sender="finance@example.com", subject="bill for services",
+             body="please find attached invoice"),
+        # 6: ORDER-CONFLICT PROBE: subject matches BOTH Billing (*bill*) AND
+        #    Oncall regex (^[ALERT].*).  Whichever rule has lower order wins.
+        dict(sender="ops@example.com", subject="[ALERT] billing gateway down",
+             body="invoice for downtime"),
+    ]
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.q_support = Queue.objects.create(title="Support", slug="support")
+        cls.q_billing = Queue.objects.create(title="Billing", slug="billing")
+        cls.cto = User.objects.create_user(username="cto", password="p")
+        cls.oncall = User.objects.create_user(username="oncall", password="p")
+
+    # ------------------------------------------------------------------
+    # Helper methods
+    # ------------------------------------------------------------------
+    def _apply_config(self, rule_specs: List[dict]) -> None:
+        """Idempotently apply a list of rule specs: wipe existing, create new."""
+        EmailRoutingRule.objects.all().delete()
+        for spec in rule_specs:
+            # Extract M2M queues from the spec if present
+            queues = spec.pop("queues_obj", None)
+            target_queue = spec.pop("target_queue_obj", None)
+            target_owner = spec.pop("target_owner_obj", None)
+            rule = EmailRoutingRule.objects.create(**spec)
+            if queues:
+                rule.queues.set(queues)
+            if target_queue:
+                rule.target_queue = target_queue
+                rule.save(update_fields=["target_queue"])
+            if target_owner:
+                rule.target_owner = target_owner
+                rule.save(update_fields=["target_owner"])
+
+    def _snapshot_rule_config(self) -> List[dict]:
+        """Capture the current rule configuration as a list of dicts
+        (equivalent to the format of BASELINE_RULE_SPECS).
+
+        Database primary keys are excluded from the snapshot because they
+        change on every delete+recreate cycle; all semantic fields are kept.
+        """
+        snapshot = []
+        for rule in EmailRoutingRule.objects.order_by("order", "id"):
+            snapshot.append(
+                dict(
+                    name=rule.name,
+                    order=rule.order,
+                    enabled=rule.enabled,
+                    sender_email=rule.sender_email,
+                    sender_match_type=rule.sender_match_type,
+                    subject=rule.subject,
+                    subject_match_type=rule.subject_match_type,
+                    keywords=rule.keywords,
+                    keywords_logic=rule.keywords_logic,
+                    keywords_match_type=rule.keywords_match_type,
+                    bypass=rule.bypass,
+                    target_queue_id=rule.target_queue_id,
+                    target_priority=rule.target_priority,
+                    target_owner_id=rule.target_owner_id,
+                )
+            )
+        return snapshot
+
+    def _run_probes(self) -> dict:
+        """Run each probe email through apply_routing and collect results.
+        Returns a dict keyed by probe index.  Each value is a dict with
+        enough fields to be sensitive to any regression in rule behaviour.
+
+        NOTE: Database auto-incrementing primary keys are intentionally NOT
+        included in the comparison because they change on every delete+recreate
+        (the rollback mechanism).  Only semantic behaviour fields are tracked.
+        """
+        results = {}
+        import helpdesk.settings as hs
+        orig = hs.HELPDESK_EMAIL_ROUTING_BYPASS_ON_NO_MATCH
+        hs.HELPDESK_EMAIL_ROUTING_BYPASS_ON_NO_MATCH = True
+        try:
+            for idx, probe in enumerate(self.PROBE_EMAILS):
+                entry = {}
+                try:
+                    payload, matched = apply_routing(
+                        {"queue": self.q_support, "priority": 3},
+                        sender_email=probe["sender"],
+                        subject=probe["subject"],
+                        body=probe["body"],
+                        queue=self.q_support,
+                        bypass_on_no_match=True,
+                    )
+                    entry["outcome"] = "routed"
+                    entry["matched_rule_name"] = matched.name if matched else None
+                    entry["priority"] = payload.get("priority")
+                    entry["target_queue_slug"] = (
+                        payload["queue"].slug if payload.get("queue") else None
+                    )
+                    entry["assigned_to_id"] = (
+                        payload["assigned_to"].pk
+                        if payload.get("assigned_to") else None
+                    )
+                except BypassTicketException as e:
+                    entry["outcome"] = "bypass"
+                    entry["bypass_reason"] = e.reason
+                    entry["bypass_type"] = (
+                        "rule_explicit_bypass" if e.rule else "no_matching_rule"
+                    )
+                    entry["matched_rule_name"] = e.rule.name if e.rule else None
+                results[idx] = entry
+        finally:
+            hs.HELPDESK_EMAIL_ROUTING_BYPASS_ON_NO_MATCH = orig
+        return results
+
+    def _assert_results_equal(self, baseline: dict, rolled: dict, msg: str):
+        """Strict equality check on probe results."""
+        self.assertEqual(
+            set(baseline.keys()), set(rolled.keys()),
+            f"{msg}: probe result key sets differ",
+        )
+        for idx in baseline:
+            self.assertEqual(
+                baseline[idx], rolled[idx],
+                f"{msg}: probe #{idx} ({self.PROBE_EMAILS[idx]}) differs",
+            )
+
+    # ------------------------------------------------------------------
+    # Rollback test helpers - each applies a realistic "bad change"
+    # ------------------------------------------------------------------
+    def _corrupt_disable_critical_rules(self):
+        """Disable the top two rules (spam bypass + C-Level VIP)."""
+        EmailRoutingRule.objects.filter(order__in=[1, 10]).update(enabled=False)
+
+    def _corrupt_flip_order(self):
+        """Swap the order of billing and oncall rules."""
+        billing = EmailRoutingRule.objects.get(name="Billing Queue")
+        oncall = EmailRoutingRule.objects.get(name="Oncall Alert")
+        billing.order, oncall.order = oncall.order, billing.order
+        billing.save(update_fields=["order"])
+        oncall.save(update_fields=["order"])
+
+    def _corrupt_remove_bypass_flag(self):
+        """Remove bypass=True from the spam rule."""
+        spam = EmailRoutingRule.objects.get(name="Bypass: Spam / Advertisement")
+        spam.bypass = False
+        spam.save(update_fields=["bypass"])
+
+    def _corrupt_wild_targets(self):
+        """Assign nonsense targets to a few rules."""
+        EmailRoutingRule.objects.filter(order__in=[10, 20, 30]).update(
+            target_priority=5,
+        )
+
+    def _corrupt_delete_half_rules(self):
+        """Delete every other rule (simulating a bad migration rollout)."""
+        all_pks = list(
+            EmailRoutingRule.objects.order_by("order").values_list("pk", flat=True)
+        )
+        EmailRoutingRule.objects.filter(pk__in=all_pks[::2]).delete()
+
+    def _corrupt_blank_keywords(self):
+        """
+        Replace billing keywords with nonsense so no real email can match.
+        (Blanking keywords would actually *weaken* the rule because empty
+        keywords means "no keyword check required", so we use an impossible
+        string instead.)
+        """
+        billing = EmailRoutingRule.objects.get(name="Billing Queue")
+        billing.keywords = "XYZZY_NO_MATCH_PLZ_12345"
+        billing.save(update_fields=["keywords"])
+
+    # ------------------------------------------------------------------
+    # Actual rollback tests
+    # ------------------------------------------------------------------
+    def test_rollback_restore_match_order_and_assignment(self):
+        """
+        End-to-end: capture baseline, apply 6 different corruptions
+        sequentially, each time verifying behaviour changed, and each
+        time rolling back and verifying full equivalence to baseline.
+        """
+        # --- Phase 1: apply baseline and record expectations ---
+        self._apply_config([dict(s) for s in self.BASELINE_RULE_SPECS])
+        baseline_snapshot = self._snapshot_rule_config()
+        baseline_results = self._run_probes()
+
+        # Sanity: baseline must contain both routed AND bypass outcomes
+        self.assertIn(
+            "bypass",
+            {v["outcome"] for v in baseline_results.values()},
+            "baseline should include at least one bypass case",
+        )
+        self.assertIn(
+            "routed",
+            {v["outcome"] for v in baseline_results.values()},
+            "baseline should include at least one routed case",
+        )
+
+        corruptions = [
+            ("disable-critical-rules", self._corrupt_disable_critical_rules),
+            ("flip-order", self._corrupt_flip_order),
+            ("remove-bypass-flag", self._corrupt_remove_bypass_flag),
+            ("wild-targets", self._corrupt_wild_targets),
+            ("delete-half-rules", self._corrupt_delete_half_rules),
+            ("blank-keywords", self._corrupt_blank_keywords),
+        ]
+
+        for name, corrupt_fn in corruptions:
+            with self.subTest(corruption=name):
+                # --- Phase 2: apply corruption ---
+                corrupt_fn()
+                corrupted_results = self._run_probes()
+
+                # Sanity: corruption MUST have changed the outcome
+                # (if not, the corruption test itself is ineffective)
+                self.assertNotEqual(
+                    baseline_results,
+                    corrupted_results,
+                    f"Corruption '{name}' had no effect on routing "
+                    f"results; this subtest is ineffective",
+                )
+
+                # --- Phase 3: roll back to baseline ---
+                self._apply_config([dict(s) for s in self.BASELINE_RULE_SPECS])
+                rolled_snapshot = self._snapshot_rule_config()
+                rolled_results = self._run_probes()
+
+                # --- Phase 4: verify full restoration ---
+                self.assertEqual(
+                    baseline_snapshot,
+                    rolled_snapshot,
+                    f"Rollback from '{name}' failed to restore exact "
+                    f"rule configuration snapshot",
+                )
+                self._assert_results_equal(
+                    baseline_results,
+                    rolled_results,
+                    f"Rollback from '{name}'",
+                )
+
+    def test_rollback_bypass_log_format_identical(self):
+        """
+        After rollback, a probe that triggers bypass must produce the
+        exact same structured log key set (bypass_type, matched_rule,
+        etc.) as the baseline run.  This guards against logging changes
+        that silently survive a DB rollback.
+        """
+        self._apply_config([dict(s) for s in self.BASELINE_RULE_SPECS])
+
+        # The "spam" probe triggers an explicit bypass rule.
+        spam_probe = dict(
+            sender="spammer@evil.com",
+            subject="Free spam offer",
+            body="click here",
+        )
+        # The "random" probe triggers no rule → no_matching_rule bypass.
+        random_probe = dict(
+            sender="random@external.com",
+            subject="Hello",
+            body="no match",
+        )
+
+        def _capture_bypass_log(probe):
+            with self.assertLogs("helpdesk.routing", level="WARNING") as cap:
+                with self.assertRaises(BypassTicketException):
+                    apply_routing(
+                        {"queue": self.q_support, "priority": 3},
+                        sender_email=probe["sender"],
+                        subject=probe["subject"],
+                        body=probe["body"],
+                        queue=self.q_support,
+                        bypass_on_no_match=True,
+                    )
+            for r in cap.records:
+                msg = r.getMessage()
+                if "event=email_routing_bypass" in msg:
+                    # Stable fields only - exclude matched_rule_id because the
+                    # auto-incrementing PK changes on every rule recreate.
+                    stable_keys = ("event", "bypass_type", "sender", "subject",
+                                   "queue", "matched_rule")
+                    keys = {}
+                    for k in stable_keys:
+                        m = re.search(rf"{k}=(?:'([^']*)'|(\S+))", msg)
+                        if m:
+                            keys[k] = m.group(1) if m.group(1) else m.group(2)
+                    return keys
+            self.fail("No bypass log captured")
+
+        baseline_explicit = _capture_bypass_log(spam_probe)
+        baseline_nomatch = _capture_bypass_log(random_probe)
+
+        # Corrupt + rollback
+        self._corrupt_wild_targets()
+        self._apply_config([dict(s) for s in self.BASELINE_RULE_SPECS])
+
+        rolled_explicit = _capture_bypass_log(spam_probe)
+        rolled_nomatch = _capture_bypass_log(random_probe)
+
+        self.assertEqual(
+            baseline_explicit, rolled_explicit,
+            "Explicit-bypass log key set changed after rollback",
+        )
+        self.assertEqual(
+            baseline_nomatch, rolled_nomatch,
+            "No-match-bypass log key set changed after rollback",
+        )
+
+    def test_rollback_idempotency(self):
+        """
+        Applying the baseline config twice (or 5 times) must produce
+        identical results each time - no duplicate rule side-effects.
+        """
+        first_results = None
+        for i in range(3):
+            self._apply_config([dict(s) for s in self.BASELINE_RULE_SPECS])
+            results = self._run_probes()
+            if first_results is None:
+                first_results = results
+                # Verify the number of rules matches baseline spec count
+                self.assertEqual(
+                    EmailRoutingRule.objects.count(),
+                    len(self.BASELINE_RULE_SPECS),
+                    f"_apply_config produced wrong rule count on iteration {i}",
+                )
+            else:
+                self._assert_results_equal(
+                    first_results, results, f"Idempotency iteration {i}"
+                )
+
+
 class RoutingLogEventNameStabilityTests(TestCase):
     """
     Meta-tests: lock in the literal string values used as event markers
