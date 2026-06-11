@@ -489,38 +489,62 @@ class TicketForm(AbstractTicketForm):
         """
         Writes and returns a Ticket() object
         """
+        from django.db import transaction
+        from django.core.files.storage import default_storage
+        import logging
 
-        ticket, queue = self._create_ticket()
-        if self.cleaned_data["assigned_to"]:
-            try:
-                u = User.objects.get(id=self.cleaned_data["assigned_to"])
-                ticket.assigned_to = u
-            except User.DoesNotExist:
-                ticket.assigned_to = None
-        ticket.save()
+        logger = logging.getLogger("helpdesk")
+        created_attachment_paths = []
 
-        self._create_custom_fields(ticket)
+        try:
+            with transaction.atomic():
+                ticket, queue = self._create_ticket()
+                if self.cleaned_data["assigned_to"]:
+                    try:
+                        u = User.objects.get(id=self.cleaned_data["assigned_to"])
+                        ticket.assigned_to = u
+                    except User.DoesNotExist:
+                        ticket.assigned_to = None
+                ticket.save()
 
-        if self.cleaned_data["assigned_to"]:
-            title = _("Ticket Opened & Assigned to %(name)s") % {
-                "name": ticket.get_assigned_to or _("<invalid user>")
-            }
-        else:
-            title = _("Ticket Opened")
-        followup = self._create_follow_up(ticket, title=title, user=user)
-        followup.save()
+                self._create_custom_fields(ticket)
 
-        if helpdesk_settings.HELPDESK_ENABLE_ATTACHMENTS:
-            files = self._attach_files_to_follow_up(followup)
-        else:
-            files = None
+                if self.cleaned_data["assigned_to"]:
+                    title = _("Ticket Opened & Assigned to %(name)s") % {
+                        "name": ticket.get_assigned_to or _("<invalid user>")
+                    }
+                else:
+                    title = _("Ticket Opened")
+                followup = self._create_follow_up(ticket, title=title, user=user)
+                followup.save()
 
-        # emit signal when the TicketForm.save is done
-        new_ticket_done.send(sender="TicketForm", ticket=ticket)
+                if helpdesk_settings.HELPDESK_ENABLE_ATTACHMENTS:
+                    files = self._attach_files_to_follow_up(followup)
+                    for att in followup.followupattachment_set.all():
+                        if att.file and att.file.name:
+                            created_attachment_paths.append(att.file.name)
+                else:
+                    files = None
 
-        self._send_messages(
-            ticket=ticket, queue=queue, followup=followup, files=files, user=user
-        )
+                # emit signal when the TicketForm.save is done
+                new_ticket_done.send(sender="TicketForm", ticket=ticket)
+
+                self._send_messages(
+                    ticket=ticket, queue=queue, followup=followup, files=files, user=user
+                )
+        except Exception:
+            for path in created_attachment_paths:
+                try:
+                    if default_storage.exists(path):
+                        default_storage.delete(path)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to clean up attachment file '%s' after ticket creation failure: %s",
+                        path,
+                        str(e),
+                    )
+            raise
+
         return ticket
 
 
@@ -596,24 +620,49 @@ class PublicTicketForm(AbstractTicketForm):
         """
         Writes and returns a Ticket() object
         """
-        ticket, queue = self._create_ticket()
-        if queue.default_owner and not ticket.assigned_to:
-            ticket.assigned_to = queue.default_owner
-        ticket.save()
+        from django.db import transaction
+        from django.core.files.storage import default_storage
+        import logging
 
-        self._create_custom_fields(ticket)
+        logger = logging.getLogger("helpdesk")
+        created_attachment_paths = []
 
-        followup = self._create_follow_up(
-            ticket, title=_("Ticket Opened Via Web"), user=user
-        )
-        followup.save()
+        try:
+            with transaction.atomic():
+                ticket, queue = self._create_ticket()
+                if queue.default_owner and not ticket.assigned_to:
+                    ticket.assigned_to = queue.default_owner
+                ticket.save()
 
-        files = self._attach_files_to_follow_up(followup)
+                self._create_custom_fields(ticket)
 
-        # emit signal when the PublicTicketForm.save is done
-        new_ticket_done.send(sender="PublicTicketForm", ticket=ticket)
+                followup = self._create_follow_up(
+                    ticket, title=_("Ticket Opened Via Web"), user=user
+                )
+                followup.save()
 
-        self._send_messages(ticket=ticket, queue=queue, followup=followup, files=files)
+                files = self._attach_files_to_follow_up(followup)
+                for att in followup.followupattachment_set.all():
+                    if att.file and att.file.name:
+                        created_attachment_paths.append(att.file.name)
+
+                # emit signal when the PublicTicketForm.save is done
+                new_ticket_done.send(sender="PublicTicketForm", ticket=ticket)
+
+                self._send_messages(ticket=ticket, queue=queue, followup=followup, files=files)
+        except Exception:
+            for path in created_attachment_paths:
+                try:
+                    if default_storage.exists(path):
+                        default_storage.delete(path)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to clean up attachment file '%s' after public ticket creation failure: %s",
+                        path,
+                        str(e),
+                    )
+            raise
+
         return ticket
 
 

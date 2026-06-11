@@ -253,6 +253,197 @@ class AttachmentUnitTests(TestCase):
         self.assertEqual(attachment_obj.filename, self.file_attrs["filename"])
 
 
+@override_settings(MEDIA_ROOT=MEDIA_DIR)
+class AttachmentCleanupTests(TestCase):
+    """Tests to ensure orphan files are cleaned up when errors occur."""
+
+    fixtures = ["emailtemplate.json"]
+
+    def setUp(self):
+        self.queue = models.Queue.objects.create(
+            title="Test Queue",
+            slug="test_q",
+            allow_public_submission=True,
+        )
+        self.ticket = models.Ticket.objects.create(
+            queue=self.queue,
+            title="Test Ticket",
+            description="Test Description",
+        )
+        self.followup = models.FollowUp.objects.create(
+            ticket=self.ticket,
+            title="Test FollowUp",
+            comment="Test Comment",
+        )
+        User = get_user_model()
+        self.user = User.objects.create(
+            username="test_user",
+            is_staff=True,
+        )
+        self.user.set_password("pass")
+        self.user.save()
+
+    def _count_files_in_media_dir(self):
+        """Count files actually present in the media directory."""
+        count = 0
+        if os.path.exists(MEDIA_DIR):
+            for root, dirs, files in os.walk(MEDIA_DIR):
+                count += len(files)
+        return count
+
+    def test_attachment_save_failure_cleans_up_file(self):
+        """When Attachment.save() fails after file is written, the file should be cleaned up."""
+        file_content = b"test attachment content for save failure"
+        test_file = SimpleUploadedFile(
+            "fail_test.txt", file_content, "text/plain"
+        )
+        initial_file_count = self._count_files_in_media_dir()
+
+        att = models.FollowUpAttachment(
+            followup=self.followup,
+            file=test_file,
+        )
+
+        with mock.patch.object(
+            models.FollowUpAttachment,
+            "_perform_save",
+            create=True,
+            side_effect=Exception("DB save failed"),
+        ):
+            with mock.patch(
+                "django.db.models.Model.save",
+                side_effect=Exception("DB save failed"),
+            ):
+                with self.assertRaises(Exception):
+                    att.save()
+
+        final_file_count = self._count_files_in_media_dir()
+        self.assertEqual(
+            initial_file_count,
+            final_file_count,
+            "Orphan file was left behind after Attachment.save() failure",
+        )
+
+    def test_process_attachments_with_save_exception(self):
+        """When process_attachments encounters a save exception, no orphan files should remain."""
+        file_content = b"test content for process_attachments failure"
+        test_file = SimpleUploadedFile(
+            "proc_fail_test.txt", file_content, "text/plain"
+        )
+        initial_file_count = self._count_files_in_media_dir()
+
+        original_save = models.FollowUpAttachment.save
+
+        def failing_save(self, *args, **kwargs):
+            if not self.pk:
+                raise Exception("Simulated database error during attachment save")
+            return original_save(self, *args, **kwargs)
+
+        with mock.patch.object(
+            models.FollowUpAttachment, "save", autospec=True
+        ) as mock_save:
+            mock_save.side_effect = Exception("Simulated database error")
+
+            from django.core.exceptions import ValidationError
+
+            try:
+                lib.process_attachments(self.followup, [test_file])
+            except (ValidationError, Exception):
+                pass
+
+        final_file_count = self._count_files_in_media_dir()
+        self.assertEqual(
+            initial_file_count,
+            final_file_count,
+            "Orphan files were left behind after process_attachments failure",
+        )
+
+    def test_update_ticket_failure_cleans_attachments(self):
+        """When update_ticket fails, newly created attachment files should be cleaned up."""
+        from helpdesk.update_ticket import update_ticket
+
+        file_content = b"test content for update_ticket failure"
+        test_file = SimpleUploadedFile(
+            "update_fail_test.txt", file_content, "text/plain"
+        )
+        initial_file_count = self._count_files_in_media_dir()
+        initial_att_count = models.FollowUpAttachment.objects.filter(
+            followup__ticket=self.ticket
+        ).count()
+
+        with mock.patch(
+            "helpdesk.update_ticket.add_staff_subscription",
+            side_effect=Exception("Simulated failure at end of update_ticket"),
+        ):
+            with self.assertRaises(Exception):
+                update_ticket(
+                    self.user,
+                    self.ticket,
+                    comment="Test comment with attachment",
+                    files=[test_file],
+                )
+
+        final_file_count = self._count_files_in_media_dir()
+        final_att_count = models.FollowUpAttachment.objects.filter(
+            followup__ticket=self.ticket
+        ).count()
+
+        self.assertEqual(
+            initial_file_count,
+            final_file_count,
+            "Orphan files were left behind after update_ticket failure",
+        )
+        self.assertEqual(
+            initial_att_count,
+            final_att_count,
+            "Database records were not rolled back after update_ticket failure",
+        )
+
+    def test_public_ticket_form_save_failure_cleans_attachments(self):
+        """When PublicTicketForm.save fails, newly created attachment files should be cleaned up."""
+        from helpdesk.forms import PublicTicketForm
+
+        file_content = b"test content for PublicTicketForm save failure"
+        test_file = SimpleUploadedFile(
+            "pub_form_fail.txt", file_content, "text/plain"
+        )
+        initial_file_count = self._count_files_in_media_dir()
+        initial_ticket_count = models.Ticket.objects.count()
+
+        post_data = {
+            "title": "Test Ticket Form Failure",
+            "body": "Test body",
+            "priority": 3,
+            "submitter_email": "test@example.com",
+            "queue": self.queue.id,
+        }
+        files_data = {"attachment": test_file}
+
+        form = PublicTicketForm(data=post_data, files=files_data)
+        self.assertTrue(form.is_valid(), f"Form errors: {form.errors}")
+
+        with mock.patch(
+            "helpdesk.signals.new_ticket_done.send",
+            side_effect=Exception("Simulated signal handler failure"),
+        ):
+            with self.assertRaises(Exception):
+                form.save(user=None)
+
+        final_file_count = self._count_files_in_media_dir()
+        final_ticket_count = models.Ticket.objects.count()
+
+        self.assertEqual(
+            initial_file_count,
+            final_file_count,
+            "Orphan files were left behind after PublicTicketForm.save failure",
+        )
+        self.assertEqual(
+            initial_ticket_count,
+            final_ticket_count,
+            "Ticket records were not rolled back after PublicTicketForm.save failure",
+        )
+
+
 def tearDownModule():
     try:
         shutil.rmtree(MEDIA_DIR)

@@ -215,177 +215,204 @@ def update_ticket(
     message_id=None,
     customfields_form=None,
 ):
-    # We need to allow the 'ticket' and 'queue' contexts to be applied to the
-    # comment.
-    context = safe_template_context(ticket)
-    if title is None:
-        title = ticket.title
-    if priority == -1:
-        priority = ticket.priority
-    if queue == -1:
-        queue = ticket.queue.id
-    if new_status is None:
-        new_status = ticket.status
-    if new_checklists is None:
-        new_checklists = {}
+    from django.db import transaction
+    from django.core.files.storage import default_storage
+    import logging
 
-    from django.template import engines
+    logger = logging.getLogger("helpdesk")
+    created_attachment_paths = []
+    f = None
 
-    template_func = engines["django"].from_string
-    # this prevents system from trying to render any template tags
-    # broken into two stages to prevent changes from first replace being themselves
-    # changed by the second replace due to conflicting syntax
-    comment = comment.replace("{%", "X-HELPDESK-COMMENT-VERBATIM").replace(
-        "%}", "X-HELPDESK-COMMENT-ENDVERBATIM"
-    )
-    comment = comment.replace(
-        "X-HELPDESK-COMMENT-VERBATIM", "{% verbatim %}{%"
-    ).replace("X-HELPDESK-COMMENT-ENDVERBATIM", "%}{% endverbatim %}")
-    # render the neutralized template
-    comment = template_func(comment).render(context)
+    try:
+        with transaction.atomic():
+            # We need to allow the 'ticket' and 'queue' contexts to be applied to the
+            # comment.
+            context = safe_template_context(ticket)
+            if title is None:
+                title = ticket.title
+            if priority == -1:
+                priority = ticket.priority
+            if queue == -1:
+                queue = ticket.queue.id
+            if new_status is None:
+                new_status = ticket.status
+            if new_checklists is None:
+                new_checklists = {}
 
-    if owner == -1 and ticket.assigned_to:
-        owner = ticket.assigned_to.id
+            from django.template import engines
 
-    f = FollowUp(
-        ticket=ticket,
-        date=timezone.now(),
-        comment=comment,
-        time_spent=time_spent,
-        message_id=message_id,
-        title=title,
-    )
+            template_func = engines["django"].from_string
+            # this prevents system from trying to render any template tags
+            # broken into two stages to prevent changes from first replace being themselves
+            # changed by the second replace due to conflicting syntax
+            comment = comment.replace("{%", "X-HELPDESK-COMMENT-VERBATIM").replace(
+                "%}", "X-HELPDESK-COMMENT-ENDVERBATIM"
+            )
+            comment = comment.replace(
+                "X-HELPDESK-COMMENT-VERBATIM", "{% verbatim %}{%"
+            ).replace("X-HELPDESK-COMMENT-ENDVERBATIM", "%}{% endverbatim %}")
+            # render the neutralized template
+            comment = template_func(comment).render(context)
 
-    if is_helpdesk_staff(user):
-        f.user = user
+            if owner == -1 and ticket.assigned_to:
+                owner = ticket.assigned_to.id
 
-    f.public = public
+            f = FollowUp(
+                ticket=ticket,
+                date=timezone.now(),
+                comment=comment,
+                time_spent=time_spent,
+                message_id=message_id,
+                title=title,
+            )
 
-    reassigned = False
+            if is_helpdesk_staff(user):
+                f.user = user
 
-    old_owner = ticket.assigned_to
-    if owner != -1:
-        if owner != 0 and (
-            (ticket.assigned_to and owner != ticket.assigned_to.id)
-            or not ticket.assigned_to
-        ):
-            new_user = User.objects.get(id=owner)
-            f.title = _("Assigned to %(username)s") % {
-                "username": new_user.get_username(),
-            }
-            ticket.assigned_to = new_user
-            reassigned = True
-        # user changed owner to 'unassign'
-        elif owner == 0 and ticket.assigned_to is not None:
-            f.title = _("Unassigned")
-            ticket.assigned_to = None
+            f.public = public
 
-    old_status_str, old_status = get_and_set_ticket_status(new_status, ticket, f)
+            reassigned = False
 
-    files = process_attachments(f, files) if files else []
+            old_owner = ticket.assigned_to
+            if owner != -1:
+                if owner != 0 and (
+                    (ticket.assigned_to and owner != ticket.assigned_to.id)
+                    or not ticket.assigned_to
+                ):
+                    new_user = User.objects.get(id=owner)
+                    f.title = _("Assigned to %(username)s") % {
+                        "username": new_user.get_username(),
+                    }
+                    ticket.assigned_to = new_user
+                    reassigned = True
+                # user changed owner to 'unassign'
+                elif owner == 0 and ticket.assigned_to is not None:
+                    f.title = _("Unassigned")
+                    ticket.assigned_to = None
 
-    if title and title != ticket.title:
-        f.ticketchange_set.create(
-            field=_("Title"),
-            old_value=ticket.title,
-            new_value=title,
-        )
-        ticket.title = title
+            old_status_str, old_status = get_and_set_ticket_status(new_status, ticket, f)
 
-    if new_status != old_status:
-        f.ticketchange_set.create(
-            field=_("Status"),
-            old_value=old_status_str,
-            new_value=ticket.get_status_display(),
-        )
+            processed_files = process_attachments(f, files) if files else []
+            if f and f.pk:
+                for att in f.followupattachment_set.all():
+                    if att.file and att.file.name:
+                        created_attachment_paths.append(att.file.name)
 
-    if ticket.assigned_to != old_owner:
-        f.ticketchange_set.create(
-            field=_("Owner"),
-            old_value=old_owner,
-            new_value=ticket.assigned_to if ticket.assigned_to else _("Unassigned"),
-        )
-
-    if priority != ticket.priority:
-        f.ticketchange_set.create(
-            field=_("Priority"),
-            old_value=ticket.priority,
-            new_value=priority,
-        )
-        ticket.priority = priority
-
-    if queue != ticket.queue.id:
-        f.ticketchange_set.create(
-            field=_("Queue"),
-            old_value=ticket.queue.id,
-            new_value=queue,
-        )
-        ticket.queue_id = queue
-
-    if due_date and due_date != ticket.due_date:
-        f.ticketchange_set.create(
-            field=_("Due on"),
-            old_value=ticket.due_date,
-            new_value=due_date,
-        )
-        ticket.due_date = due_date
-
-    # save custom fields and ticket changes
-    if customfields_form and customfields_form.is_valid():
-        customfields_form.save(followup=f)
-
-    for checklist in ticket.checklists.all():
-        if checklist.id not in new_checklists:
-            continue
-        new_completed_tasks = new_checklists[checklist.id]
-        for task in checklist.tasks.all():
-            changed = None
-
-            # Add completion if it was not done yet
-            if not task.completion_date and task.id in new_completed_tasks:
-                task.completion_date = timezone.now()
-                changed = "completed"
-            # Remove it if it was done before
-            elif task.completion_date and task.id not in new_completed_tasks:
-                task.completion_date = None
-                changed = "uncompleted"
-
-            # Save and add ticket change if task state has changed
-            if changed:
-                task.save(update_fields=["completion_date"])
+            if title and title != ticket.title:
                 f.ticketchange_set.create(
-                    field=f"[{checklist.name}] {task.description}",
-                    old_value=_("To do") if changed == "completed" else _("Completed"),
-                    new_value=_("Completed") if changed == "completed" else _("To do"),
+                    field=_("Title"),
+                    old_value=ticket.title,
+                    new_value=title,
+                )
+                ticket.title = title
+
+            if new_status != old_status:
+                f.ticketchange_set.create(
+                    field=_("Status"),
+                    old_value=old_status_str,
+                    new_value=ticket.get_status_display(),
                 )
 
-    if new_status in (Ticket.RESOLVED_STATUS, Ticket.CLOSED_STATUS) and (
-        new_status == Ticket.RESOLVED_STATUS or ticket.resolution is None
-    ):
-        ticket.resolution = comment
+            if ticket.assigned_to != old_owner:
+                f.ticketchange_set.create(
+                    field=_("Owner"),
+                    old_value=old_owner,
+                    new_value=ticket.assigned_to if ticket.assigned_to else _("Unassigned"),
+                )
 
-    # ticket might have changed above, so we re-instantiate context with the
-    # (possibly) updated ticket.
-    context = safe_template_context(ticket)
-    context.update(
-        resolution=ticket.resolution,
-        comment=f.comment,
-    )
+            if priority != ticket.priority:
+                f.ticketchange_set.create(
+                    field=_("Priority"),
+                    old_value=ticket.priority,
+                    new_value=priority,
+                )
+                ticket.priority = priority
 
-    messages_sent_to = set()
-    try:
-        messages_sent_to.add(user.email)
-    except AttributeError:
-        pass
-    process_email_notifications_for_ticket_update(
-        public, ticket, f, context, messages_sent_to, files, reassigned=reassigned
-    )
-    ticket.save()
+            if queue != ticket.queue.id:
+                f.ticketchange_set.create(
+                    field=_("Queue"),
+                    old_value=ticket.queue.id,
+                    new_value=queue,
+                )
+                ticket.queue_id = queue
 
-    # emit signal with followup when the ticket update is done
-    # internally used for webhooks
-    update_ticket_done.send(sender="update_ticket", followup=f)
+            if due_date and due_date != ticket.due_date:
+                f.ticketchange_set.create(
+                    field=_("Due on"),
+                    old_value=ticket.due_date,
+                    new_value=due_date,
+                )
+                ticket.due_date = due_date
 
-    # auto subscribe user if enabled
-    add_staff_subscription(user, ticket)
+            # save custom fields and ticket changes
+            if customfields_form and customfields_form.is_valid():
+                customfields_form.save(followup=f)
+
+            for checklist in ticket.checklists.all():
+                if checklist.id not in new_checklists:
+                    continue
+                new_completed_tasks = new_checklists[checklist.id]
+                for task in checklist.tasks.all():
+                    changed = None
+
+                    # Add completion if it was not done yet
+                    if not task.completion_date and task.id in new_completed_tasks:
+                        task.completion_date = timezone.now()
+                        changed = "completed"
+                    # Remove it if it was done before
+                    elif task.completion_date and task.id not in new_completed_tasks:
+                        task.completion_date = None
+                        changed = "uncompleted"
+
+                    # Save and add ticket change if task state has changed
+                    if changed:
+                        task.save(update_fields=["completion_date"])
+                        f.ticketchange_set.create(
+                            field=f"[{checklist.name}] {task.description}",
+                            old_value=_("To do") if changed == "completed" else _("Completed"),
+                            new_value=_("Completed") if changed == "completed" else _("To do"),
+                        )
+
+            if new_status in (Ticket.RESOLVED_STATUS, Ticket.CLOSED_STATUS) and (
+                new_status == Ticket.RESOLVED_STATUS or ticket.resolution is None
+            ):
+                ticket.resolution = comment
+
+            # ticket might have changed above, so we re-instantiate context with the
+            # (possibly) updated ticket.
+            context = safe_template_context(ticket)
+            context.update(
+                resolution=ticket.resolution,
+                comment=f.comment,
+            )
+
+            messages_sent_to = set()
+            try:
+                messages_sent_to.add(user.email)
+            except AttributeError:
+                pass
+            process_email_notifications_for_ticket_update(
+                public, ticket, f, context, messages_sent_to, processed_files, reassigned=reassigned
+            )
+            ticket.save()
+
+            # emit signal with followup when the ticket update is done
+            # internally used for webhooks
+            update_ticket_done.send(sender="update_ticket", followup=f)
+
+            # auto subscribe user if enabled
+            add_staff_subscription(user, ticket)
+    except Exception:
+        for path in created_attachment_paths:
+            try:
+                if default_storage.exists(path):
+                    default_storage.delete(path)
+            except Exception as e:
+                logger.warning(
+                    "Failed to clean up attachment file '%s' after ticket update failure: %s",
+                    path,
+                    str(e),
+                )
+        raise
+
     return f

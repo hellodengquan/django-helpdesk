@@ -1235,6 +1235,10 @@ class Attachment(models.Model):
         return "%s" % self.filename
 
     def save(self, *args, **kwargs):
+        import logging
+
+        logger = logging.getLogger("helpdesk")
+
         if not self.size:
             self.size = self.get_size()
 
@@ -1247,7 +1251,28 @@ class Attachment(models.Model):
                 or "application/octet-stream"
             )
 
-        return super(Attachment, self).save(*args, **kwargs)
+        saved_file_name = None
+        if self.file and not self._state.adding:
+            try:
+                from django.db.models.fields.files import FieldFile
+
+                if isinstance(self.file, FieldFile) and self.file.name:
+                    saved_file_name = self.file.name
+            except Exception:
+                pass
+
+        try:
+            return super(Attachment, self).save(*args, **kwargs)
+        except Exception:
+            try:
+                if self.file and self.file.name and self.file.name != saved_file_name:
+                    self.file.delete(save=False)
+            except Exception as e:
+                logger.warning(
+                    "Failed to clean up attachment file after save failure: %s",
+                    str(e),
+                )
+            raise
 
     def get_filename(self):
         return str(self.file)
