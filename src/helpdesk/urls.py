@@ -139,6 +139,33 @@ if helpdesk_settings.HELPDESK_UI_ENABLED:
             staff.delete_checklist_template,
             name="delete_checklist_template",
         ),
+        path("macros/", staff.macro_list, name="macro_list"),
+        path("macros/create/", staff.macro_create, name="macro_create"),
+        path("macros/<int:macro_id>/edit/", staff.macro_edit, name="macro_edit"),
+        path("macros/<int:macro_id>/delete/", staff.macro_delete, name="macro_delete"),
+        path("macros/render/", staff.macro_render, name="macro_render"),
+        path(
+            "macros/<int:macro_id>/use/<int:ticket_id>/",
+            staff.macro_use,
+            name="macro_use",
+        ),
+        path("macros/stats/", staff.macro_usage_stats, name="macro_usage_stats"),
+        path("drafts/", staff.reply_draft_list, name="reply_draft_list"),
+        path(
+            "drafts/create/ticket/<int:ticket_id>/",
+            staff.reply_draft_create,
+            name="reply_draft_create",
+        ),
+        path(
+            "drafts/<int:draft_id>/edit/",
+            staff.reply_draft_edit,
+            name="reply_draft_edit",
+        ),
+        path(
+            "drafts/<int:draft_id>/delete/",
+            staff.reply_draft_delete,
+            name="reply_draft_delete",
+        ),
         re_path(
             r"^datatables_ticket_list/(?P<query>{})$".format(base64_pattern),
             staff.datatables_ticket_list,

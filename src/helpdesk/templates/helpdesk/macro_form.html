@@ -1,0 +1,156 @@
+{% extends "helpdesk/base.html" %}
+
+{% load i18n %}
+
+{% block helpdesk_title %}{% if macro %}{% trans "Edit Macro" %}{% else %}{% trans "Create Macro" %}{% endif %}{% endblock %}
+
+{% block helpdesk_breadcrumb %}
+    <li class="breadcrumb-item">
+        <a href="{% url 'helpdesk:macro_list' %}">{% trans "Macros" %}</a>
+    </li>
+    <li class="breadcrumb-item active">{% if macro %}{% trans "Edit" %}{% else %}{% trans "New" %}{% endif %}</li>
+{% endblock %}
+
+{% block helpdesk_body %}
+    <h2>{% if macro %}{% trans "Edit Macro" %}{% else %}{% trans "Create New Macro" %}{% endif %}</h2>
+
+    <div class="row mt-4">
+        <div class="col-md-8">
+            <div class="card">
+                <div class="card-header">
+                    {% trans "Macro Details" %}
+                </div>
+                <form method="post">
+                    <div class="card-body">
+                        {% csrf_token %}
+
+                        {% if form.errors %}
+                            <div class="alert alert-danger">
+                                {% trans "Please correct the errors below." %}
+                            </div>
+                        {% endif %}
+
+                        <div class="form-group">
+                            <label for="{{ form.name.id_for_label }}">{% trans "Name" %}</label>
+                            {{ form.name }}
+                            {% if form.name.errors %}
+                                <div class="text-danger">{{ form.name.errors }}</div>
+                            {% endif %}
+                            <small class="form-text text-muted">{{ form.name.help_text }}</small>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="{{ form.description.id_for_label }}">{% trans "Description" %}</label>
+                            {{ form.description }}
+                            {% if form.description.errors %}
+                                <div class="text-danger">{{ form.description.errors }}</div>
+                            {% endif %}
+                            <small class="form-text text-muted">{{ form.description.help_text }}</small>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="{{ form.body.id_for_label }}">{% trans "Body" %}</label>
+                            {{ form.body }}
+                            {% if form.body.errors %}
+                                <div class="text-danger">{{ form.body.errors }}</div>
+                            {% endif %}
+                            <small class="form-text text-muted">
+                                {% trans "Available variables:" %}
+                                <code>{{ ticket.title }}</code>,
+                                <code>{{ submitter_name }}</code>,
+                                <code>{{ queue.title }}</code>,
+                                <code>{{ user.username }}</code>
+                            </small>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="{{ form.queues.id_for_label }}">{% trans "Queues" %}</label>
+                            {{ form.queues }}
+                            {% if form.queues.errors %}
+                                <div class="text-danger">{{ form.queues.errors }}</div>
+                            {% endif %}
+                            <small class="form-text text-muted">{{ form.queues.help_text }}</small>
+                        </div>
+
+                        <div class="form-group form-check">
+                            {{ form.is_shared }}
+                            <label class="form-check-label" for="{{ form.is_shared.id_for_label }}">
+                                {% trans "Share this macro" %}
+                            </label>
+                            {% if form.is_shared.errors %}
+                                <div class="text-danger">{{ form.is_shared.errors }}</div>
+                            {% endif %}
+                            <small class="form-text text-muted">{{ form.is_shared.help_text }}</small>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="{{ form.status.id_for_label }}">{% trans "Status" %}</label>
+                            {{ form.status }}
+                            {% if form.status.errors %}
+                                <div class="text-danger">{{ form.status.errors }}</div>
+                            {% endif %}
+                            <small class="form-text text-muted">{{ form.status.help_text }}</small>
+                        </div>
+                    </div>
+                    <div class="card-footer">
+                        <a href="{% url 'helpdesk:macro_list' %}" class="btn btn-secondary">
+                            <i class="fas fa-times"></i>
+                            {% trans "Cancel" %}
+                        </a>
+                        <button type="submit" class="btn btn-primary">
+                            <i class="fas fa-save"></i>
+                            {% trans "Save Macro" %}
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <div class="col-md-4">
+            <div class="card">
+                <div class="card-header">
+                    {% trans "Variable Reference" %}
+                </div>
+                <div class="card-body">
+                    <h6>{% trans "Ticket Variables" %}</h6>
+                    <ul class="list-unstyled small">
+                        <li><code>{{ ticket.title }}</code> - {% trans "Ticket title" %}</li>
+                        <li><code>{{ ticket.description }}</code> - {% trans "Ticket description" %}</li>
+                        <li><code>{{ ticket.status }}</code> - {% trans "Status ID" %}</li>
+                        <li><code>{{ ticket.get_status_display }}</code> - {% trans "Status label" %}</li>
+                        <li><code>{{ ticket.priority }}</code> - {% trans "Priority ID" %}</li>
+                        <li><code>{{ ticket.ticket_for_url }}</code> - {% trans "Ticket ID (with queue)" %}</li>
+                    </ul>
+
+                    <h6>{% trans "Submitter Variables" %}</h6>
+                    <ul class="list-unstyled small">
+                        <li><code>{{ submitter_name }}</code> - {% trans "Submitter name" %}</li>
+                        <li><code>{{ submitter_email }}</code> - {% trans "Submitter email" %}</li>
+                        <li><code>{{ submitter.name }}</code> - {% trans "Submitter full name" %}</li>
+                    </ul>
+
+                    <h6>{% trans "Queue Variables" %}</h6>
+                    <ul class="list-unstyled small">
+                        <li><code>{{ queue.title }}</code> - {% trans "Queue name" %}</li>
+                        <li><code>{{ queue.slug }}</code> - {% trans "Queue slug" %}</li>
+                        <li><code>{{ queue.email_address }}</code> - {% trans "Queue email" %}</li>
+                    </ul>
+
+                    <h6>{% trans "User Variables" %}</h6>
+                    <ul class="list-unstyled small">
+                        <li><code>{{ user.username }}</code> - {% trans "Your username" %}</li>
+                        <li><code>{{ user.get_full_name }}</code> - {% trans "Your full name" %}</li>
+                        <li><code>{{ user.email }}</code> - {% trans "Your email" %}</li>
+                    </ul>
+
+                    <h6>{% trans "Convenience Variables" %}</h6>
+                    <ul class="list-unstyled small">
+                        <li><code>{{ ticket_id }}</code> - {% trans "Ticket ID number" %}</li>
+                        <li><code>{{ ticket_title }}</code> - {% trans "Ticket title" %}</li>
+                        <li><code>{{ queue_name }}</code> - {% trans "Queue name" %}</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+{% endblock %}

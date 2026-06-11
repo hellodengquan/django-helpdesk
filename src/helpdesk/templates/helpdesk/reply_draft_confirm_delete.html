@@ -1,0 +1,64 @@
+{% extends "helpdesk/base.html" %}
+
+{% load i18n %}
+
+{% block helpdesk_title %}{% trans "Discard Draft" %}{% endblock %}
+
+{% block helpdesk_breadcrumb %}
+    <li class="breadcrumb-item">
+        <a href="{% url 'helpdesk:reply_draft_list' %}">{% trans "Reply Drafts" %}</a>
+    </li>
+    <li class="breadcrumb-item active">{% trans "Discard" %}</li>
+{% endblock %}
+
+{% block helpdesk_body %}
+    <h2>{% trans "Discard Reply Draft" %}</h2>
+
+    <div class="row mt-4">
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header">
+                    {% trans "Confirm discard" %}
+                </div>
+                <div class="card-body">
+                    <p>{% trans "Are you sure you want to discard this draft?" %}</p>
+                    <dl class="row">
+                        <dt class="col-sm-3">{% trans "Title" %}</dt>
+                        <dd class="col-sm-9">{{ draft.title|default:_("Untitled") }}</dd>
+
+                        <dt class="col-sm-3">{% trans "Ticket" %}</dt>
+                        <dd class="col-sm-9">
+                            <a href="{% url 'helpdesk:view' draft.ticket_id %}">
+                                #{{ draft.ticket.id }} - {{ draft.ticket.title|truncatechars:40 }}
+                            </a>
+                        </dd>
+
+                        <dt class="col-sm-3">{% trans "Status" %}</dt>
+                        <dd class="col-sm-9">{{ draft.get_status_display }}</dd>
+
+                        <dt class="col-sm-3">{% trans "Modified" %}</dt>
+                        <dd class="col-sm-9">{{ draft.modified|date:"Y-m-d H:i" }}</dd>
+                    </dl>
+
+                    <div class="alert alert-warning">
+                        <i class="fas fa-exclamation-triangle"></i>
+                        {% trans "This action cannot be undone." %}
+                    </div>
+                </div>
+                <div class="card-footer">
+                    <form method="post">
+                        {% csrf_token %}
+                        <a href="{% url 'helpdesk:reply_draft_list' %}" class="btn btn-secondary">
+                            <i class="fas fa-times"></i>
+                            {% trans "Cancel" %}
+                        </a>
+                        <button type="submit" class="btn btn-danger">
+                            <i class="fas fa-trash"></i>
+                            {% trans "Discard Draft" %}
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+{% endblock %}

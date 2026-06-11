@@ -2274,3 +2274,387 @@ class ChecklistTask(models.Model):
 
     def __str__(self):
         return self.description
+
+
+class Macro(models.Model):
+    """
+    A macro is a pre-defined reply template that can be used to quickly respond
+    to tickets. Macros can be personal (only visible to the creator) or shared
+    (visible to all staff members of the associated queues).
+
+    Macros support template variables that are replaced with ticket context
+    when used, e.g., {{ ticket.title }}, {{ submitter_name }}, etc.
+    """
+
+    DRAFT_STATUS = "draft"
+    ACTIVE_STATUS = "active"
+    ARCHIVED_STATUS = "archived"
+
+    STATUS_CHOICES = (
+        (DRAFT_STATUS, _("Draft")),
+        (ACTIVE_STATUS, _("Active")),
+        (ARCHIVED_STATUS, _("Archived")),
+    )
+
+    name = models.CharField(
+        _("Name"),
+        max_length=100,
+        help_text=_(
+            "A short name to help users identify this macro. "
+            "Not shown to ticket submitters."
+        ),
+    )
+
+    description = models.TextField(
+        _("Description"),
+        blank=True,
+        null=True,
+        help_text=_(
+            "Optional description of when to use this macro."
+        ),
+    )
+
+    body = models.TextField(
+        _("Body"),
+        help_text=_(
+            "The template body. You can use variables like {{ ticket.title }}, "
+            "{{ ticket.submitter_email }}, {{ queue.title }}, {{ user.username }}, "
+            "{{ submitter_name }}, etc. The full ticket context is available."
+        ),
+    )
+
+    queues = models.ManyToManyField(
+        Queue,
+        blank=True,
+        related_name="macros",
+        help_text=_(
+            "Select which queues this macro is available for. "
+            "Leave blank to make it available for all queues."
+        ),
+    )
+
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="authored_macros",
+        verbose_name=_("Author"),
+    )
+
+    is_shared = models.BooleanField(
+        _("Is Shared"),
+        default=False,
+        help_text=_(
+            "If checked, this macro will be visible to all staff members "
+            "of the associated queues. If unchecked, only you can see and use it."
+        ),
+    )
+
+    status = models.CharField(
+        _("Status"),
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=ACTIVE_STATUS,
+        help_text=_("Current status of the macro."),
+    )
+
+    created = models.DateTimeField(
+        _("Created"),
+        auto_now_add=True,
+        editable=False,
+    )
+
+    modified = models.DateTimeField(
+        _("Modified"),
+        auto_now=True,
+        editable=False,
+    )
+
+    usage_count = models.PositiveIntegerField(
+        _("Usage Count"),
+        default=0,
+        editable=False,
+        help_text=_("How many times this macro has been used."),
+    )
+
+    class Meta:
+        ordering = ("-modified", "name")
+        verbose_name = _("Macro")
+        verbose_name_plural = _("Macros")
+        indexes = [
+            models.Index(fields=["is_shared", "status"]),
+            models.Index(fields=["author", "is_shared"]),
+        ]
+
+    def __str__(self):
+        scope = _("Shared") if self.is_shared else _("Personal")
+        return "[%s] %s" % (scope, self.name)
+
+    def can_view(self, user):
+        """Check if a user can view this macro."""
+        if not user.is_authenticated:
+            return False
+        if user.is_superuser:
+            return True
+        if self.author_id == user.id:
+            return True
+        if self.is_shared and self.status == self.ACTIVE_STATUS:
+            return True
+        return False
+
+    def can_edit(self, user):
+        """Check if a user can edit this macro."""
+        if not user.is_authenticated:
+            return False
+        if user.is_superuser:
+            return True
+        if self.author_id == user.id:
+            return True
+        return False
+
+    def can_use(self, user, ticket=None):
+        """Check if a user can use this macro, optionally for a specific ticket."""
+        if not self.can_view(user):
+            return False
+        if self.status != self.ACTIVE_STATUS:
+            return False
+        if ticket is not None and self.queues.exists():
+            if not self.queues.filter(id=ticket.queue_id).exists():
+                return False
+        return True
+
+    def increment_usage(self):
+        """Increment the usage count."""
+        self.usage_count = models.F("usage_count") + 1
+        self.save(update_fields=["usage_count", "modified"])
+
+
+class MacroUsage(models.Model):
+    """
+    Records each time a macro is used, including who used it, on which ticket,
+    and a snapshot of the context at the time of use.
+    """
+
+    macro = models.ForeignKey(
+        Macro,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="usages",
+        verbose_name=_("Macro"),
+    )
+
+    macro_name = models.CharField(
+        _("Macro Name"),
+        max_length=100,
+        help_text=_("Snapshot of the macro name at time of use."),
+    )
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="macro_usages",
+        verbose_name=_("Used by"),
+    )
+
+    ticket = models.ForeignKey(
+        Ticket,
+        on_delete=models.CASCADE,
+        related_name="macro_usages",
+        verbose_name=_("Ticket"),
+    )
+
+    used_at = models.DateTimeField(
+        _("Used at"),
+        default=timezone.now,
+        editable=False,
+    )
+
+    rendered_body = models.TextField(
+        _("Rendered Body"),
+        blank=True,
+        null=True,
+        help_text=_("The body of the macro after variable substitution."),
+    )
+
+    context_snapshot = models.JSONField(
+        _("Context Snapshot"),
+        default=dict,
+        blank=True,
+        help_text=_(
+            "A snapshot of the template context variables used when "
+            "rendering this macro. Useful for debugging and auditing."
+        ),
+    )
+
+    class Meta:
+        ordering = ("-used_at",)
+        verbose_name = _("Macro Usage")
+        verbose_name_plural = _("Macro Usages")
+        indexes = [
+            models.Index(fields=["macro", "used_at"]),
+            models.Index(fields=["user", "used_at"]),
+            models.Index(fields=["ticket", "used_at"]),
+        ]
+
+    def __str__(self):
+        return _("%(macro)s used on ticket #%(ticket)d by %(user)s at %(time)s") % {
+            "macro": self.macro_name,
+            "ticket": self.ticket_id,
+            "user": self.user,
+            "time": self.used_at,
+        }
+
+    @classmethod
+    def record_usage(cls, macro, user, ticket, rendered_body, context=None):
+        """Create a usage record and increment the macro's usage count."""
+        usage = cls.objects.create(
+            macro=macro,
+            macro_name=macro.name if macro else _("Unknown Macro"),
+            user=user,
+            ticket=ticket,
+            rendered_body=rendered_body,
+            context_snapshot=context or {},
+        )
+        if macro:
+            macro.increment_usage()
+        return usage
+
+
+class ReplyDraft(models.Model):
+    """
+    A draft reply that a staff member is working on but hasn't submitted yet.
+    Drafts can be saved and resumed later. A draft can be associated with
+    a macro if it was started from one.
+    """
+
+    DRAFT = "draft"
+    SAVED = "saved"
+    SUBMITTED = "submitted"
+    DISCARDED = "discarded"
+
+    STATUS_CHOICES = (
+        (DRAFT, _("Draft")),
+        (SAVED, _("Saved")),
+        (SUBMITTED, _("Submitted")),
+        (DISCARDED, _("Discarded")),
+    )
+
+    ticket = models.ForeignKey(
+        Ticket,
+        on_delete=models.CASCADE,
+        related_name="reply_drafts",
+        verbose_name=_("Ticket"),
+    )
+
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="reply_drafts",
+        verbose_name=_("Author"),
+    )
+
+    title = models.CharField(
+        _("Title"),
+        max_length=200,
+        blank=True,
+        null=True,
+        help_text=_("Optional title for the draft."),
+    )
+
+    body = models.TextField(
+        _("Body"),
+        help_text=_("The draft reply content."),
+    )
+
+    new_status = models.IntegerField(
+        _("New Status"),
+        blank=True,
+        null=True,
+        help_text=_("The ticket status to set when this draft is submitted."),
+    )
+
+    macro = models.ForeignKey(
+        Macro,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="drafts",
+        verbose_name=_("Source Macro"),
+        help_text=_("The macro this draft was created from, if any."),
+    )
+
+    status = models.CharField(
+        _("Status"),
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=DRAFT,
+        help_text=_("Current status of the draft."),
+    )
+
+    public = models.BooleanField(
+        _("Public"),
+        default=True,
+        help_text=_(
+            "Whether the follow-up created from this draft will be "
+            "visible to the ticket submitter."
+        ),
+    )
+
+    created = models.DateTimeField(
+        _("Created"),
+        auto_now_add=True,
+        editable=False,
+    )
+
+    modified = models.DateTimeField(
+        _("Modified"),
+        auto_now=True,
+        editable=False,
+    )
+
+    submitted_at = models.DateTimeField(
+        _("Submitted at"),
+        null=True,
+        blank=True,
+        editable=False,
+    )
+
+    class Meta:
+        ordering = ("-modified",)
+        verbose_name = _("Reply Draft")
+        verbose_name_plural = _("Reply Drafts")
+        indexes = [
+            models.Index(fields=["ticket", "status"]),
+            models.Index(fields=["author", "status"]),
+            models.Index(fields=["author", "ticket"]),
+        ]
+
+    def __str__(self):
+        title = self.title or _("Untitled Draft")
+        return _("%(title)s (Ticket #%(ticket)d)") % {
+            "title": title,
+            "ticket": self.ticket_id,
+        }
+
+    def can_view(self, user):
+        """Check if a user can view this draft."""
+        if not user.is_authenticated:
+            return False
+        if user.is_superuser:
+            return True
+        return self.author_id == user.id
+
+    def can_edit(self, user):
+        """Check if a user can edit this draft."""
+        return self.can_view(user) and self.status in (self.DRAFT, self.SAVED)
+
+    def mark_submitted(self):
+        """Mark the draft as submitted."""
+        self.status = self.SUBMITTED
+        self.submitted_at = timezone.now()
+        self.save(update_fields=["status", "submitted_at", "modified"])
+
+    def mark_discarded(self):
+        """Mark the draft as discarded."""
+        self.status = self.DISCARDED
+        self.save(update_fields=["status", "modified"])

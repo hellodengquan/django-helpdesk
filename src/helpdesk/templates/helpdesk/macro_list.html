@@ -1,0 +1,106 @@
+{% extends "helpdesk/base.html" %}
+
+{% load i18n %}
+
+{% block helpdesk_title %}{% trans "Macros" %}{% endblock %}
+
+{% block helpdesk_breadcrumb %}
+    <li class="breadcrumb-item active">{% trans "Macros" %}</li>
+{% endblock %}
+
+{% block helpdesk_body %}
+    <h2>{% trans "Quick Reply Macros" %}</h2>
+
+    <div class="row mt-4">
+        <div class="col-md-6">
+            <div class="card mb-4">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span>{% trans "Shared Macros" %}</span>
+                    <a href="{% url 'helpdesk:macro_create' %}" class="btn btn-primary btn-sm">
+                        <i class="fas fa-plus"></i>
+                        {% trans "New Macro" %}
+                    </a>
+                </div>
+                <div class="list-group list-group-flush">
+                    {% for macro in shared_macros %}
+                        <div class="list-group-item d-flex justify-content-between align-items-center">
+                            <div>
+                                <h6 class="mb-1">{{ macro.name }}</h6>
+                                {% if macro.description %}
+                                    <small class="text-muted">{{ macro.description|truncatechars:80 }}</small>
+                                {% endif %}
+                                <div class="mt-1">
+                                    <small class="text-muted">
+                                        {% trans "by" %} {{ macro.author.username }}
+                                        | {% trans "Used" %} {{ macro.usage_count }} {% trans "times" %}
+                                    </small>
+                                </div>
+                            </div>
+                            <div>
+                                {% if macro.can_edit %}
+                                    <a href="{% url 'helpdesk:macro_edit' macro.id %}" class="btn btn-sm btn-secondary">
+                                        <i class="fas fa-edit"></i>
+                                    </a>
+                                {% endif %}
+                            </div>
+                        </div>
+                    {% empty %}
+                        <div class="list-group-item text-muted">
+                            {% trans "No shared macros yet." %}
+                        </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+
+        <div class="col-md-6">
+            <div class="card mb-4">
+                <div class="card-header">
+                    {% trans "My Personal Macros" %}
+                </div>
+                <div class="list-group list-group-flush">
+                    {% for macro in personal_macros %}
+                        <div class="list-group-item d-flex justify-content-between align-items-center">
+                            <div>
+                                <h6 class="mb-1">{{ macro.name }}</h6>
+                                {% if macro.description %}
+                                    <small class="text-muted">{{ macro.description|truncatechars:80 }}</small>
+                                {% endif %}
+                                <div class="mt-1">
+                                    <small class="text-muted">
+                                        {% trans "Used" %} {{ macro.usage_count }} {% trans "times" %}
+                                        | {% trans "Status:" %} {{ macro.get_status_display }}
+                                    </small>
+                                </div>
+                            </div>
+                            <div class="btn-group">
+                                <a href="{% url 'helpdesk:macro_edit' macro.id %}" class="btn btn-sm btn-secondary">
+                                    <i class="fas fa-edit"></i>
+                                </a>
+                                <a href="{% url 'helpdesk:macro_delete' macro.id %}" class="btn btn-sm btn-danger">
+                                    <i class="fas fa-trash"></i>
+                                </a>
+                            </div>
+                        </div>
+                    {% empty %}
+                        <div class="list-group-item text-muted">
+                            {% trans "You don't have any personal macros yet." %}
+                        </div>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    {% trans "Macro Statistics" %}
+                </div>
+                <div class="card-body">
+                    <a href="{% url 'helpdesk:macro_usage_stats' %}" class="btn btn-info btn-block">
+                        <i class="fas fa-chart-bar"></i>
+                        {% trans "View Usage Statistics" %}
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+{% endblock %}

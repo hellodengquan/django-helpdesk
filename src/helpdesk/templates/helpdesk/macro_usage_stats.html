@@ -1,0 +1,99 @@
+{% extends "helpdesk/base.html" %}
+
+{% load i18n %}
+
+{% block helpdesk_title %}{% trans "Macro Usage Statistics" %}{% endblock %}
+
+{% block helpdesk_breadcrumb %}
+    <li class="breadcrumb-item">
+        <a href="{% url 'helpdesk:macro_list' %}">{% trans "Macros" %}</a>
+    </li>
+    <li class="breadcrumb-item active">{% trans "Statistics" %}</li>
+{% endblock %}
+
+{% block helpdesk_body %}
+    <h2>{% trans "Macro Usage Statistics" %}</h2>
+
+    <div class="row mt-4">
+        <div class="col-md-6">
+            <div class="card mb-4">
+                <div class="card-header">
+                    {% trans "Top Shared Macros" %}
+                </div>
+                <div class="list-group list-group-flush">
+                    {% for macro in top_shared_macros %}
+                        <div class="list-group-item d-flex justify-content-between align-items-center">
+                            <div>
+                                <h6 class="mb-1">{{ macro.name }}</h6>
+                                <small class="text-muted">{% trans "by" %} {{ macro.author.username }}</small>
+                            </div>
+                            <span class="badge bg-primary rounded-pill">{{ macro.usage_count }}</span>
+                        </div>
+                    {% empty %}
+                        <div class="list-group-item text-muted">
+                            {% trans "No shared macros yet." %}
+                        </div>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    {% trans "My Macros" %}
+                </div>
+                <div class="list-group list-group-flush">
+                    {% for macro in my_macros %}
+                        <div class="list-group-item d-flex justify-content-between align-items-center">
+                            <div>
+                                <h6 class="mb-1">{{ macro.name }}</h6>
+                                <small class="text-muted">
+                                    {% if macro.is_shared %}{% trans "Shared" %}{% else %}{% trans "Personal" %}{% endif %}
+                                </small>
+                            </div>
+                            <span class="badge {% if macro.is_shared %}bg-success{% else %}bg-secondary{% endif %} rounded-pill">
+                                {{ macro.usage_count }}
+                            </span>
+                        </div>
+                    {% empty %}
+                        <div class="list-group-item text-muted">
+                            {% trans "You haven't created any macros yet." %}
+                        </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header">
+                    {% trans "My Recent Usage" %}
+                </div>
+                <div class="list-group list-group-flush">
+                    {% for usage in recent_usages %}
+                        <div class="list-group-item">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <h6 class="mb-1">{{ usage.macro_name }}</h6>
+                                <small class="text-muted">{{ usage.used_at|date:"Y-m-d H:i" }}</small>
+                            </div>
+                            <p class="mb-1">
+                                {% trans "Ticket:" %}
+                                <a href="{% url 'helpdesk:view' usage.ticket_id %}">
+                                    #{{ usage.ticket.id }} - {{ usage.ticket.title|truncatechars:40 }}
+                                </a>
+                            </p>
+                            {% if usage.rendered_body %}
+                                <small class="text-muted">
+                                    {{ usage.rendered_body|truncatechars:80 }}
+                                </small>
+                            {% endif %}
+                        </div>
+                    {% empty %}
+                        <div class="list-group-item text-muted">
+                            {% trans "No recent usage recorded." %}
+                        </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+{% endblock %}

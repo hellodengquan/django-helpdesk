@@ -291,3 +291,179 @@ def get_assignable_users(filter_staff: bool) -> QuerySet:
         users = users.filter(is_staff=True)
 
     return users.order_by(User.USERNAME_FIELD)
+
+
+def user_template_context(user):
+    """Create a safe template context for a user object."""
+    context = {}
+    if not user or not user.is_authenticated:
+        return context
+
+    for field in ("username", "email", "first_name", "last_name", "is_staff", "is_superuser"):
+        attr = getattr(user, field, None)
+        if not callable(attr):
+            context[field] = attr
+
+    context["get_full_name"] = user.get_full_name() if hasattr(user, "get_full_name") else user.username
+    context["get_short_name"] = user.get_short_name() if hasattr(user, "get_short_name") else user.username
+
+    return context
+
+
+def submitter_template_context(ticket):
+    """Create a template context for the ticket submitter."""
+    context = {}
+
+    context["email"] = ticket.submitter_email
+
+    if ticket.submitter_email:
+        try:
+            submitter_user = User.objects.get(email=ticket.submitter_email)
+            context["name"] = submitter_user.get_full_name() or submitter_user.username
+            context["username"] = submitter_user.username
+            context["first_name"] = submitter_user.first_name
+            context["last_name"] = submitter_user.last_name
+        except (User.DoesNotExist, User.MultipleObjectsReturned):
+            context["name"] = ticket.submitter_email.split("@")[0]
+            context["username"] = None
+            context["first_name"] = None
+            context["last_name"] = None
+    else:
+        context["name"] = ""
+        context["username"] = None
+        context["first_name"] = None
+        context["last_name"] = None
+
+    return context
+
+
+def macro_template_context(ticket, user=None):
+    """
+    Build a comprehensive template context for rendering macros.
+    Includes ticket, queue, user, and submitter contexts plus
+    convenience variables for easy access.
+    """
+    from helpdesk.models import TicketCustomFieldValue
+
+    context = safe_template_context(ticket)
+
+    if user:
+        context["user"] = user_template_context(user)
+
+    context["submitter"] = submitter_template_context(ticket)
+
+    context["submitter_name"] = context["submitter"]["name"]
+    context["submitter_email"] = ticket.submitter_email
+    context["ticket_id"] = ticket.id
+    context["ticket_title"] = ticket.title
+    context["queue_name"] = ticket.queue.title
+    context["queue_email"] = ticket.queue.email_address
+
+    custom_fields = {}
+    try:
+        for cfv in TicketCustomFieldValue.objects.filter(ticket=ticket).select_related("field"):
+            custom_fields[cfv.field.name] = cfv.value
+    except Exception:
+        pass
+    context["custom_fields"] = custom_fields
+
+    return context
+
+
+def render_macro(macro_body, ticket, user=None, extra_context=None):
+    """
+    Render a macro template body with the given ticket and user context.
+
+    Uses Django's template engine for safe variable substitution.
+    Returns the rendered string.
+
+    Args:
+        macro_body: The template string with {{ variable }} placeholders
+        ticket: The Ticket object to use for context
+        user: Optional User object (the current user)
+        extra_context: Optional dict of additional context variables
+
+    Returns:
+        str: The rendered template string
+    """
+    from django.template import Template, Context, TemplateDoesNotExist
+    from django.template.engine import Engine
+    from django.utils.safestring import mark_safe
+
+    context = macro_template_context(ticket, user)
+
+    if extra_context:
+        context.update(extra_context)
+
+    try:
+        template = Template(macro_body, engine=Engine.get_default())
+    except Exception:
+        return macro_body
+
+    try:
+        rendered = template.render(Context(context))
+    except Exception:
+        return macro_body
+
+    return rendered
+
+
+def get_available_macros_for_user(user, queue=None, include_shared=True, include_personal=True):
+    """
+    Get all macros available to a user, optionally filtered by queue.
+
+    Args:
+        user: The user to check permissions for
+        queue: Optional Queue object to filter by
+        include_shared: Whether to include shared macros
+        include_personal: Whether to include personal macros
+
+    Returns:
+        QuerySet of Macro objects
+    """
+    from helpdesk.models import Macro
+    from django.db.models import Q
+
+    if not user or not user.is_authenticated:
+        return Macro.objects.none()
+
+    query = Q(status=Macro.ACTIVE_STATUS)
+
+    conditions = []
+    if include_shared:
+        conditions.append(Q(is_shared=True))
+    if include_personal:
+        conditions.append(Q(author=user, is_shared=False))
+
+    if not conditions:
+        return Macro.objects.none()
+
+    query &= Q(*conditions, _connector=Q.OR)
+
+    macros = Macro.objects.filter(query).distinct().order_by("-is_shared", "name")
+
+    if queue is not None:
+        macros = macros.filter(Q(queues=queue) | Q(queues=None)).distinct()
+
+    return macros
+
+
+def can_use_macro(macro, user, ticket=None):
+    """
+    Check if a user can use a specific macro, optionally for a specific ticket.
+
+    This is a convenience wrapper around macro.can_use() that handles
+    None macros gracefully.
+
+    Args:
+        macro: The Macro object (can be None)
+        user: The user to check
+        ticket: Optional Ticket object for queue-based permission
+
+    Returns:
+        bool: True if the user can use the macro
+    """
+    if macro is None:
+        return False
+    return macro.can_use(user, ticket)
+

@@ -1,0 +1,162 @@
+{% extends "helpdesk/base.html" %}
+
+{% load i18n %}
+
+{% block helpdesk_title %}{% trans "Reply Drafts" %}{% endblock %}
+
+{% block helpdesk_breadcrumb %}
+    <li class="breadcrumb-item active">{% trans "Reply Drafts" %}</li>
+{% endblock %}
+
+{% block helpdesk_body %}
+    <h2>{% trans "Reply Drafts" %}</h2>
+
+    <div class="row mt-4">
+        <div class="col-md-12">
+            <div class="card mb-4">
+                <div class="card-header">
+                    {% trans "Active Drafts" %}
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-striped">
+                        <thead>
+                            <tr>
+                                <th>{% trans "Title" %}</th>
+                                <th>{% trans "Ticket" %}</th>
+                                <th>{% trans "Status" %}</th>
+                                <th>{% trans "Source Macro" %}</th>
+                                <th>{% trans "Modified" %}</th>
+                                <th>{% trans "Actions" %}</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for draft in active_drafts %}
+                                <tr>
+                                    <td>
+                                        <a href="{% url 'helpdesk:reply_draft_edit' draft.id %}">
+                                            {{ draft.title|default:_("Untitled Draft") }}
+                                        </a>
+                                    </td>
+                                    <td>
+                                        <a href="{% url 'helpdesk:view' draft.ticket_id %}">
+                                            #{{ draft.ticket.id }} - {{ draft.ticket.title|truncatechars:50 }}
+                                        </a>
+                                    </td>
+                                    <td>
+                                        <span class="badge {% if draft.status == 'draft' %}bg-warning{% elif draft.status == 'saved' %}bg-info{% endif %}">
+                                            {{ draft.get_status_display }}
+                                        </span>
+                                    </td>
+                                    <td>
+                                        {% if draft.macro %}
+                                            {{ draft.macro.name }}
+                                        {% else %}
+                                            <span class="text-muted">{% trans "None" %}</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>{{ draft.modified|date:"Y-m-d H:i" }}</td>
+                                    <td>
+                                        <div class="btn-group btn-group-sm">
+                                            <a href="{% url 'helpdesk:reply_draft_edit' draft.id %}" class="btn btn-secondary">
+                                                <i class="fas fa-edit"></i> {% trans "Edit" %}
+                                            </a>
+                                            <a href="{% url 'helpdesk:reply_draft_delete' draft.id %}" class="btn btn-danger">
+                                                <i class="fas fa-trash"></i>
+                                            </a>
+                                        </div>
+                                    </td>
+                                </tr>
+                            {% empty %}
+                                <tr>
+                                    <td colspan="6" class="text-center text-muted">
+                                        {% trans "No active drafts." %}
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            {% if submitted_drafts %}
+                <div class="card mb-4">
+                    <div class="card-header">
+                        {% trans "Recently Submitted" %}
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-striped">
+                            <thead>
+                                <tr>
+                                    <th>{% trans "Title" %}</th>
+                                    <th>{% trans "Ticket" %}</th>
+                                    <th>{% trans "Source Macro" %}</th>
+                                    <th>{% trans "Submitted" %}</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for draft in submitted_drafts %}
+                                    <tr>
+                                        <td>{{ draft.title|default:_("Untitled Draft") }}</td>
+                                        <td>
+                                            <a href="{% url 'helpdesk:view' draft.ticket_id %}">
+                                                #{{ draft.ticket.id }} - {{ draft.ticket.title|truncatechars:50 }}
+                                            </a>
+                                        </td>
+                                        <td>
+                                            {% if draft.macro %}
+                                                {{ draft.macro.name }}
+                                            {% else %}
+                                                <span class="text-muted">{% trans "None" %}</span>
+                                            {% endif %}
+                                        </td>
+                                        <td>{{ draft.submitted_at|date:"Y-m-d H:i" }}</td>
+                                    </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            {% endif %}
+
+            {% if discarded_drafts %}
+                <div class="card">
+                    <div class="card-header">
+                        {% trans "Recently Discarded" %}
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-striped">
+                            <thead>
+                                <tr>
+                                    <th>{% trans "Title" %}</th>
+                                    <th>{% trans "Ticket" %}</th>
+                                    <th>{% trans "Source Macro" %}</th>
+                                    <th>{% trans "Modified" %}</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for draft in discarded_drafts %}
+                                    <tr>
+                                        <td>{{ draft.title|default:_("Untitled Draft") }}</td>
+                                        <td>
+                                            <a href="{% url 'helpdesk:view' draft.ticket_id %}">
+                                                #{{ draft.ticket.id }} - {{ draft.ticket.title|truncatechars:50 }}
+                                            </a>
+                                        </td>
+                                        <td>
+                                            {% if draft.macro %}
+                                                {{ draft.macro.name }}
+                                            {% else %}
+                                                <span class="text-muted">{% trans "None" %}</span>
+                                            {% endif %}
+                                        </td>
+                                        <td>{{ draft.modified|date:"Y-m-d H:i" }}</td>
+                                    </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            {% endif %}
+        </div>
+    </div>
+{% endblock %}

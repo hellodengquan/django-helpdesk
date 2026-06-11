@@ -1,0 +1,62 @@
+{% extends "helpdesk/base.html" %}
+
+{% load i18n %}
+
+{% block helpdesk_title %}{% trans "Delete Macro" %}{% endblock %}
+
+{% block helpdesk_breadcrumb %}
+    <li class="breadcrumb-item">
+        <a href="{% url 'helpdesk:macro_list' %}">{% trans "Macros" %}</a>
+    </li>
+    <li class="breadcrumb-item active">{% trans "Delete" %}</li>
+{% endblock %}
+
+{% block helpdesk_body %}
+    <h2>{% trans "Delete Macro" %}</h2>
+
+    <div class="row mt-4">
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header">
+                    {% trans "Confirm deletion" %}
+                </div>
+                <div class="card-body">
+                    <p>{% trans "Are you sure you want to delete this macro?" %}</p>
+                    <dl class="row">
+                        <dt class="col-sm-3">{% trans "Name" %}</dt>
+                        <dd class="col-sm-9">{{ macro.name }}</dd>
+
+                        <dt class="col-sm-3">{% trans "Description" %}</dt>
+                        <dd class="col-sm-9">{{ macro.description|default:_("None") }}</dd>
+
+                        <dt class="col-sm-3">{% trans "Shared" %}</dt>
+                        <dd class="col-sm-9">
+                            {% if macro.is_shared %}{% trans "Yes" %}{% else %}{% trans "No (Personal)" %}{% endif %}
+                        </dd>
+
+                        <dt class="col-sm-3">{% trans "Usage Count" %}</dt>
+                        <dd class="col-sm-9">{{ macro.usage_count }}</dd>
+                    </dl>
+
+                    <div class="alert alert-warning">
+                        <i class="fas fa-exclamation-triangle"></i>
+                        {% trans "This action cannot be undone." %}
+                    </div>
+                </div>
+                <div class="card-footer">
+                    <form method="post">
+                        {% csrf_token %}
+                        <a href="{% url 'helpdesk:macro_list' %}" class="btn btn-secondary">
+                            <i class="fas fa-times"></i>
+                            {% trans "Cancel" %}
+                        </a>
+                        <button type="submit" class="btn btn-danger">
+                            <i class="fas fa-trash"></i>
+                            {% trans "Delete Macro" %}
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+{% endblock %}

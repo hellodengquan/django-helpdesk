@@ -12,8 +12,11 @@ from helpdesk.models import (
     FollowUpAttachment,
     IgnoreEmail,
     KBIAttachment,
+    Macro,
+    MacroUsage,
     PreSetReply,
     Queue,
+    ReplyDraft,
     Ticket,
     TicketChange,
 )
@@ -157,3 +160,72 @@ class ChecklistAdmin(admin.ModelAdmin):
 
 admin.site.register(PreSetReply)
 admin.site.register(EscalationExclusion)
+
+
+@admin.register(Macro)
+class MacroAdmin(admin.ModelAdmin):
+    list_display = ("name", "author", "is_shared", "status", "usage_count", "created", "modified")
+    list_filter = ("is_shared", "status", "author")
+    search_fields = ("name", "description", "body")
+    filter_horizontal = ("queues",)
+    readonly_fields = ("created", "modified", "usage_count")
+    autocomplete_fields = ("author",)
+
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        if request.user.is_superuser:
+            return qs
+        return qs.filter(author=request.user)
+
+    def has_change_permission(self, request, obj=None):
+        if obj is None:
+            return super().has_change_permission(request, obj)
+        return obj.can_edit(request.user)
+
+    def has_delete_permission(self, request, obj=None):
+        if obj is None:
+            return super().has_delete_permission(request, obj)
+        return obj.can_edit(request.user)
+
+
+@admin.register(MacroUsage)
+class MacroUsageAdmin(admin.ModelAdmin):
+    list_display = ("macro_name", "user", "ticket", "used_at")
+    list_filter = ("user", "used_at")
+    search_fields = ("macro_name", "user__username", "ticket__title")
+    readonly_fields = ("macro", "macro_name", "user", "ticket", "used_at", "rendered_body", "context_snapshot")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return request.user.is_superuser
+
+
+@admin.register(ReplyDraft)
+class ReplyDraftAdmin(admin.ModelAdmin):
+    list_display = ("__str__", "author", "ticket", "status", "modified")
+    list_filter = ("status", "author")
+    search_fields = ("title", "body", "ticket__title")
+    readonly_fields = ("created", "modified", "submitted_at")
+    autocomplete_fields = ("ticket", "author", "macro")
+
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        if request.user.is_superuser:
+            return qs
+        return qs.filter(author=request.user)
+
+    def has_change_permission(self, request, obj=None):
+        if obj is None:
+            return super().has_change_permission(request, obj)
+        return obj.can_edit(request.user)
+
+    def has_delete_permission(self, request, obj=None):
+        if obj is None:
+            return super().has_delete_permission(request, obj)
+        return obj.can_edit(request.user)
+

@@ -47,7 +47,10 @@ from helpdesk.forms import (
     EditTicketCustomFieldForm,
     EmailIgnoreForm,
     FormControlDeleteFormSet,
+    MacroForm,
+    MacroRenderForm,
     MultipleTicketSelectForm,
+    ReplyDraftForm,
     TicketCCEmailForm,
     TicketCCForm,
     TicketCCUserForm,
@@ -60,6 +63,9 @@ from helpdesk.lib import (
     queue_template_context,
     safe_template_context,
     get_assignable_users,
+    render_macro,
+    get_available_macros_for_user,
+    can_use_macro,
 )
 from helpdesk.models import (
     Checklist,
@@ -69,8 +75,11 @@ from helpdesk.models import (
     FollowUp,
     FollowUpAttachment,
     IgnoreEmail,
+    Macro,
+    MacroUsage,
     PreSetReply,
     Queue,
+    ReplyDraft,
     SavedSearch,
     Ticket,
     TicketCC,
@@ -2220,3 +2229,336 @@ def delete_checklist_template(request, checklist_template_id):
             "checklist_template": checklist_template,
         },
     )
+
+
+@helpdesk_staff_member_required
+def macro_list(request):
+    """List all macros available to the current user."""
+    shared_macros = Macro.objects.filter(
+        is_shared=True,
+        status=Macro.ACTIVE_STATUS,
+    ).order_by("name")
+
+    personal_macros = Macro.objects.filter(
+        author=request.user,
+        is_shared=False,
+    ).order_by("name")
+
+    return render(
+        request,
+        "helpdesk/macro_list.html",
+        {
+            "shared_macros": shared_macros,
+            "personal_macros": personal_macros,
+        },
+    )
+
+
+@helpdesk_staff_member_required
+def macro_create(request):
+    """Create a new macro."""
+    if request.method == "POST":
+        form = MacroForm(request.POST, user=request.user)
+        if form.is_valid():
+            macro = form.save(commit=False)
+            macro.author = request.user
+            macro.save()
+            form.save_m2m()
+            return redirect("helpdesk:macro_list")
+    else:
+        form = MacroForm(user=request.user)
+
+    return render(
+        request,
+        "helpdesk/macro_form.html",
+        {
+            "form": form,
+            "macro": None,
+        },
+    )
+
+
+@helpdesk_staff_member_required
+def macro_edit(request, macro_id):
+    """Edit an existing macro."""
+    macro = get_object_or_404(Macro, id=macro_id)
+
+    if not macro.can_edit(request.user):
+        raise PermissionDenied()
+
+    if request.method == "POST":
+        form = MacroForm(request.POST, instance=macro, user=request.user)
+        if form.is_valid():
+            form.save()
+            return redirect("helpdesk:macro_list")
+    else:
+        form = MacroForm(instance=macro, user=request.user)
+
+    return render(
+        request,
+        "helpdesk/macro_form.html",
+        {
+            "form": form,
+            "macro": macro,
+        },
+    )
+
+
+@helpdesk_staff_member_required
+def macro_delete(request, macro_id):
+    """Delete a macro."""
+    macro = get_object_or_404(Macro, id=macro_id)
+
+    if not macro.can_edit(request.user):
+        raise PermissionDenied()
+
+    if request.method == "POST":
+        macro.delete()
+        return redirect("helpdesk:macro_list")
+
+    return render(
+        request,
+        "helpdesk/macro_confirm_delete.html",
+        {
+            "macro": macro,
+        },
+    )
+
+
+@api_view(["POST"])
+@helpdesk_staff_member_required
+def macro_render(request):
+    """
+    API endpoint to render a macro body with ticket context.
+    Returns the rendered HTML/text.
+    """
+    form = MacroRenderForm(request.POST)
+    if not form.is_valid():
+        return JsonResponse(
+            {"error": _("Invalid form data."), "details": form.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    ticket_id = form.cleaned_data["ticket_id"]
+    macro_id = form.cleaned_data.get("macro_id")
+    body = form.cleaned_data.get("body")
+
+    ticket = get_object_or_404(Ticket, id=ticket_id)
+
+    if macro_id and not body:
+        macro = get_object_or_404(Macro, id=macro_id)
+        if not can_use_macro(macro, request.user, ticket):
+            raise PermissionDenied()
+        body = macro.body
+    elif not body:
+        return JsonResponse(
+            {"error": _("Either macro_id or body must be provided.")},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    rendered_body = render_macro(body, ticket, request.user)
+
+    return JsonResponse(
+        {
+            "rendered_body": rendered_body,
+            "original_body": body,
+        }
+    )
+
+
+@api_view(["POST"])
+@helpdesk_staff_member_required
+def macro_use(request, macro_id, ticket_id):
+    """
+    Record that a macro was used on a ticket.
+    Returns the rendered body.
+    """
+    macro = get_object_or_404(Macro, id=macro_id)
+    ticket = get_object_or_404(Ticket, id=ticket_id)
+
+    if not can_use_macro(macro, request.user, ticket):
+        raise PermissionDenied()
+
+    rendered_body = render_macro(macro.body, ticket, request.user)
+
+    from helpdesk.lib import macro_template_context
+    context_data = macro_template_context(ticket, request.user)
+
+    safe_context = {}
+    for key, value in context_data.items():
+        if isinstance(value, (str, int, float, bool, type(None))):
+            safe_context[key] = value
+        elif isinstance(value, dict):
+            safe_context[key] = {
+                k: v for k, v in value.items()
+                if isinstance(v, (str, int, float, bool, type(None)))
+            }
+
+    MacroUsage.record_usage(
+        macro=macro,
+        user=request.user,
+        ticket=ticket,
+        rendered_body=rendered_body,
+        context=safe_context,
+    )
+
+    return JsonResponse(
+        {
+            "macro_id": macro.id,
+            "macro_name": macro.name,
+            "rendered_body": rendered_body,
+            "ticket_id": ticket.id,
+        }
+    )
+
+
+@helpdesk_staff_member_required
+def reply_draft_list(request):
+    """List all reply drafts for the current user."""
+    drafts = ReplyDraft.objects.filter(
+        author=request.user,
+    ).select_related("ticket", "macro").order_by("-modified")
+
+    active_drafts = drafts.filter(status__in=[ReplyDraft.DRAFT, ReplyDraft.SAVED])
+    submitted_drafts = drafts.filter(status=ReplyDraft.SUBMITTED)[:20]
+    discarded_drafts = drafts.filter(status=ReplyDraft.DISCARDED)[:20]
+
+    return render(
+        request,
+        "helpdesk/reply_draft_list.html",
+        {
+            "active_drafts": active_drafts,
+            "submitted_drafts": submitted_drafts,
+            "discarded_drafts": discarded_drafts,
+        },
+    )
+
+
+@helpdesk_staff_member_required
+def reply_draft_create(request, ticket_id):
+    """Create a new reply draft for a ticket."""
+    ticket = get_object_or_404(Ticket, id=ticket_id)
+
+    if request.method == "POST":
+        form = ReplyDraftForm(request.POST, ticket=ticket)
+        if form.is_valid():
+            draft = form.save(commit=False)
+            draft.ticket = ticket
+            draft.author = request.user
+            draft.status = ReplyDraft.SAVED
+            draft.save()
+            return redirect("helpdesk:view", ticket_id=ticket.id)
+    else:
+        macro_id = request.GET.get("macro_id")
+        initial_body = ""
+        initial_macro = None
+
+        if macro_id:
+            try:
+                macro = Macro.objects.get(id=macro_id)
+                if can_use_macro(macro, request.user, ticket):
+                    initial_body = render_macro(macro.body, ticket, request.user)
+                    initial_macro = macro
+            except Macro.DoesNotExist:
+                pass
+
+        form = ReplyDraftForm(
+            ticket=ticket,
+            initial={
+                "body": initial_body,
+                "macro": initial_macro,
+                "public": True,
+            },
+        )
+
+    return render(
+        request,
+        "helpdesk/reply_draft_form.html",
+        {
+            "form": form,
+            "ticket": ticket,
+            "draft": None,
+        },
+    )
+
+
+@helpdesk_staff_member_required
+def reply_draft_edit(request, draft_id):
+    """Edit an existing reply draft."""
+    draft = get_object_or_404(ReplyDraft, id=draft_id)
+
+    if not draft.can_edit(request.user):
+        raise PermissionDenied()
+
+    if request.method == "POST":
+        form = ReplyDraftForm(request.POST, instance=draft, ticket=draft.ticket)
+        if form.is_valid():
+            draft = form.save(commit=False)
+            draft.status = ReplyDraft.SAVED
+            draft.save()
+            if "save_and_return" in request.POST:
+                return redirect("helpdesk:view", ticket_id=draft.ticket_id)
+            return redirect("helpdesk:reply_draft_list")
+    else:
+        form = ReplyDraftForm(instance=draft, ticket=draft.ticket)
+
+    return render(
+        request,
+        "helpdesk/reply_draft_form.html",
+        {
+            "form": form,
+            "ticket": draft.ticket,
+            "draft": draft,
+        },
+    )
+
+
+@helpdesk_staff_member_required
+def reply_draft_delete(request, draft_id):
+    """Delete (discard) a reply draft."""
+    draft = get_object_or_404(ReplyDraft, id=draft_id)
+
+    if not draft.can_edit(request.user):
+        raise PermissionDenied()
+
+    if request.method == "POST":
+        draft.mark_discarded()
+        return redirect("helpdesk:reply_draft_list")
+
+    return render(
+        request,
+        "helpdesk/reply_draft_confirm_delete.html",
+        {
+            "draft": draft,
+        },
+    )
+
+
+@helpdesk_staff_member_required
+def macro_usage_stats(request):
+    """Show macro usage statistics."""
+    from django.db.models import Count
+
+    top_shared_macros = Macro.objects.filter(
+        is_shared=True,
+        status=Macro.ACTIVE_STATUS,
+    ).order_by("-usage_count")[:10]
+
+    my_macros = Macro.objects.filter(
+        author=request.user,
+    ).order_by("-usage_count")[:10]
+
+    recent_usages = MacroUsage.objects.filter(
+        user=request.user,
+    ).select_related("macro", "ticket").order_by("-used_at")[:20]
+
+    return render(
+        request,
+        "helpdesk/macro_usage_stats.html",
+        {
+            "top_shared_macros": top_shared_macros,
+            "my_macros": my_macros,
+            "recent_usages": recent_usages,
+        },
+    )
+

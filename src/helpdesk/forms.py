@@ -27,7 +27,9 @@ from helpdesk.models import (
     CustomField,
     FollowUp,
     IgnoreEmail,
+    Macro,
     Queue,
+    ReplyDraft,
     Ticket,
     TicketCC,
     TicketCustomFieldValue,
@@ -776,3 +778,82 @@ class CreateChecklistForm(ChecklistForm):
 
 class FormControlDeleteFormSet(forms.BaseInlineFormSet):
     deletion_widget = forms.CheckboxInput(attrs={"class": "form-control"})
+
+
+class MacroForm(forms.ModelForm):
+    """Form for creating and editing macros."""
+
+    class Meta:
+        model = Macro
+        fields = (
+            "name",
+            "description",
+            "body",
+            "queues",
+            "is_shared",
+            "status",
+        )
+        widgets = {
+            "name": forms.TextInput(attrs={"class": "form-control"}),
+            "description": forms.Textarea(attrs={"class": "form-control", "rows": 2}),
+            "body": forms.Textarea(attrs={"class": "form-control", "rows": 10}),
+            "queues": forms.SelectMultiple(attrs={"class": "form-control"}),
+            "is_shared": forms.CheckboxInput(attrs={"class": "form-check-input"}),
+            "status": forms.Select(attrs={"class": "form-control"}),
+        }
+
+    def __init__(self, *args, **kwargs):
+        self.user = kwargs.pop("user", None)
+        super().__init__(*args, **kwargs)
+
+    def clean_is_shared(self):
+        is_shared = self.cleaned_data.get("is_shared")
+        if is_shared and self.user and not self.user.is_staff and not self.user.is_superuser:
+            raise forms.ValidationError(
+                _("Only staff members can create shared macros.")
+            )
+        return is_shared
+
+
+class ReplyDraftForm(forms.ModelForm):
+    """Form for creating and editing reply drafts."""
+
+    class Meta:
+        model = ReplyDraft
+        fields = (
+            "title",
+            "body",
+            "new_status",
+            "public",
+        )
+        widgets = {
+            "title": forms.TextInput(attrs={"class": "form-control"}),
+            "body": forms.Textarea(attrs={"class": "form-control", "rows": 10}),
+            "new_status": forms.Select(attrs={"class": "form-control"}),
+            "public": forms.CheckboxInput(attrs={"class": "form-check-input"}),
+        }
+
+    def __init__(self, *args, ticket=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if ticket:
+            status_choices = [("", _("--- No Change ---"))] + list(Ticket.STATUS_CHOICES)
+            self.fields["new_status"].choices = status_choices
+
+
+class MacroRenderForm(forms.Form):
+    """Form for previewing/rendering a macro against a specific ticket."""
+
+    macro_id = forms.IntegerField(
+        widget=forms.HiddenInput(),
+        required=False,
+    )
+    ticket_id = forms.IntegerField(
+        widget=forms.HiddenInput(),
+        required=True,
+    )
+    body = forms.CharField(
+        widget=forms.Textarea(attrs={"class": "form-control", "rows": 10}),
+        required=False,
+        help_text=_("The macro body to render. If not provided, the macro's body will be used."),
+    )
+

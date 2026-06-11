@@ -1,0 +1,136 @@
+{% extends "helpdesk/base.html" %}
+
+{% load i18n %}
+
+{% block helpdesk_title %}{% if draft %}{% trans "Edit Draft" %}{% else %}{% trans "New Draft" %}{% endif %}{% endblock %}
+
+{% block helpdesk_breadcrumb %}
+    <li class="breadcrumb-item">
+        <a href="{% url 'helpdesk:reply_draft_list' %}">{% trans "Reply Drafts" %}</a>
+    </li>
+    <li class="breadcrumb-item">
+        <a href="{% url 'helpdesk:view' ticket.id %}">#{{ ticket.id }} - {{ ticket.title|truncatechars:30 }}</a>
+    </li>
+    <li class="breadcrumb-item active">{% if draft %}{% trans "Edit" %}{% else %}{% trans "New" %}{% endif %}</li>
+{% endblock %}
+
+{% block helpdesk_body %}
+    <h2>{% if draft %}{% trans "Edit Reply Draft" %}{% else %}{% trans "New Reply Draft" %}{% endif %}</h2>
+
+    <div class="row mt-4">
+        <div class="col-md-8">
+            <div class="card">
+                <div class="card-header">
+                    {% trans "Draft Content" %}
+                </div>
+                <form method="post">
+                    <div class="card-body">
+                        {% csrf_token %}
+
+                        {% if form.errors %}
+                            <div class="alert alert-danger">
+                                {% trans "Please correct the errors below." %}
+                            </div>
+                        {% endif %}
+
+                        <div class="form-group">
+                            <label for="{{ form.title.id_for_label }}">{% trans "Title" %}</label>
+                            {{ form.title }}
+                            {% if form.title.errors %}
+                                <div class="text-danger">{{ form.title.errors }}</div>
+                            {% endif %}
+                            <small class="form-text text-muted">{{ form.title.help_text|default:_("Optional title for your reference.") }}</small>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="{{ form.body.id_for_label }}">{% trans "Reply Body" %}</label>
+                            {{ form.body }}
+                            {% if form.body.errors %}
+                                <div class="text-danger">{{ form.body.errors }}</div>
+                            {% endif %}
+                            <small class="form-text text-muted">{{ form.body.help_text }}</small>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group col-md-6">
+                                <label for="{{ form.new_status.id_for_label }}">{% trans "New Ticket Status" %}</label>
+                                {{ form.new_status }}
+                                {% if form.new_status.errors %}
+                                    <div class="text-danger">{{ form.new_status.errors }}</div>
+                                {% endif %}
+                                <small class="form-text text-muted">{{ form.new_status.help_text }}</small>
+                            </div>
+
+                            <div class="form-group col-md-6">
+                                <div class="form-check mt-4">
+                                    {{ form.public }}
+                                    <label class="form-check-label" for="{{ form.public.id_for_label }}">
+                                        {% trans "Public reply" %}
+                                    </label>
+                                    {% if form.public.errors %}
+                                        <div class="text-danger">{{ form.public.errors }}</div>
+                                    {% endif %}
+                                    <small class="form-text text-muted">{{ form.public.help_text }}</small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-footer">
+                        <a href="{% url 'helpdesk:view' ticket.id %}" class="btn btn-secondary">
+                            <i class="fas fa-times"></i>
+                            {% trans "Cancel" %}
+                        </a>
+                        <button type="submit" name="save_and_return" class="btn btn-primary">
+                            <i class="fas fa-save"></i>
+                            {% trans "Save & Return to Ticket" %}
+                        </button>
+                        <button type="submit" class="btn btn-outline-primary">
+                            <i class="fas fa-save"></i>
+                            {% trans "Save Draft" %}
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <div class="col-md-4">
+            <div class="card mb-4">
+                <div class="card-header">
+                    {% trans "Ticket Info" %}
+                </div>
+                <div class="card-body">
+                    <dl class="row">
+                        <dt class="col-sm-4">{% trans "Ticket" %}</dt>
+                        <dd class="col-sm-8">
+                            <a href="{% url 'helpdesk:view' ticket.id %}">#{{ ticket.id }}</a>
+                        </dd>
+
+                        <dt class="col-sm-4">{% trans "Title" %}</dt>
+                        <dd class="col-sm-8">{{ ticket.title }}</dd>
+
+                        <dt class="col-sm-4">{% trans "Queue" %}</dt>
+                        <dd class="col-sm-8">{{ ticket.queue.title }}</dd>
+
+                        <dt class="col-sm-4">{% trans "Status" %}</dt>
+                        <dd class="col-sm-8">{{ ticket.get_status_display }}</dd>
+
+                        <dt class="col-sm-4">{% trans "Submitter" %}</dt>
+                        <dd class="col-sm-8">{{ ticket.submitter_email|default:_("None") }}</dd>
+                    </dl>
+                </div>
+            </div>
+
+            {% if draft and draft.macro %}
+                <div class="card">
+                    <div class="card-header">
+                        {% trans "Source Macro" %}
+                    </div>
+                    <div class="card-body">
+                        <p><strong>{{ draft.macro.name }}</strong></p>
+                        <p class="text-muted small">{% trans "This draft was created from a macro." %}</p>
+                    </div>
+                </div>
+            {% endif %}
+        </div>
+    </div>
+{% endblock %}
