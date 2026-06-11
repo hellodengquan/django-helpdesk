@@ -372,6 +372,13 @@ $( function() {
                   }
                   commentBox.trigger('focus');
 
+                  $.ajax({
+                      url: '{% url "helpdesk:macro_use" macro_id=0 ticket_id=0 %}'.replace('/0/use/0/', '/' + macroId + '/use/' + ticketId + '/'),
+                      method: 'POST',
+                      data: { csrfmiddlewaretoken: csrfToken },
+                      dataType: 'json'
+                  });
+
                   btn.removeClass('btn-outline-secondary').addClass('btn-success');
                   btn.html('<i class="fas fa-check"></i> ' + macroName);
                   setTimeout(function() {

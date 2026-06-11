@@ -681,3 +681,97 @@ class TicketDetailMacroIntegrationTestCase(TestCase):
         json_data = response.json()
         self.assertIn("Login Issue", json_data["rendered_body"])
         self.assertIn("customer", json_data["rendered_body"])
+
+    def test_end_to_end_macro_use_records_usage(self):
+        self.assertEqual(MacroUsage.objects.count(), 0)
+
+        response = self.client.post(
+            reverse(
+                "helpdesk:macro_use",
+                kwargs={"macro_id": self.shared_macro.id, "ticket_id": self.ticket.id},
+            ),
+        )
+        self.assertEqual(response.status_code, 200)
+        json_data = response.json()
+        self.assertEqual(json_data["macro_name"], "Greeting")
+        self.assertIn("Login Issue", json_data["rendered_body"])
+
+        self.assertEqual(MacroUsage.objects.count(), 1)
+        usage = MacroUsage.objects.first()
+        self.assertEqual(usage.macro_id, self.shared_macro.id)
+        self.assertEqual(usage.user_id, self.user.id)
+        self.assertEqual(usage.ticket_id, self.ticket.id)
+        self.assertEqual(usage.macro_name, "Greeting")
+        self.assertIn("Login Issue", usage.rendered_body)
+
+        self.shared_macro.refresh_from_db()
+        self.assertEqual(self.shared_macro.usage_count, 1)
+
+    def test_end_to_end_full_workflow_render_then_use(self):
+        self.assertEqual(MacroUsage.objects.count(), 0)
+
+        render_response = self.client.post(
+            reverse("helpdesk:macro_render"),
+            data={
+                "macro_id": self.shared_macro.id,
+                "ticket_id": self.ticket.id,
+            },
+        )
+        self.assertEqual(render_response.status_code, 200)
+
+        use_response = self.client.post(
+            reverse(
+                "helpdesk:macro_use",
+                kwargs={"macro_id": self.shared_macro.id, "ticket_id": self.ticket.id},
+            ),
+        )
+        self.assertEqual(use_response.status_code, 200)
+
+        self.assertEqual(MacroUsage.objects.count(), 1)
+        usage = MacroUsage.objects.first()
+        self.assertEqual(usage.user_id, self.user.id)
+        self.assertEqual(usage.ticket_id, self.ticket.id)
+        self.assertIsNotNone(usage.rendered_body)
+        self.assertIsInstance(usage.context_snapshot, dict)
+
+    def test_end_to_end_personal_macro_records_usage(self):
+        self.client.post(
+            reverse(
+                "helpdesk:macro_use",
+                kwargs={"macro_id": self.personal_macro.id, "ticket_id": self.ticket.id},
+            ),
+        )
+
+        self.assertEqual(MacroUsage.objects.count(), 1)
+        usage = MacroUsage.objects.first()
+        self.assertEqual(usage.macro_id, self.personal_macro.id)
+        self.assertEqual(usage.user_id, self.user.id)
+
+        self.personal_macro.refresh_from_db()
+        self.assertEqual(self.personal_macro.usage_count, 1)
+
+    def test_end_to_end_other_user_cannot_use_personal_macro(self):
+        self.client.logout()
+        self.client.login(username="otherstaff", password="pass")
+
+        response = self.client.post(
+            reverse(
+                "helpdesk:macro_use",
+                kwargs={"macro_id": self.personal_macro.id, "ticket_id": self.ticket.id},
+            ),
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(MacroUsage.objects.count(), 0)
+
+    def test_end_to_end_macro_use_increments_on_each_call(self):
+        for _ in range(3):
+            self.client.post(
+                reverse(
+                    "helpdesk:macro_use",
+                    kwargs={"macro_id": self.shared_macro.id, "ticket_id": self.ticket.id},
+                ),
+            )
+
+        self.shared_macro.refresh_from_db()
+        self.assertEqual(self.shared_macro.usage_count, 3)
+        self.assertEqual(MacroUsage.objects.filter(macro=self.shared_macro).count(), 3)
