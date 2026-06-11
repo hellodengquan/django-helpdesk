@@ -1,6 +1,8 @@
 import os
 import tempfile
 import shutil
+from unittest.mock import patch
+
 from django.contrib.auth import get_user_model, authenticate
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command, CommandError
@@ -44,9 +46,12 @@ class ResetDemoDataTestCase(TestCase):
             MEDIA_ROOT=cls._temp_media_root,
         )
         cls._media_patcher.enable()
+        cls._demo_env_patcher = patch.dict(os.environ, {"HELPDESK_DEMO_MODE": "1"})
+        cls._demo_env_patcher.start()
 
     @classmethod
     def tearDownClass(cls):
+        cls._demo_env_patcher.stop()
         cls._media_patcher.disable()
         if os.path.exists(cls._temp_media_root):
             shutil.rmtree(cls._temp_media_root)

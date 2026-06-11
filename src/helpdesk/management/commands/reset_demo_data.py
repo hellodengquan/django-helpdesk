@@ -13,7 +13,7 @@ import os
 import shutil
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.core.management import call_command
 from django.utils.translation import gettext as _
 
@@ -49,8 +49,14 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument(
             "--noinput",
+            "--no-input",
             action="store_true",
-            help="Run without prompting for confirmation.",
+            dest="noinput",
+            help=(
+                "Run without prompting for confirmation. "
+                "NOTE: Only effective in demo/debug environments. "
+                "Ignored when using --force outside of demo environments."
+            ),
         )
         parser.add_argument(
             "--keep-users",
@@ -69,6 +75,17 @@ class Command(BaseCommand):
             help="Path to the demo fixture JSON file. If not provided, "
             "will attempt to find it automatically.",
         )
+        parser.add_argument(
+            "--force",
+            action="store_true",
+            help=(
+                "Force execution in non-demo/production environments. "
+                "WARNING: This is extremely dangerous and will permanently "
+                "delete all existing helpdesk data! Even with this flag, "
+                "you will be prompted for confirmation twice unless you "
+                "are also in a demo environment."
+            ),
+        )
 
     def handle(self, *args, **options):
         """Handle command line"""
@@ -76,8 +93,77 @@ class Command(BaseCommand):
         keep_users = options.get("keep_users", False)
         keep_attachments = options.get("keep_attachments", False)
         fixture_path = options.get("fixture", None)
+        force = options.get("force", False)
 
-        if not noinput:
+        is_demo_env = self._is_demo_environment()
+
+        if not is_demo_env and not force:
+            raise CommandError(
+                _(
+                    "This command is restricted to demo/debug environments only.\n"
+                    "Current environment appears to be a production environment.\n\n"
+                    "Running this command in a production environment will "
+                    "PERMANENTLY DELETE all tickets, queues, followups, "
+                    "attachments, and user data.\n\n"
+                    "If you absolutely know what you are doing and understand "
+                    "the risks, you can re-run with --force to bypass this check.\n"
+                    "Even with --force, you will be required to confirm twice."
+                )
+            )
+
+        if not is_demo_env and force:
+            self.stderr.write(
+                self.style.WARNING(
+                    _(
+                        "\n"
+                        "================================================================\n"
+                        "                           WARNING!\n"
+                        "================================================================\n"
+                        "You are running reset_demo_data with --force outside of a\n"
+                        "demo/debug environment.\n\n"
+                        "This will PERMANENTLY DESTROY the following data:\n"
+                        "  - ALL tickets and their descriptions/resolutions\n"
+                        "  - ALL followups, comments, and ticket changes\n"
+                        "  - ALL attachments and uploaded files\n"
+                        "  - ALL queues and their configurations\n"
+                        "  - ALL knowledge base categories and items\n"
+                        "  - ALL user accounts (except when using --keep-users)\n\n"
+                        "This action CANNOT BE UNDONE. Ensure you have a full\n"
+                        "database backup before proceeding.\n"
+                        "================================================================\n"
+                    )
+                )
+            )
+
+            self.stderr.write(
+                _(
+                    "First confirmation: To confirm you understand this is a "
+                    "permanent, destructive action, please type the following "
+                    "phrase exactly:\n"
+                    "I UNDERSTAND I AM DELETING ALL PRODUCTION DATA\n\n"
+                    "Enter phrase: "
+                )
+            )
+            phrase = input().strip()
+            expected = "I UNDERSTAND I AM DELETING ALL PRODUCTION DATA"
+            if phrase != expected:
+                self.stdout.write(
+                    self.style.WARNING(_("Phrase did not match. Operation cancelled."))
+                )
+                return
+
+            confirm2 = input(
+                _(
+                    "\nSecond confirmation: Are you 100% sure you want to "
+                    "DELETE ALL helpdesk data and reset to demo state? "
+                    "Type 'DESTROY EVERYTHING' to proceed: "
+                )
+            )
+            if confirm2.strip() != "DESTROY EVERYTHING":
+                self.stdout.write(self.style.WARNING(_("Operation cancelled.")))
+                return
+
+        if is_demo_env and not noinput:
             confirm = input(
                 _(
                     "This will DELETE ALL helpdesk data and reset to demo state. "
@@ -92,13 +178,49 @@ class Command(BaseCommand):
 
         self._clear_data(keep_users)
         self._clear_attachment_files(keep_attachments)
-        self._load_demo_fixture(fixture_path)
+        self._load_demo_fixture(fixture_path, keep_users)
         self._verify_data()
 
         self.stdout.write(
             self.style.SUCCESS(_("Demo data reset completed successfully!"))
         )
         self.stdout.write(_("Admin user: admin / Pa33w0rd"))
+
+    def _is_demo_environment(self):
+        """
+        Determine if the current environment is a demo/debug environment
+        where it is safe to run this destructive command.
+
+        An environment is considered demo/debug if ANY of the following is true:
+        1. settings.DEBUG is True
+        2. An environment variable HELPDESK_DEMO_MODE is set to a truthy value
+        3. The settings module name contains 'demo' or 'dev' or 'test'
+        4. The database NAME contains 'demo' or 'test' or ':memory:' (SQLite in-memory)
+        5. The SECRET_KEY is the default demo key from the demo project
+        """
+        if getattr(settings, "DEBUG", False):
+            return True
+
+        demo_env = os.getenv("HELPDESK_DEMO_MODE", "")
+        if demo_env.lower() in ("1", "true", "yes", "on"):
+            return True
+
+        settings_module = os.getenv("DJANGO_SETTINGS_MODULE", "")
+        module_lower = settings_module.lower()
+        if any(kw in module_lower for kw in ("demo", "dev", "test")):
+            return True
+
+        databases = getattr(settings, "DATABASES", {})
+        default_db = databases.get("default", {})
+        db_name = str(default_db.get("NAME", "")).lower()
+        if any(kw in db_name for kw in ("demo", "test", ":memory:")):
+            return True
+
+        demo_secret_key = "_crkn1+fnzu5$vns_-d+^ayiq%z4k*s!!ag0!mfy36(y!vrazd"
+        if getattr(settings, "SECRET_KEY", None) == demo_secret_key:
+            return True
+
+        return False
 
     def _clear_data(self, keep_users=False):
         """Clear all helpdesk-related data in correct order to avoid FK issues."""
@@ -150,7 +272,7 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS(_("  Attachment files cleared.")))
 
-    def _load_demo_fixture(self, fixture_path=None):
+    def _load_demo_fixture(self, fixture_path=None, keep_users=False):
         """Load the demo fixture data."""
         self.stdout.write(_("  Loading demo fixture..."))
 
@@ -203,7 +325,48 @@ class Command(BaseCommand):
                 )
             )
 
-        call_command("loaddata", demo_fixture, verbosity=0)
+        if keep_users:
+            import json as _json
+            import tempfile as _tempfile
+
+            with open(demo_fixture, "r") as fh:
+                fixture_data = _json.load(fh)
+
+            existing_usernames = set(User.objects.values_list("username", flat=True))
+            existing_pks = set(User.objects.values_list("pk", flat=True))
+
+            filtered_data = []
+            for item in fixture_data:
+                model = item.get("model")
+                if model == "auth.user":
+                    username = item.get("fields", {}).get("username")
+                    item_pk = item.get("pk")
+                    if username in existing_usernames:
+                        continue
+                    if item_pk in existing_pks:
+                        if username:
+                            item = dict(item)
+                            item.pop("pk", None)
+                        else:
+                            continue
+                    filtered_data.append(item)
+                elif model == "auth.permission":
+                    continue
+                elif model and model.startswith("helpdesk.usersettings"):
+                    continue
+                else:
+                    filtered_data.append(item)
+
+            tmp_fd, tmp_path = _tempfile.mkstemp(suffix=".json")
+            try:
+                with os.fdopen(tmp_fd, "w") as tmp_fh:
+                    _json.dump(filtered_data, tmp_fh)
+                call_command("loaddata", tmp_path, verbosity=0)
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+        else:
+            call_command("loaddata", demo_fixture, verbosity=0)
 
         self.stdout.write(self.style.SUCCESS(_("  Demo fixture loaded.")))
 
