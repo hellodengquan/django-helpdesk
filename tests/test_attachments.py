@@ -4,6 +4,8 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings, TestCase
 from django.urls import reverse
 from django.utils.encoding import smart_str
+from django.conf import settings
+from contextlib import contextmanager
 from helpdesk import lib, models
 import os
 import shutil
@@ -904,6 +906,330 @@ class DiskFullCleanupTests(TestCase):
             initial_att_count,
             final_att_count,
             "Database records not rolled back after disk full in update_ticket",
+        )
+
+
+class RemoteStorageCleanupTests(TestCase):
+    """Regression tests for orphan files left behind when remote storage is unreachable."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.queue = models.Queue.objects.create(
+            title="Remote Storage Test Queue",
+            slug="remote_storage_queue",
+            allow_public_submission=True,
+        )
+        cls.ticket = models.Ticket.objects.create(
+            title="Test Ticket",
+            queue=cls.queue,
+            description="Test ticket description",
+            status=models.Ticket.OPEN_STATUS,
+        )
+        cls.followup = models.FollowUp.objects.create(
+            ticket=cls.ticket,
+            comment="Test followup",
+        )
+
+    def setUp(self):
+        self._old_media_root = settings.MEDIA_ROOT
+        settings.MEDIA_ROOT = MEDIA_DIR
+        self._old_default_storage = getattr(settings, 'DEFAULT_FILE_STORAGE', None)
+        settings.DEFAULT_FILE_STORAGE = 'helpdesk.storage.MockRemoteStorage'
+
+        from helpdesk.storage import get_multipart_tracker, MockRemoteStorage
+        get_multipart_tracker().clear_all()
+
+        self.storage = MockRemoteStorage(location=MEDIA_DIR)
+        self._patch_storage()
+
+    def tearDown(self):
+        settings.MEDIA_ROOT = self._old_media_root
+        if self._old_default_storage:
+            settings.DEFAULT_FILE_STORAGE = self._old_default_storage
+        self._unpatch_storage()
+
+        from helpdesk.storage import get_multipart_tracker
+        get_multipart_tracker().clear_all()
+
+        try:
+            shutil.rmtree(MEDIA_DIR)
+        except OSError:
+            pass
+
+    def _patch_storage(self):
+        pass
+
+    def _unpatch_storage(self):
+        pass
+
+    def _patch_storage_for_instance(self, instance):
+        """Patch storage on a specific FieldFile instance."""
+        if hasattr(instance, 'file'):
+            instance.file.storage = self.storage
+            if hasattr(instance.file, '_storage'):
+                instance.file._storage = self.storage
+
+    @contextmanager
+    def _patch_followup_attachment_creation(self):
+        """Patch FollowUpAttachment creation to auto-apply storage patch."""
+        original_init = models.FollowUpAttachment.__init__
+        original_kbi_init = models.KBIAttachment.__init__
+        test_case = self
+
+        def patched_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            test_case._patch_storage_for_instance(self)
+
+        def patched_kbi_init(self, *args, **kwargs):
+            original_kbi_init(self, *args, **kwargs)
+            test_case._patch_storage_for_instance(self)
+
+        with mock.patch.object(models.FollowUpAttachment, '__init__', patched_init):
+            with mock.patch.object(models.KBIAttachment, '__init__', patched_kbi_init):
+                yield
+
+    def _count_files_in_media_dir(self):
+        count = 0
+        if os.path.exists(MEDIA_DIR):
+            for root, dirs, files in os.walk(MEDIA_DIR):
+                count += len(files)
+        return count
+
+    def _count_multipart_parts(self):
+        count = 0
+        if os.path.exists(MEDIA_DIR):
+            for root, dirs, files in os.walk(MEDIA_DIR):
+                for f in files:
+                    if '.part' in f:
+                        count += 1
+        return count
+
+    def test_remote_storage_connection_error_cleans_temp_file(self):
+        """When remote storage raises ConnectionError, local temp files should be cleaned up."""
+        import tempfile
+
+        test_content = b"remote storage connection error test content" * 100
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.txt')
+        temp_file.write(test_content)
+        temp_file.close()
+
+        from django.core.files.uploadedfile import TemporaryUploadedFile
+        temp_uploaded = TemporaryUploadedFile(
+            name="remote_conn_error.txt",
+            content_type="text/plain",
+            size=len(test_content),
+            charset=None,
+        )
+        temp_uploaded.file = open(temp_file.name, 'rb')
+        temp_uploaded._TemporaryFileArgs = {'delete': False}
+        temp_uploaded._file_name = temp_file.name
+
+        initial_file_count = self._count_files_in_media_dir()
+        self.assertTrue(os.path.exists(temp_file.name))
+
+        att = models.FollowUpAttachment(
+            followup=self.followup,
+            file=temp_uploaded,
+        )
+        self._patch_storage_for_instance(att)
+
+        self.storage.set_fail_next_save(True, mode='connection')
+
+        with self.assertRaises(ConnectionError):
+            att.save()
+
+        self.assertFalse(
+            os.path.exists(temp_file.name),
+            "Local temp file should be cleaned up after remote storage connection error"
+        )
+
+        final_file_count = self._count_files_in_media_dir()
+        self.assertEqual(
+            initial_file_count,
+            final_file_count,
+            "Orphan files left behind after remote storage connection error"
+        )
+
+    def test_remote_storage_timeout_cleans_pending_uploads(self):
+        """When remote storage times out, pending multipart uploads should be aborted."""
+        test_content = b"remote storage timeout test content" * 200
+        test_file = SimpleUploadedFile(
+            "remote_timeout.txt", test_content, "text/plain"
+        )
+
+        initial_file_count = self._count_files_in_media_dir()
+        initial_parts_count = self._count_multipart_parts()
+
+        att = models.FollowUpAttachment(
+            followup=self.followup,
+            file=test_file,
+        )
+        self._patch_storage_for_instance(att)
+
+        self.storage.set_fail_next_save(True, mode='timeout')
+
+        from helpdesk.storage import get_multipart_tracker
+        tracker = get_multipart_tracker()
+        tracker.start_upload('MockRemoteStorage', 'test-timeout-upload-123')
+
+        with self.assertRaises(TimeoutError):
+            att.save()
+
+        pending_uploads = tracker.get_pending_uploads('MockRemoteStorage')
+        self.assertEqual(
+            len(pending_uploads), 0,
+            "All pending multipart uploads should be aborted after timeout"
+        )
+
+        final_file_count = self._count_files_in_media_dir()
+        final_parts_count = self._count_multipart_parts()
+
+        self.assertEqual(
+            initial_file_count,
+            final_file_count,
+            "Orphan files left behind after remote storage timeout"
+        )
+        self.assertEqual(
+            initial_parts_count,
+            final_parts_count,
+            "Orphan multipart parts left behind after remote storage timeout"
+        )
+
+    def test_remote_storage_unreachable_cleans_parts(self):
+        """When remote storage is unreachable, partial multipart uploads should be cleaned up."""
+        test_content = b"unreachable storage test content" * 500
+        test_file = SimpleUploadedFile(
+            "unreachable_test.txt", test_content, "text/plain"
+        )
+
+        initial_file_count = self._count_files_in_media_dir()
+        initial_parts_count = self._count_multipart_parts()
+
+        att = models.FollowUpAttachment(
+            followup=self.followup,
+            file=test_file,
+        )
+        self._patch_storage_for_instance(att)
+
+        self.storage.set_unreachable(True)
+
+        from helpdesk.storage import RemoteStorageUnreachable
+        with self.assertRaises(RemoteStorageUnreachable):
+            att.save()
+
+        final_file_count = self._count_files_in_media_dir()
+        final_parts_count = self._count_multipart_parts()
+
+        self.assertEqual(
+            initial_file_count,
+            final_file_count,
+            "Orphan files left behind when remote storage is unreachable"
+        )
+        self.assertEqual(
+            initial_parts_count,
+            final_parts_count,
+            "Orphan multipart parts left behind when remote storage is unreachable"
+        )
+
+    def test_process_attachments_remote_storage_error_cleanup(self):
+        """When process_attachments encounters remote storage errors, no orphan files should remain."""
+        test_content = b"process_attachments remote storage error test" * 100
+        test_file = SimpleUploadedFile(
+            "proc_remote_error.txt", test_content, "text/plain"
+        )
+
+        initial_file_count = self._count_files_in_media_dir()
+
+        self.storage.set_fail_next_save(True, mode='connection')
+
+        with self._patch_followup_attachment_creation():
+            result = lib.process_attachments(self.followup, [test_file])
+
+        self.assertEqual(len(result), 0, "No attachments should be saved")
+
+        final_file_count = self._count_files_in_media_dir()
+        self.assertEqual(
+            initial_file_count,
+            final_file_count,
+            "Orphan files left behind after process_attachments remote storage error"
+        )
+
+    def test_partial_multipart_upload_cleanup(self):
+        """When a multipart upload fails mid-way, all uploaded parts should be cleaned up."""
+        large_content = b"large content for multipart upload test" * 10000
+        test_file = SimpleUploadedFile(
+            "multipart_failure.txt", large_content, "text/plain"
+        )
+
+        initial_file_count = self._count_files_in_media_dir()
+        initial_parts_count = self._count_multipart_parts()
+
+        att = models.FollowUpAttachment(
+            followup=self.followup,
+            file=test_file,
+        )
+        self._patch_storage_for_instance(att)
+
+        self.storage.set_fail_next_save(True, mode='partial_upload')
+
+        with self.assertRaises(ConnectionError):
+            att.save()
+
+        final_parts_count = self._count_multipart_parts()
+        self.assertEqual(
+            initial_parts_count,
+            final_parts_count,
+            "Orphan multipart parts left behind after partial upload failure"
+        )
+
+        final_file_count = self._count_files_in_media_dir()
+        self.assertEqual(
+            initial_file_count,
+            final_file_count,
+            "Orphan files left behind after partial multipart upload failure"
+        )
+
+        from helpdesk.storage import get_multipart_tracker
+        tracker = get_multipart_tracker()
+        pending = tracker.get_pending_uploads('MockRemoteStorage')
+        self.assertEqual(
+            len(pending), 0,
+            "Multipart upload tracker should have no pending uploads"
+        )
+
+    def test_update_ticket_remote_storage_error_cleanup(self):
+        """When update_ticket encounters remote storage errors, no orphan files should remain."""
+        test_content = b"update_ticket remote storage error test" * 100
+        test_file = SimpleUploadedFile(
+            "update_ticket_remote.txt", test_content, "text/plain"
+        )
+
+        initial_file_count = self._count_files_in_media_dir()
+
+        self.storage.set_fail_next_save(True, mode='timeout')
+
+        from helpdesk import update_ticket
+        user = get_user_model().objects.create_user(
+            username="testuser_remote",
+            password="testpass",
+        )
+        with mock.patch.object(update_ticket, 'process_email_notifications_for_ticket_update', return_value=None):
+            with mock.patch.object(update_ticket, 'process_attachments', side_effect=TimeoutError("Connection timeout")):
+                with self._patch_followup_attachment_creation():
+                    with self.assertRaises(TimeoutError):
+                        update_ticket.update_ticket(
+                            user=user,
+                            ticket=self.ticket,
+                            comment="Test comment",
+                            files=[test_file],
+                        )
+
+        final_file_count = self._count_files_in_media_dir()
+
+        self.assertEqual(
+            initial_file_count,
+            final_file_count,
+            "Orphan files left behind after update_ticket remote storage error"
         )
 
 

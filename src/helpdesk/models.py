@@ -12,6 +12,7 @@ from .templated_email import send_templated_mail
 from .validators import validate_file_extension
 from .storage import SafeFileSystemStorage
 import datetime
+import errno
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
@@ -1274,9 +1275,20 @@ class Attachment(models.Model):
 
         try:
             return super(Attachment, self).save(*args, **kwargs)
-        except Exception:
+        except Exception as e:
+            is_remote_storage_error = self._is_remote_storage_error(e)
+
             file_name_changed = self.file and self.file.name and self.file.name != saved_file_name
             needs_cleanup = is_new or file_name_changed
+
+            if is_remote_storage_error:
+                try:
+                    self._cleanup_after_remote_storage_error(candidate_cleanup_paths)
+                except Exception as cleanup_e:
+                    logger.warning(
+                        "Failed to cleanup after remote storage error: %s",
+                        str(cleanup_e),
+                    )
 
             if needs_cleanup:
                 try:
@@ -1366,6 +1378,92 @@ class Attachment(models.Model):
                         str(e),
                     )
             raise
+
+    def _is_remote_storage_error(self, exception):
+        """Check if an exception is related to remote storage connectivity issues."""
+        from helpdesk.storage import RemoteStorageError
+        remote_error_types = (
+            ConnectionError,
+            TimeoutError,
+            RemoteStorageError,
+        )
+        if isinstance(exception, remote_error_types):
+            return True
+        if isinstance(exception, OSError) and hasattr(exception, 'errno'):
+            if exception.errno in (errno.ENETUNREACH, errno.ENETDOWN, errno.ETIMEDOUT):
+                return True
+        return False
+
+    def _cleanup_after_remote_storage_error(self, candidate_paths=None):
+        """
+        Perform cleanup after a remote storage error, including:
+        - Aborting any pending multipart uploads
+        - Cleaning up local temporary files
+        - Cleaning up any partially uploaded remote files
+        """
+        import logging
+        logger = logging.getLogger("helpdesk")
+
+        from helpdesk.storage import (
+            get_multipart_tracker,
+            cleanup_all_pending_multipart_uploads,
+        )
+
+        try:
+            tracker = get_multipart_tracker()
+            if hasattr(self, 'file') and self.file and hasattr(self.file, 'storage'):
+                storage = self.file.storage
+                storage_name = storage.__class__.__name__
+                pending_uploads = tracker.get_pending_uploads(storage_name)
+
+                for upload_info in pending_uploads:
+                    upload_id = upload_info['upload_id']
+                    try:
+                        if hasattr(storage, '_abort_multipart_upload'):
+                            storage._abort_multipart_upload(upload_id)
+                            logger.info(
+                                "Aborted pending multipart upload %s after remote storage error",
+                                upload_id,
+                            )
+                    except Exception as abort_e:
+                        logger.warning(
+                            "Failed to abort multipart upload %s: %s",
+                            upload_id, str(abort_e),
+                        )
+
+                if hasattr(self.file, 'temporary_file_path'):
+                    temp_path = self.file.temporary_file_path()
+                    if hasattr(storage, '_cleanup_local_temp_file'):
+                        storage._cleanup_local_temp_file(temp_path)
+
+            try:
+                cleanup_all_pending_multipart_uploads()
+            except Exception as cleanup_e:
+                logger.warning(
+                    "Failed to cleanup all pending multipart uploads: %s",
+                    str(cleanup_e),
+                )
+
+            if candidate_paths:
+                from django.core.files.storage import default_storage
+                for p in candidate_paths:
+                    try:
+                        if hasattr(self.file, 'storage') and hasattr(self.file.storage, 'exists'):
+                            if self.file.storage.exists(p):
+                                if self._is_safe_to_delete_storage_path(p):
+                                    self.file.storage.delete(p)
+                                    logger.info(
+                                        "Cleaned up partial remote file '%s' after storage error",
+                                        p,
+                                    )
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            logger.warning(
+                "Error during remote storage error cleanup: %s",
+                str(e),
+            )
 
     def _is_safe_to_delete_storage_path(self, storage_path):
         if not storage_path:

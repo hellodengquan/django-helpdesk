@@ -154,12 +154,20 @@ def process_attachments(followup, attached_files):
     )
     attachments = []
     errors = set()
+    temp_files_to_cleanup = []
 
     from helpdesk.models import FollowUpAttachment
+    from helpdesk.storage import get_multipart_tracker
+
+    tracker = get_multipart_tracker()
 
     for attached in attached_files:
         if attached.size:
             filename = smart_str(attached.name)
+
+            if hasattr(attached, 'temporary_file_path'):
+                temp_files_to_cleanup.append(attached.temporary_file_path())
+
             att = FollowUpAttachment(
                 followup=followup,
                 file=attached,
@@ -179,15 +187,110 @@ def process_attachments(followup, attached_files):
                 att.save()
             except Exception:
                 logger.exception("Failed to save attachment: %s", filename)
+
+                _cleanup_attachment_failure(att, filename, temp_files_to_cleanup)
+
                 continue
 
             if att.size < max_email_attachment_size:
                 attachments.append([filename, att.file])
 
+    _cleanup_temp_files(temp_files_to_cleanup)
+
     if errors:
         raise ValidationError(list(errors))
 
     return attachments
+
+
+def _is_remote_storage_error(exception):
+    """Check if an exception is related to remote storage connectivity issues."""
+    from helpdesk.storage import RemoteStorageError
+    remote_error_types = (
+        ConnectionError,
+        TimeoutError,
+        RemoteStorageError,
+    )
+    if isinstance(exception, remote_error_types):
+        return True
+    if isinstance(exception, OSError) and hasattr(exception, 'errno'):
+        import errno
+        if exception.errno in (errno.ENETUNREACH, errno.ENETDOWN, errno.ETIMEDOUT):
+            return True
+    return False
+
+
+def _cleanup_attachment_failure(att, filename, temp_files_to_cleanup):
+    """
+    Handle cleanup when an attachment save fails, including:
+    - Cleaning up local temp files
+    - Aborting any pending multipart uploads
+    - Cleaning up any orphaned storage files
+    """
+    import logging
+    logger = logging.getLogger("helpdesk")
+
+    try:
+        from helpdesk.storage import (
+            get_multipart_tracker,
+            cleanup_all_pending_multipart_uploads,
+        )
+
+        tracker = get_multipart_tracker()
+
+        if hasattr(att, 'file') and att.file and hasattr(att.file, 'storage'):
+            storage = att.file.storage
+            storage_name = storage.__class__.__name__
+            pending_uploads = tracker.get_pending_uploads(storage_name)
+
+            for upload_info in pending_uploads:
+                upload_id = upload_info['upload_id']
+                try:
+                    if hasattr(storage, '_abort_multipart_upload'):
+                        storage._abort_multipart_upload(upload_id)
+                        logger.info(
+                            "Aborted pending multipart upload %s for attachment '%s'",
+                            upload_id, filename,
+                        )
+                except Exception as abort_e:
+                    logger.warning(
+                        "Failed to abort multipart upload %s for '%s': %s",
+                        upload_id, filename, str(abort_e),
+                    )
+
+        try:
+            cleaned_count = cleanup_all_pending_multipart_uploads()
+            if cleaned_count > 0:
+                logger.info(
+                    "Cleaned up %d pending multipart uploads after attachment '%s' save failure",
+                    cleaned_count, filename,
+                )
+        except Exception as cleanup_e:
+            logger.warning(
+                "Failed to cleanup pending multipart uploads for '%s': %s",
+                filename, str(cleanup_e),
+            )
+
+    except Exception as e:
+        logger.warning(
+            "Error during attachment failure cleanup for '%s': %s",
+            filename, str(e),
+        )
+
+
+def _cleanup_temp_files(temp_files):
+    """Clean up a list of temporary files."""
+    import logging
+    import os
+    logger = logging.getLogger("helpdesk")
+
+    for file_path in temp_files:
+        if file_path and os.path.exists(file_path):
+            try:
+                os.unlink(file_path)
+                logger.info("Cleaned up temporary file '%s'", file_path)
+            except OSError as e:
+                logger.warning("Failed to clean up temporary file '%s': %s", file_path, str(e))
 
 
 def format_time_spent(time_spent):
