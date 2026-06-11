@@ -54,6 +54,12 @@
             </a>
         </li>
         {% endif %}
+        <li class="nav-item{% if 'sla-alert' in request.path %} active{% endif %}">
+          <a class="nav-link" href="{% url 'helpdesk:sla_alert' %}">
+            <i class="fas fa-fw fa-exclamation-triangle"></i>
+            <span>{% trans "SLA Alert" %}</span>
+          </a>
+        </li>
         <li class="nav-item{% if 'reports' in request.path %} active{% endif %}">
           <a class="nav-link" href="{% url 'helpdesk:report_index' %}">
             <i class="fas fa-fw fa-chart-area"></i>

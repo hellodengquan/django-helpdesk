@@ -8,11 +8,12 @@ lib.py - Common functions (eg multipart e-mail)
 
 import logging
 import mimetypes
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError, ImproperlyConfigured
 from django.db.models.query import QuerySet
+from django.utils import timezone
 from django.utils.encoding import smart_str
 from helpdesk import settings as helpdesk_settings
 
@@ -291,3 +292,122 @@ def get_assignable_users(filter_staff: bool) -> QuerySet:
         users = users.filter(is_staff=True)
 
     return users.order_by(User.USERNAME_FIELD)
+
+
+def calculate_working_days(start_date, end_date):
+    """Calculate the number of working days between start_date and end_date,
+    excluding EscalationExclusion dates.
+
+    This matches the logic used in escalate_tickets.py management command.
+    Both start_date and end_date should be date objects (without time).
+
+    IMPORTANT: For consistency with the escalate_tickets management command,
+    EscalationExclusion dates are checked globally (not per-queue).
+
+    Args:
+        start_date: Starting date (inclusive)
+        end_date: Ending date (exclusive)
+
+    Returns:
+        int: Number of working days
+    """
+    from helpdesk.models import EscalationExclusion
+
+    days = 0
+    current_date = start_date
+
+    while current_date < end_date:
+        if not EscalationExclusion.objects.filter(date=current_date).exists():
+            days += 1
+        current_date = current_date + timedelta(days=1)
+
+    return days
+
+
+def calculate_sla_deadline(ticket, from_datetime=None):
+    """Calculate the SLA deadline for a ticket based on its queue's escalate_days.
+
+    This function mirrors the logic in escalate_tickets.py management command exactly:
+    - Uses date.today() for date calculations (local date boundary)
+    - Calculates working days by excluding EscalationExclusion dates
+    - Uses timezone.now() for the final datetime comparison
+
+    IMPORTANT: For consistency with the escalate_tickets management command,
+    EscalationExclusion dates are checked globally (not per-queue), matching
+    the behavior of `EscalationExclusion.objects.filter(date=workdate).exists()`.
+
+    Args:
+        ticket: Ticket object
+        from_datetime: Optional datetime to calculate from, defaults to ticket's
+                       last_escalation or created date
+
+    Returns:
+        datetime or None: The SLA deadline datetime, or None if queue has no escalation
+    """
+    from helpdesk.models import EscalationExclusion
+
+    queue = ticket.queue
+
+    if queue.escalate_days is None or queue.escalate_days == 0:
+        return None
+
+    if from_datetime is None:
+        from_datetime = ticket.last_escalation if ticket.last_escalation else ticket.created
+
+    from_date = from_datetime.date() if hasattr(from_datetime, 'date') else from_datetime
+    from_time = from_datetime.time() if hasattr(from_datetime, 'time') else time(0, 0)
+
+    workdate = from_date
+    working_days_count = 0
+
+    while working_days_count < queue.escalate_days:
+        if not EscalationExclusion.objects.filter(date=workdate).exists():
+            working_days_count += 1
+        if working_days_count < queue.escalate_days:
+            workdate = workdate + timedelta(days=1)
+
+    deadline = datetime.combine(workdate, from_time)
+
+    if timezone.is_aware(timezone.now()):
+        from django.utils.timezone import make_aware
+        deadline = make_aware(deadline)
+
+    return deadline
+
+
+def get_ticket_sla_status(ticket):
+    """Determine the SLA status of a ticket.
+
+    Exclusion criteria match the escalate_tickets management command:
+    - priority == 1 (already at highest priority, won't be escalated)
+    - on_hold is True (ticket is on hold)
+    - status not in OPEN_STATUSES (ticket is closed/resolved)
+
+    Returns:
+        tuple: (status, deadline, time_remaining)
+            status: 'overdue' | 'warning' | 'ok' | 'excluded' | 'no_sla'
+            deadline: datetime or None
+            time_remaining: timedelta or None
+    """
+    from helpdesk.models import Ticket
+
+    if ticket.queue.escalate_days is None or ticket.queue.escalate_days == 0:
+        return ('no_sla', None, None)
+
+    is_on_hold = ticket.on_hold is not None and ticket.on_hold
+    if ticket.priority == 1 or is_on_hold or ticket.status not in Ticket.OPEN_STATUSES:
+        return ('excluded', None, None)
+
+    deadline = calculate_sla_deadline(ticket)
+    if deadline is None:
+        return ('no_sla', None, None)
+
+    now = timezone.now()
+    time_remaining = deadline - now
+
+    if time_remaining.total_seconds() < 0:
+        return ('overdue', deadline, time_remaining)
+    elif time_remaining.total_seconds() < 86400:
+        return ('warning', deadline, time_remaining)
+    else:
+        return ('ok', deadline, time_remaining)

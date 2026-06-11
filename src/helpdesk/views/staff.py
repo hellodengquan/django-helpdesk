@@ -60,6 +60,8 @@ from helpdesk.lib import (
     queue_template_context,
     safe_template_context,
     get_assignable_users,
+    calculate_sla_deadline,
+    get_ticket_sla_status,
 )
 from helpdesk.models import (
     Checklist,
@@ -2220,3 +2222,133 @@ def delete_checklist_template(request, checklist_template_id):
             "checklist_template": checklist_template,
         },
     )
+
+
+@helpdesk_staff_member_required
+def sla_alert(request):
+    """
+    SLA预警视图 - 展示即将超时、已超时和已排除的工单，
+    支持按负责人和优先级进行筛选。
+
+    时区边界与escalate_tickets管理命令的计算口径保持一致：
+    - 使用date.today()进行日期计算（本地日期边界）
+    - 使用timezone.now()进行时间比较
+    - 排除EscalationExclusion中定义的日期
+    """
+    huser = HelpdeskUser(request.user)
+    user_queues = huser.get_queues()
+
+    assigned_to_filter = request.GET.getlist('assigned_to')
+    priority_filter = request.GET.getlist('priority')
+    queue_filter = request.GET.getlist('queue')
+    status_filter = request.GET.get('status', 'all')
+
+    tickets = Ticket.objects.select_related('queue', 'assigned_to').filter(
+        queue__in=user_queues
+    )
+
+    if queue_filter:
+        try:
+            queue_ids = [int(q) for q in queue_filter]
+            tickets = tickets.filter(queue__id__in=queue_ids)
+        except ValueError:
+            pass
+
+    if assigned_to_filter:
+        if '-1' in assigned_to_filter:
+            tickets = tickets.filter(assigned_to__isnull=True)
+        else:
+            try:
+                user_ids = [int(u) for u in assigned_to_filter if u != '-1']
+                tickets = tickets.filter(assigned_to__id__in=user_ids)
+            except ValueError:
+                pass
+
+    if priority_filter:
+        try:
+            priority_ids = [int(p) for p in priority_filter]
+            tickets = tickets.filter(priority__in=priority_ids)
+        except ValueError:
+            pass
+
+    overdue_tickets = []
+    warning_tickets = []
+    excluded_tickets = []
+    ok_tickets = []
+
+    for ticket in tickets:
+        status, deadline, time_remaining = get_ticket_sla_status(ticket)
+        ticket.sla_status = status
+        ticket.sla_deadline = deadline
+        ticket.sla_time_remaining = time_remaining
+
+        if time_remaining is not None:
+            total_seconds = int(time_remaining.total_seconds())
+            abs_seconds = abs(int(total_seconds))
+            days = abs_seconds // 86400
+            hours = (abs_seconds % 86400) // 3600
+            minutes = (abs_seconds % 3600) // 60
+            if total_seconds < 0:
+                ticket.sla_time_remaining_str = _("%dd %dh %dm") % (days, hours, minutes)
+                ticket.sla_time_remaining_short = _("%dd ago") % days if days > 0 else _("%dh ago") % hours if hours > 0 else _("%dm ago") % minutes
+            else:
+                ticket.sla_time_remaining_str = _("%dd %dh %dm") % (days, hours, minutes)
+                ticket.sla_time_remaining_short = _("%dd") % days if days > 0 else _("%dh") % hours if hours > 0 else _("%dm") % minutes
+        else:
+            ticket.sla_time_remaining_str = None
+            ticket.sla_time_remaining_short = None
+
+        if status == 'overdue':
+            overdue_tickets.append(ticket)
+        elif status == 'warning':
+            warning_tickets.append(ticket)
+        elif status == 'excluded':
+            excluded_tickets.append(ticket)
+        elif status == 'ok':
+            ok_tickets.append(ticket)
+
+    if status_filter == 'overdue':
+        display_tickets = overdue_tickets
+    elif status_filter == 'warning':
+        display_tickets = warning_tickets
+    elif status_filter == 'excluded':
+        display_tickets = excluded_tickets
+    elif status_filter == 'ok':
+        display_tickets = ok_tickets
+    else:
+        display_tickets = overdue_tickets + warning_tickets + excluded_tickets
+
+    assignable_users = get_assignable_users(
+        helpdesk_settings.HELPDESK_STAFF_ONLY_TICKET_OWNERS
+    )
+
+    queue_choices = _get_queue_choices(user_queues)
+
+    context = {
+        'overdue_tickets': overdue_tickets,
+        'warning_tickets': warning_tickets,
+        'excluded_tickets': excluded_tickets,
+        'ok_tickets': ok_tickets,
+        'display_tickets': display_tickets,
+        'overdue_count': len(overdue_tickets),
+        'warning_count': len(warning_tickets),
+        'excluded_count': len(excluded_tickets),
+        'ok_count': len(ok_tickets),
+        'total_count': len(tickets),
+        'assignable_users': assignable_users,
+        'priorities': Ticket.PRIORITY_CHOICES,
+        'queues': queue_choices,
+        'selected_assigned_to': assigned_to_filter,
+        'selected_priorities': priority_filter,
+        'selected_queues': queue_filter,
+        'selected_status': status_filter,
+    }
+
+    return render(
+        request,
+        'helpdesk/sla_alert.html',
+        context,
+    )
+
+
+sla_alert = staff_member_required(sla_alert)

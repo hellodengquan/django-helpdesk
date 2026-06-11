@@ -56,6 +56,7 @@ urlpatterns = []
 if helpdesk_settings.HELPDESK_UI_ENABLED:
     urlpatterns += [
         path("dashboard/", staff.dashboard, name="dashboard"),
+        path("sla-alert/", staff.sla_alert, name="sla_alert"),
         path("tickets/", staff.ticket_list, name="list"),
         path("tickets/update/", staff.mass_update, name="mass_update"),
         path("tickets/merge", staff.merge_tickets, name="merge_tickets"),
