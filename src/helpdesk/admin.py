@@ -28,6 +28,43 @@ class QueueAdmin(admin.ModelAdmin):
     list_display = ("title", "slug", "email_address", "locale", "time_spent")
     prepopulated_fields = {"slug": ("title",)}
 
+    fieldsets = (
+        (None, {
+            "fields": ("title", "slug", "locale"),
+        }),
+        (_("E-Mail Settings"), {
+            "fields": (
+                "email_address",
+                "email_box_type",
+                "email_box_host",
+                "email_box_port",
+                "email_box_ssl",
+                "email_box_user",
+                "email_box_pass",
+                "email_box_imap_folder",
+                "email_box_local_dir",
+                "email_box_interval",
+                "fingerprint_window_hours",
+            ),
+        }),
+        (_("Permissions & Notifications"), {
+            "fields": (
+                "allow_public_submission",
+                "allow_email_submission",
+                "default_owner",
+                "new_ticket_cc",
+                "updated_ticket_cc",
+                "enable_notifications_on_email_events",
+            ),
+        }),
+        (_("Ticket Handling"), {
+            "fields": ("escalate_days", "dedicated_time"),
+        }),
+        (_("Logging & Proxy"), {
+            "fields": ("logging_type", "logging_dir", "socks_proxy_type", "socks_proxy_host", "socks_proxy_port"),
+        }),
+    )
+
     def time_spent(self, q):
         if q.dedicated_time:
             return "{} / {}".format(q.time_spent, q.dedicated_time)

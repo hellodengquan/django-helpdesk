@@ -292,6 +292,20 @@ class Queue(models.Model):
         default="5",
     )
 
+    fingerprint_window_hours = models.IntegerField(
+        _("Fingerprint Deduplication Window (hours)"),
+        help_text=_(
+            "When Message-Id and References headers are missing, incoming "
+            "emails are matched against existing tickets using the sender "
+            "address and subject (stripped of Re:/FW: prefixes). Set the "
+            "time window (in hours) within which duplicates should be "
+            "merged into the same ticket. Leave empty to use the global "
+            "default (24 hours). Must be a positive integer."
+        ),
+        blank=True,
+        null=True,
+    )
+
     email_box_last_check = models.DateTimeField(
         blank=True,
         null=True,
@@ -371,6 +385,18 @@ class Queue(models.Model):
 
     def __str__(self):
         return "%s" % self.title
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+
+        if self.fingerprint_window_hours is not None and self.fingerprint_window_hours <= 0:
+            raise ValidationError(
+                {
+                    "fingerprint_window_hours": _(
+                        "Fingerprint deduplication window must be a positive integer."
+                    )
+                }
+            )
 
     class Meta:
         ordering = ("title",)

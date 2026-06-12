@@ -887,6 +887,106 @@ class DuplicateTicketPreventionTests(TestCase):
         self.assertNotEqual(ticket2.id, ticket1.id)
         self.assertEqual(Ticket.objects.count(), 2)
 
+    @override_settings(HELPDESK_FUZZY_DEDUP_TIME_WINDOW_HOURS=24)
+    def test_fingerprint_window_uses_queue_setting_when_set(self):
+        """When a queue has fingerprint_window_hours set, that value takes
+        precedence over the global default from settings."""
+        short_queue = Queue.objects.create(
+            title="Short Window Queue",
+            slug="shortwin",
+            email_box_type="local",
+            fingerprint_window_hours=2,
+        )
+        subject = "Short window test issue"
+        sender_email = "queue-setting@example.com"
+
+        with freeze_time(timezone.now() - timedelta(hours=3)):
+            msg1, _, _ = utils.generate_email_with_subject(subject=subject, body="First")
+            del msg1["From"]
+            msg1["From"] = f"Reporter <{sender_email}>"
+            ticket1 = helpdesk.email.extract_email_metadata(
+                msg1.as_string(), short_queue, self.logger
+            )
+            self.assertIsNotNone(ticket1)
+
+        msg2, _, _ = utils.generate_email_with_subject(subject=f"Re: {subject}", body="Second")
+        del msg2["From"]
+        msg2["From"] = f"Reporter <{sender_email}>"
+        del msg2["Message-Id"]
+        ticket2 = helpdesk.email.extract_email_metadata(
+            msg2.as_string(), short_queue, self.logger
+        )
+        self.assertNotEqual(ticket2.id, ticket1.id)
+        self.assertEqual(Ticket.objects.filter(queue=short_queue).count(), 2)
+
+    @override_settings(HELPDESK_FUZZY_DEDUP_TIME_WINDOW_HOURS=24)
+    def test_fingerprint_window_falls_back_to_global_default(self):
+        """When a queue has no fingerprint_window_hours set (null), the
+        global default from settings is used instead."""
+        default_queue = Queue.objects.create(
+            title="Default Window Queue",
+            slug="defwin",
+            email_box_type="local",
+            fingerprint_window_hours=None,
+        )
+        subject = "Default window test issue"
+        sender_email = "fallback-setting@example.com"
+
+        with freeze_time(timezone.now() - timedelta(hours=12)):
+            msg1, _, _ = utils.generate_email_with_subject(subject=subject, body="First")
+            del msg1["From"]
+            msg1["From"] = f"Reporter <{sender_email}>"
+            ticket1 = helpdesk.email.extract_email_metadata(
+                msg1.as_string(), default_queue, self.logger
+            )
+            self.assertIsNotNone(ticket1)
+
+        msg2, _, _ = utils.generate_email_with_subject(subject=f"Re: {subject}", body="Second")
+        del msg2["From"]
+        msg2["From"] = f"Reporter <{sender_email}>"
+        del msg2["Message-Id"]
+        ticket2 = helpdesk.email.extract_email_metadata(
+            msg2.as_string(), default_queue, self.logger
+        )
+        self.assertEqual(ticket2.id, ticket1.id)
+        self.assertEqual(Ticket.objects.filter(queue=default_queue).count(), 1)
+
+    def test_fingerprint_window_hours_rejects_non_positive(self):
+        """Setting fingerprint_window_hours to zero or a negative value
+        should raise a ValidationError during full_clean / save."""
+        from django.core.exceptions import ValidationError
+
+        q_zero = Queue(
+            title="Zero Window",
+            slug="zerowin",
+            email_box_type="local",
+            fingerprint_window_hours=0,
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            q_zero.full_clean()
+        self.assertIn("fingerprint_window_hours", ctx.exception.message_dict)
+
+        q_neg = Queue(
+            title="Negative Window",
+            slug="negwin",
+            email_box_type="local",
+            fingerprint_window_hours=-5,
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            q_neg.full_clean()
+        self.assertIn("fingerprint_window_hours", ctx.exception.message_dict)
+
+        q_pos = Queue(
+            title="Positive Window",
+            slug="poswin",
+            email_box_type="local",
+            fingerprint_window_hours=48,
+        )
+        try:
+            q_pos.full_clean()
+        except ValidationError:
+            self.fail("Positive fingerprint_window_hours should be valid")
+
 
 class EmailTaskTests(TestCase):
     def setUp(self):

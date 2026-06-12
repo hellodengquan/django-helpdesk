@@ -621,7 +621,12 @@ def match_ticket_by_fingerprint(
     :param logger: logger instance
     :returns: the matched Ticket or None
     """
-    window_hours = helpdesk_settings.FUZZY_DEDUP_TIME_WINDOW_HOURS
+    if queue.fingerprint_window_hours is not None:
+        window_hours = queue.fingerprint_window_hours
+        source = "queue"
+    else:
+        window_hours = helpdesk_settings.FUZZY_DEDUP_TIME_WINDOW_HOURS
+        source = "global"
     cutoff = timezone.now() - timedelta(hours=window_hours)
 
     normalised_subject = subject.strip().lower()
@@ -635,8 +640,16 @@ def match_ticket_by_fingerprint(
     for candidate in candidates:
         if candidate.title.strip().lower() == normalised_subject:
             logger.info(
-                "Fuzzy fingerprint matched existing ticket %s-%s (sender=%s, subject=%s, window=%dh)"
-                % (candidate.queue.slug, candidate.id, sender_email, subject, window_hours)
+                "Fuzzy fingerprint matched existing ticket %s-%s "
+                "(sender=%s, subject=%s, window=%dh, source=%s)"
+                % (
+                    candidate.queue.slug,
+                    candidate.id,
+                    sender_email,
+                    subject,
+                    window_hours,
+                    source,
+                )
             )
             return candidate
 
