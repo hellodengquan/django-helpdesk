@@ -597,12 +597,22 @@ def create_object_from_email_message(message, ticket_id, payload, files, logger)
 
     message_id = message.get("Message-Id")
     in_reply_to = message.get("In-Reply-To")
+    references = message.get("References")
 
     if message_id:
         message_id = message_id.strip()
 
     if in_reply_to:
         in_reply_to = in_reply_to.strip()
+
+    if message_id:
+        existing_followup = FollowUp.objects.filter(message_id=message_id).first()
+        if existing_followup:
+            logger.info(
+                "Message-ID %s already processed as FollowUp on ticket %s-%s, skipping duplicate"
+                % (message_id, existing_followup.ticket.queue.slug, existing_followup.ticket.id)
+            )
+            return existing_followup.ticket
 
     if in_reply_to is not None:
         try:
@@ -611,7 +621,23 @@ def create_object_from_email_message(message, ticket_id, payload, files, logger)
                 previous_followup = queryset.first()
                 ticket = previous_followup.ticket
         except FollowUp.DoesNotExist:
-            pass  # play along. The header may be wrong
+            pass
+
+    if previous_followup is None and references is not None:
+        ref_ids = [ref.strip() for ref in references.split() if ref.strip()]
+        for ref_id in ref_ids:
+            try:
+                queryset = FollowUp.objects.filter(message_id=ref_id).order_by("-date")
+                if queryset.count() > 0:
+                    previous_followup = queryset.first()
+                    ticket = previous_followup.ticket
+                    logger.info(
+                        "Found existing ticket %s-%s via References header"
+                        % (ticket.queue.slug, ticket.id)
+                    )
+                    break
+            except FollowUp.DoesNotExist:
+                continue
 
     if previous_followup is None and ticket_id is not None:
         try:
@@ -771,6 +797,43 @@ def get_ticket_id_from_subject_slug(
     else:
         logger.info("No tracking ID matched.")
     return ticket_id
+
+
+def get_ticket_id_from_any_queue_slug(
+    subject: str, logger: logging.Logger
+) -> typing.Optional[int]:
+    """Attempt to extract a ticket ID from the subject by matching any [xxx-nnn] pattern.
+
+    This serves as a fallback when no known queue slug matches the subject,
+    for example when a queue slug has been renamed or the subject contains
+    a tracking ID from a queue that is no longer configured for email.
+    The extracted ID is validated against the Ticket table to confirm it exists.
+    """
+    matchobj = re.search(r"\[(?P<slug>[A-Za-z0-9_-]+)-(?P<id>\d+)\]", subject)
+    if not matchobj:
+        return None
+    candidate_slug = matchobj.group("slug")
+    candidate_id = matchobj.group("id")
+    try:
+        ticket = Ticket.objects.get(id=candidate_id)
+        if ticket.queue.slug == candidate_slug:
+            logger.info(
+                "Matched tracking ID %s-%s via any-slug fallback"
+                % (candidate_slug, candidate_id)
+            )
+            return int(candidate_id)
+        else:
+            logger.info(
+                "Found [%s-%s] in subject but ticket %s belongs to queue %s, skipping"
+                % (candidate_slug, candidate_id, candidate_id, ticket.queue.slug)
+            )
+            return None
+    except (Ticket.DoesNotExist, ValueError):
+        logger.info(
+            "Matched [%s-%s] in subject but no such ticket exists"
+            % (candidate_slug, candidate_id)
+        )
+        return None
 
 
 def add_file_if_always_save_incoming_email_message(files_, message: str) -> None:
@@ -1097,10 +1160,8 @@ def extract_email_metadata(
         queue.slug, subject, logger
     )
 
-    # If no ticket ID found in the current queue, check all other queues
-    original_queue = queue  # Store the original queue in case we need to revert
+    original_queue = queue
     if ticket_id is None:
-        # Get all enabled queues except the current one, regardless of allow_email_submission
         other_queues = Queue.objects.exclude(id=queue.id).filter(
             email_box_type__isnull=False
         )
@@ -1110,7 +1171,6 @@ def extract_email_metadata(
                 other_queue.slug, subject, logger
             )
             if ticket_id is not None:
-                # Found a matching ticket in another queue, use that queue instead
                 logger.info(
                     f"Found ticket {ticket_id} matching subject in queue {other_queue.slug} "
                     f"instead of current queue {queue.slug}"
@@ -1118,7 +1178,20 @@ def extract_email_metadata(
                 queue = other_queue
                 break
 
-        # If no ticket ID was found in any queue, revert to the original queue for new ticket
+        if ticket_id is None:
+            matched_ticket_id = get_ticket_id_from_any_queue_slug(subject, logger)
+            if matched_ticket_id is not None:
+                ticket_id = matched_ticket_id
+                try:
+                    matched_ticket = Ticket.objects.get(id=ticket_id)
+                    if matched_ticket.queue.id != original_queue.id:
+                        queue = matched_ticket.queue
+                        logger.info(
+                            f"Found ticket {ticket_id} via slug alias lookup, resolved to queue {queue.slug}"
+                        )
+                except Ticket.DoesNotExist:
+                    ticket_id = None
+
         if ticket_id is None:
             queue = original_queue
             logger.info(

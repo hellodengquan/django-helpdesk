@@ -7,6 +7,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.shortcuts import get_object_or_404
 from django.test import override_settings, TestCase
+from django.utils import timezone
 from email.mime.message import MIMEMessage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -643,6 +644,143 @@ class GetEmailCommonTests(TestCase):
             args, kwargs = mock_create_object.call_args
             self.assertIsNone(args[1])
             self.assertEqual(args[2]["queue"], self.queue_public)
+
+
+class DuplicateTicketPreventionTests(TestCase):
+    """Tests for preventing duplicate ticket creation in email reply parsing."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+
+    def setUp(self):
+        self.queue = Queue.objects.create(
+            title="Test Queue", slug="testqueue", email_box_type="local"
+        )
+        self.logger = logging.getLogger("helpdesk")
+
+    def test_duplicate_message_id_skips_ticket_creation(self):
+        """A email with a Message-Id that was already processed should not create a new ticket."""
+        message, from_meta, _ = utils.generate_text_email(locale="en_US")
+        message["Message-Id"] = "<unique-msg-id@example.com>"
+        ticket1 = helpdesk.email.extract_email_metadata(
+            message.as_string(), self.queue, self.logger
+        )
+        self.assertIsNotNone(ticket1)
+        self.assertEqual(Ticket.objects.count(), 1)
+
+        message2, _, _ = utils.generate_text_email(locale="en_US")
+        message2["Message-Id"] = "<unique-msg-id@example.com>"
+        ticket2 = helpdesk.email.extract_email_metadata(
+            message2.as_string(), self.queue, self.logger
+        )
+        self.assertEqual(ticket2.id, ticket1.id)
+        self.assertEqual(Ticket.objects.count(), 1)
+
+    def test_in_reply_to_links_to_existing_ticket(self):
+        """An email with In-Reply-To pointing to an existing FollowUp should update the ticket."""
+        message1, from_meta, _ = utils.generate_text_email(locale="en_US")
+        message1["Message-Id"] = "<original-msg@example.com>"
+        ticket1 = helpdesk.email.extract_email_metadata(
+            message1.as_string(), self.queue, self.logger
+        )
+        self.assertIsNotNone(ticket1)
+        self.assertEqual(Ticket.objects.count(), 1)
+
+        message2, _, _ = utils.generate_text_email(locale="en_US")
+        message2["Message-Id"] = "<reply-msg@example.com>"
+        message2["In-Reply-To"] = "<original-msg@example.com>"
+        ticket2 = helpdesk.email.extract_email_metadata(
+            message2.as_string(), self.queue, self.logger
+        )
+        self.assertEqual(ticket2.id, ticket1.id)
+        self.assertEqual(Ticket.objects.count(), 1)
+        self.assertEqual(FollowUp.objects.filter(ticket=ticket1).count(), 2)
+
+    def test_references_header_links_to_existing_ticket(self):
+        """When In-Reply-To is absent, References header should still find the ticket."""
+        message1, from_meta, _ = utils.generate_text_email(locale="en_US")
+        message1["Message-Id"] = "<thread-root@example.com>"
+        ticket1 = helpdesk.email.extract_email_metadata(
+            message1.as_string(), self.queue, self.logger
+        )
+        self.assertIsNotNone(ticket1)
+        self.assertEqual(Ticket.objects.count(), 1)
+
+        message2, _, _ = utils.generate_text_email(locale="en_US")
+        message2["Message-Id"] = "<thread-reply@example.com>"
+        message2["References"] = "<other-msg@example.com> <thread-root@example.com>"
+        ticket2 = helpdesk.email.extract_email_metadata(
+            message2.as_string(), self.queue, self.logger
+        )
+        self.assertEqual(ticket2.id, ticket1.id)
+        self.assertEqual(Ticket.objects.count(), 1)
+
+    def test_subject_change_with_in_reply_to_no_duplicate(self):
+        """When subject changes but In-Reply-To is present, no duplicate ticket is created."""
+        message1, from_meta, _ = utils.generate_text_email(locale="en_US")
+        message1["Message-Id"] = "<orig-subject-change@example.com>"
+        ticket1 = helpdesk.email.extract_email_metadata(
+            message1.as_string(), self.queue, self.logger
+        )
+        self.assertIsNotNone(ticket1)
+
+        message2, _, _ = utils.generate_email_with_subject(
+            subject="Completely Different Subject"
+        )
+        message2["Message-Id"] = "<reply-subject-change@example.com>"
+        message2["In-Reply-To"] = "<orig-subject-change@example.com>"
+        ticket2 = helpdesk.email.extract_email_metadata(
+            message2.as_string(), self.queue, self.logger
+        )
+        self.assertEqual(ticket2.id, ticket1.id)
+        self.assertEqual(Ticket.objects.count(), 1)
+
+    def test_any_queue_slug_fallback_matches_renamed_queue(self):
+        """When subject contains a slug that no longer matches any known queue,
+        the any-slug fallback should still find the ticket by verifying the ID."""
+        queue_old = Queue.objects.create(
+            title="Old Queue", slug="oldqueue", email_box_type="local"
+        )
+        ticket = Ticket.objects.create(
+            title="Test ticket in old queue",
+            queue=queue_old,
+            submitter_email="test@example.com",
+            created=timezone.now(),
+            description="test",
+            priority=3,
+        )
+        message, _, _ = utils.generate_email_with_subject(
+            subject=f"Re: [oldqueue-{ticket.id}] Some issue"
+        )
+        message["Message-Id"] = "<fallback-test@example.com>"
+        result = helpdesk.email.extract_email_metadata(
+            message.as_string(), self.queue, self.logger
+        )
+        self.assertEqual(result.id, ticket.id)
+        self.assertEqual(Ticket.objects.count(), 1)
+
+    def test_no_duplicate_when_all_headers_present(self):
+        """With In-Reply-To, References, and subject [slug-id], only one ticket should exist."""
+        message1, _, _ = utils.generate_text_email(locale="en_US")
+        message1["Message-Id"] = "<all-headers-original@example.com>"
+        ticket1 = helpdesk.email.extract_email_metadata(
+            message1.as_string(), self.queue, self.logger
+        )
+        self.assertIsNotNone(ticket1)
+
+        message2, _, _ = utils.generate_email_with_subject(
+            subject=f"Re: [testqueue-{ticket1.id}] Reply with all headers"
+        )
+        message2["Message-Id"] = "<all-headers-reply@example.com>"
+        message2["In-Reply-To"] = "<all-headers-original@example.com>"
+        message2["References"] = "<all-headers-original@example.com>"
+        ticket2 = helpdesk.email.extract_email_metadata(
+            message2.as_string(), self.queue, self.logger
+        )
+        self.assertEqual(ticket2.id, ticket1.id)
+        self.assertEqual(Ticket.objects.count(), 1)
+        self.assertEqual(FollowUp.objects.filter(ticket=ticket1).count(), 2)
 
 
 class EmailTaskTests(TestCase):
