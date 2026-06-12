@@ -331,3 +331,215 @@ else:
 | SSO 用户是 TicketCC 但从未收到任何邮件 | Queue 的 `enable_notifications_on_email_events=False`，或该场景调用方 roles 没传 `ticket_cc` | 先查 Queue 配置；若 OK 再查对应场景 roles（例如「仅新工单」场景传了 `new_ticket_cc` 但后续更新无） |
 | SSO 用户是负责人，SLA 升级时能收到邮件，但评论更新时收不到 | UserSettings 的 `email_on_ticket_change=False`（被用户或管理员改过），而 SLA 升级路径绕过检查 | 查 `UserSettings.objects.get(user=xxx).email_on_ticket_change` |
 | 刚切 SSO 的用户首次登录后，Dashboard 分页条数始终是 25，修改无效 | 视图 `hasattr` 判定为 False，fallback 到硬编码 25，因为 UserSettings 不存在 | 跑 `create_usersettings`，或在登录信号中补 `get_or_create` |
+
+---
+
+## 五、SSO 上线执行清单（运维按步骤执行版）
+
+> 本章节为**可直接落地的操作清单**，按时间顺序排列。每一步均附带具体命令与校验方法，适合运维同学对照执行。
+
+### 5.1 上线前：配置确认（放流量前 1 天完成）
+
+#### 5.1.1 全局 settings 项核对
+
+在项目 `settings.py`（或部署环境变量注入的配置文件）中检查以下项，按业务预期设置：
+
+| settings 项 | 建议值 | 影响范围 | 代码位置 |
+|------------|--------|---------|---------|
+| `HELPDESK_DEFAULT_SETTINGS["email_on_ticket_change"]` | 按需，默认 `True` | 所有新创建 UserSettings 的「工单变更通知」缺省开关 | `src/helpdesk/settings.py:16-22` |
+| `HELPDESK_DEFAULT_SETTINGS["email_on_ticket_assign"]` | 按需，默认 `True` | 所有新创建 UserSettings 的「工单分配通知」缺省开关 | `src/helpdesk/settings.py:16-22` |
+| `HELPDESK_NOTIFY_SUBMITTER_FOR_ALL_TICKET_CHANGES` | 按需，默认 `False` | 提交人（submitter）是否接收所有变更（不限于公开评论/关闭） | `src/helpdesk/update_ticket.py:145-151` |
+| `HELPDESK_PRIVATE_FOLLOWUP_MEANS_NO_EMAILS` | 按需，默认 `False` | 私有 follow-up 是否完全跳过邮件 | `src/helpdesk/update_ticket.py:141-142` |
+| `HELPDESK_AUTO_SUBSCRIBE_ON_TICKET_RESPONSE` | 按需，默认 `False` | 员工回复时是否自动加入 TicketCC | `src/helpdesk/update_ticket.py:24-32` |
+
+**核对命令**（在 django shell 中执行）：
+```bash
+cd /path/to/project
+python manage.py shell
+```
+```python
+from helpdesk.settings import DEFAULT_USER_SETTINGS, HELPDESK_NOTIFY_SUBMITTER_FOR_ALL_TICKET_CHANGES
+print("DEFAULT_USER_SETTINGS:", DEFAULT_USER_SETTINGS)
+print("HELPDESK_NOTIFY_SUBMITTER_FOR_ALL_TICKET_CHANGES:", HELPDESK_NOTIFY_SUBMITTER_FOR_ALL_TICKET_CHANGES)
+```
+
+#### 5.1.2 Queue 级别 `enable_notifications_on_email_events` 核对
+
+**重要**：该开关决定工单级 TicketCC 订阅者（含 SSO 外部用户）能否收到邮件。若为 `False`，即使订阅了也不会发。（`src/helpdesk/models.py:691-693`）
+
+**列出所有 Queue 当前配置**：
+```bash
+python manage.py shell -c "
+from helpdesk.models import Queue
+for q in Queue.objects.all():
+    print(f'Queue: {q.slug:20s} | enable_notifications_on_email_events: {q.enable_notifications_on_email_events} | new_ticket_cc: {q.new_ticket_cc or \"(none)\"} | updated_ticket_cc: {q.updated_ticket_cc or \"(none)\"}')
+"
+```
+
+**批量开启（如果业务需要所有队列都开启 CC 通知）**：
+```bash
+python manage.py shell -c "
+from helpdesk.models import Queue
+Queue.objects.all().update(enable_notifications_on_email_events=True)
+print('已对所有队列开启 enable_notifications_on_email_events')
+"
+```
+
+**仅针对特定队列开启**：
+```bash
+# 将 'support' 'billing' 替换为实际队列 slug
+python manage.py shell -c "
+from helpdesk.models import Queue
+Queue.objects.filter(slug__in=['support', 'billing']).update(enable_notifications_on_email_events=True)
+print('Done')
+"
+```
+
+### 5.2 上线当天：首次补全 UserSettings（放流量前必须执行）
+
+#### 5.2.1 执行一次性补全
+
+**命令**：
+```bash
+cd /path/to/project
+python manage.py create_usersettings
+```
+
+内部实现（`src/helpdesk/management/commands/create_usersettings.py:30-33`）：
+```python
+for u in User.objects.all():
+    UserSettings.objects.get_or_create(user=u)  # 幂等，已存在的不改动
+```
+
+#### 5.2.2 校验补全结果
+
+```bash
+python manage.py shell -c "
+from django.contrib.auth import get_user_model
+from helpdesk.models import UserSettings
+User = get_user_model()
+total_users = User.objects.count()
+total_settings = UserSettings.objects.count()
+missing = total_users - total_settings
+print(f'总用户数: {total_users}')
+print(f'已创建 UserSettings 数: {total_settings}')
+print(f'缺失数: {missing}')
+if missing > 0:
+    missing_users = User.objects.exclude(pk__in=UserSettings.objects.values_list('user_id', flat=True))
+    print('缺失的用户:', [u.username for u in missing_users])
+"
+```
+
+**预期结果**：`缺失数: 0`。若仍有缺失，排查是否为 `is_active=False` 用户（一般不影响，因为 inactive 用户不会被分配工单，但建议都补齐以防万一）。
+
+### 5.3 上线后：配置 Cron 定期补全
+
+#### 5.3.1 推荐频率：每天凌晨 03:00 执行一次
+
+**添加 crontab**：
+```bash
+crontab -e
+```
+
+加入以下行（替换为实际项目路径和虚拟环境）：
+```cron
+# django-helpdesk: 每日凌晨补全 UserSettings，确保 SSO/LDAP 同步的新用户都有 settings
+0 3 * * * cd /path/to/project && /path/to/venv/bin/python manage.py create_usersettings >> /var/log/helpdesk-create-usersettings.log 2>&1
+```
+
+#### 5.3.2 为什么选每天一次
+- SSO 新用户可能在任意时间通过同步脚本进入 `auth_user` 表，但 `bulk_create` / 原生 SQL 不会触发 `post_save` 信号（`src/helpdesk/models.py:1786-1799`），导致 UserSettings 缺失
+- 每天一次的频率足以覆盖绝大多数场景，同时避免频繁执行带来的开销
+- 如果你的 SSO 用户同步是实时的且量很大，可以提升到每小时一次，但一般没必要
+
+#### 5.3.3 验证 cron 是否生效
+
+第二天查看日志：
+```bash
+grep -i "error\|exception" /var/log/helpdesk-create-usersettings.log
+# 或直接看日志长度是否每天增长
+ls -lh /var/log/helpdesk-create-usersettings.log
+```
+
+### 5.4 灰度回退：安全停用 / 清理指南
+
+#### 5.4.1 临时停用 cron（不删除历史数据）
+
+如果 SSO 回退，只是**不想再新增** UserSettings，但历史数据保留（推荐）：
+```bash
+crontab -e
+# 注释掉或删除 create_usersettings 那一行即可
+```
+
+历史 `UserSettings` 记录**不要删**，原因：
+- 已分配工单的负责人如果 UserSettings 被删，下一次工单更新会 500（`src/helpdesk/update_ticket.py:164-170` 直接访问反向外键无兜底）
+- 已订阅 TicketCC 的用户不受影响（TicketCC 不依赖 UserSettings）
+
+#### 5.4.2 完全回退时的数据清理（谨慎操作！）
+
+**⚠️ 警告：仅在你确定要彻底回退 SSO + helpdesk 集成时才执行。**
+
+操作前必须先**确保没有工单处于开放状态且负责人为 SSO 用户**，或者先将这些工单重新分配给本地用户。
+
+```bash
+# 步骤 1：确认有多少 SSO 用户被分配了开放工单（替换 sso_ 为你的 SSO 用户标识前缀）
+python manage.py shell -c "
+from helpdesk.models import Ticket
+from helpdesk.settings import TICKET_OPEN_STATUSES
+open_tickets = Ticket.objects.filter(status__in=TICKET_OPEN_STATUSES, assigned_to__username__startswith='sso_')
+print(f'SSO 用户负责的开放工单数: {open_tickets.count()}')
+for t in open_tickets:
+    print(f'  - {t.ticket} | 负责人: {t.assigned_to.username} | 标题: {t.title}')
+"
+
+# 步骤 2：如果上述结果非空，先批量重新分配（示例：全部转给 admin）
+python manage.py shell -c "
+from django.contrib.auth import get_user_model
+from helpdesk.models import Ticket
+from helpdesk.settings import TICKET_OPEN_STATUSES
+User = get_user_model()
+admin = User.objects.get(username='admin')
+updated = Ticket.objects.filter(
+    status__in=TICKET_OPEN_STATUSES,
+    assigned_to__username__startswith='sso_'
+).update(assigned_to=admin)
+print(f'已重新分配 {updated} 张工单给 admin')
+"
+
+# 步骤 3：删除 SSO 用户的 UserSettings（可选，一般不推荐删）
+# python manage.py shell -c "
+# from helpdesk.models import UserSettings
+# deleted, _ = UserSettings.objects.filter(user__username__startswith='sso_').delete()
+# print(f'已删除 {deleted} 条 UserSettings')
+# "
+```
+
+#### 5.4.3 紧急回退快速方案
+
+如果 SSO 刚上线发现问题需要立即止损，最简单的办法是：
+1. **关 cron**（注释掉 `create_usersettings`）
+2. **改默认值**（在 `settings.py` 中设 `HELPDESK_DEFAULT_SETTINGS` 将两个 email 开关设为 `False`）
+3. **批量关已有 SSO 用户的通知**：
+```bash
+python manage.py shell -c "
+from helpdesk.models import UserSettings
+updated = UserSettings.objects.filter(
+    user__username__startswith='sso_'   # 替换为你的 SSO 用户标识
+).update(
+    email_on_ticket_change=False,
+    email_on_ticket_assign=False
+)
+print(f'已关闭 {updated} 个 SSO 用户的邮件通知')
+"
+```
+这样历史 UserSettings 保留，不会 500，只是邮件停发，最安全。
+
+### 5.5 上线后冒烟测试清单（必须通过才能放流量）
+
+| # | 测试项 | 操作 | 预期结果 | 对应风险点 |
+|---|-------|------|---------|-----------|
+| 1 | 新 SSO 用户分配工单不 500 | 用从未登录过的 SSO 账号 → 管理员将其设为某工单负责人 → 添加一条评论 | 评论成功保存，页面不报错，该用户收到分配通知邮件 | §4.4 `RelatedObjectDoesNotExist` 风险 |
+| 2 | SSO 用户自己订阅 TicketCC | SSO 用户登录 → 打开一张工单 → 点 Subscribe → 该工单添加一条公开评论 | 用户收到评论通知邮件 | §4.3 TicketCC 判定 |
+| 3 | Queue 开关生效 | 选一个 Queue 关 `enable_notifications_on_email_events` → 上述 SSO 用户在该队列工单的订阅 → 添加评论 | 用户**不**收到邮件（验证开关可控） | §5.1.2 Queue 级别开关 |
+| 4 | UserSettings 默认值正确 | 新建 SSO 用户 → 查其 `usersettings_helpdesk.email_on_ticket_change` | 值为 `True`（或你在 `HELPDESK_DEFAULT_SETTINGS` 中设的值） | §4.2 默认值来源 |
+| 5 | cron 定时补全生效 | 手动往 auth_user 插一个测试用户（绕过 post_save） → 手动跑 `create_usersettings` → 验证该用户有了 UserSettings | 新用户 UserSettings 被创建 | §5.3 cron 补全 |
