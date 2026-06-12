@@ -1565,3 +1565,873 @@ groups:
 | **Queue 关闭但有活跃订阅** | `src/helpdesk/models.py:691-693`（if 开关判断） | 自定义 Command | `helpdesk_ticketcc_queue_disabled_total > 0` | WARNING |
 | **SSO 用户订阅但 email 为空** | `src/helpdesk/models.py:1946-1952`（email_address 属性） | 自定义 Command + 埋点 | `helpdesk_ticketcc_sso_email_empty_total > 0` | WARNING |
 
+---
+
+## 七、helpdesk 端埋点改造指引（让 §6 的 Prometheus 表达式真正有 series）
+
+> §6 的 Prometheus 告警表达式需要 helpdesk 端有对应的 metrics 导出才能生效。django-helpdesk 源码**没有内置任何 Prometheus 埋点**（`src/helpdesk/` 全目录无 `prometheus` / `Counter` / `Gauge` 引用），因此需要手动改造。本章逐一列出每条 PromQL 表达式对应的代码改造位置、指标类型、依赖配置和改造后的完整代码。
+
+### 7.0 前置依赖
+
+```bash
+pip install prometheus-client django-prometheus
+```
+
+在 `settings.py` 中：
+```python
+INSTALLED_APPS = [
+    'django_prometheus',
+    'helpdesk',
+    # ...
+]
+
+MIDDLEWARE = [
+    'django_prometheus.middleware.PrometheusBeforeMiddleware',
+    # ... 其他 middleware ...
+    'django_prometheus.middleware.PrometheusAfterMiddleware',
+]
+```
+
+在 `urls.py` 中暴露 metrics 端点：
+```python
+from django_prometheus import exports
+urlpatterns = [
+    path('metrics/', exports.ExportToDjangoView.as_view(), name='prometheus-metrics'),
+]
+```
+
+新增配置项（可选，默认为 `True` 即开启所有埋点）：
+```python
+# settings.py
+HELPDESK_METRICS_ENABLED = getattr(settings, 'HELPDESK_METRICS_ENABLED', True)
+```
+
+---
+
+### 7.1 埋点改造 1：`send_templated_mail` 邮件发送结果
+
+**对应 PromQL 表达式**：
+- `helpdesk_email_sent_total{status="success"}` / `helpdesk_email_sent_total{status="failure"}`
+- `helpdesk_email_sent_total{status="template_missing"}`
+- `helpdesk_smtp_failure_total`（§6.2.2 `HelpdeskSMTPFailures`）
+- `helpdesk_template_missing_total`（§6.2.2 `HelpdeskEmailTemplateMissing`）
+- `helpdesk_email_sent_total{role="assigned_to"}`（§6.2.2 `HelpdeskAssignedToEmailDrop`）
+
+**指标类型**：`Counter`（单调递增，适合 `rate()` / `increase()` 运算）
+
+**埋点文件**：`src/helpdesk/templated_email.py`
+
+**改造后的完整代码**：
+
+```python
+# src/helpdesk/templated_email.py — 完整替换
+from django.conf import settings
+from django.utils.safestring import mark_safe
+import logging
+import os
+from smtplib import SMTPException
+
+from prometheus_client import Counter
+
+logger = logging.getLogger("helpdesk")
+
+HELPDESK_METRICS_ENABLED = getattr(
+    settings, "HELPDESK_METRICS_ENABLED", True
+)
+
+HELPDESK_EMAIL_SENT = Counter(
+    "helpdesk_email_sent_total",
+    "Total helpdesk notification emails attempted",
+    ["role", "template_name", "status"],
+)
+
+HELPDESK_SMTP_FAILURE = Counter(
+    "helpdesk_smtp_failure_total",
+    "Total SMTP failures in helpdesk email sending",
+    ["template_name"],
+)
+
+HELPDESK_TEMPLATE_MISSING = Counter(
+    "helpdesk_template_missing_total",
+    "Total missing email template incidents",
+    ["template_name"],
+)
+
+
+def _inc_counter(counter, **labels):
+    if HELPDESK_METRICS_ENABLED:
+        counter.labels(**labels).inc()
+
+
+def send_templated_mail(
+    template_name,
+    context,
+    recipients,
+    sender=None,
+    bcc=None,
+    fail_silently=False,
+    files=None,
+    extra_headers=None,
+):
+    """
+    send_templated_mail() is a wrapper around Django's e-mail routines that
+    allows us to easily send multipart (text/plain & text/html) e-mails using
+    templates that are stored in the database. This lets the admin provide
+    both a text and a HTML template for each message.
+
+    template_name is the slug of the template to use for this message (see
+        models.EmailTemplate)
+
+    context is a dictionary to be used when rendering the template
+
+    recipients can be either a string, eg 'a@b.com', or a list of strings.
+
+    sender should contain a string, eg 'My Site <me@z.com>'. If you leave it
+        blank, it'll use settings.DEFAULT_FROM_EMAIL as a fallback.
+
+    bcc is an optional list of addresses that will receive this message as a
+        blind carbon copy.
+
+    fail_silently is passed to Django's mail routine. Set to 'True' to ignore
+        any errors at send time.
+
+    files can be a list of tuples. Each tuple should be a filename to attach,
+        along with the File objects to be read. files can be blank.
+
+    extra_headers is a dictionary of extra email headers, needed to process
+        email replies and keep proper threading.
+
+    """
+    from django.core.mail import EmailMultiAlternatives
+    from django.template import engines
+
+    from_string = engines["django"].from_string
+
+    from helpdesk.models import EmailTemplate
+    from helpdesk.settings import (
+        HELPDESK_EMAIL_FALLBACK_LOCALE,
+        HELPDESK_EMAIL_SUBJECT_TEMPLATE,
+    )
+
+    role = context.get("role", "unknown")
+
+    headers = extra_headers or {}
+
+    locale = context["queue"].get("locale") or HELPDESK_EMAIL_FALLBACK_LOCALE
+
+    try:
+        t = EmailTemplate.objects.get(
+            template_name__iexact=template_name, locale=locale
+        )
+    except EmailTemplate.DoesNotExist:
+        try:
+            t = EmailTemplate.objects.get(
+                template_name__iexact=template_name, locale__isnull=True
+            )
+        except EmailTemplate.DoesNotExist:
+            logger.warning('template "%s" does not exist, no mail sent', template_name)
+            # ← 埋点：模板缺失
+            _inc_counter(
+                HELPDESK_EMAIL_SENT,
+                role=role, template_name=template_name, status="template_missing",
+            )
+            _inc_counter(
+                HELPDESK_TEMPLATE_MISSING,
+                template_name=template_name,
+            )
+            return  # just ignore if template doesn't exist
+
+    subject_part = (
+        from_string(HELPDESK_EMAIL_SUBJECT_TEMPLATE % {"subject": t.subject})
+        .render(context)
+        .replace("\n", "")
+        .replace("\r", "")
+    )
+
+    footer_file = os.path.join("helpdesk", locale, "email_text_footer.txt")
+
+    text_part = from_string(
+        "%s\n\n{%% include '%s' %%}" % (t.plain_text, footer_file)
+    ).render(context)
+
+    email_html_base_file = os.path.join("helpdesk", locale, "email_html_base.html")
+    # keep new lines in html emails
+    if "comment" in context:
+        context["comment"] = mark_safe(context["comment"].replace("\r\n", "<br>"))
+
+    html_part = from_string(
+        "{%% extends '%s' %%}"
+        "{%% block title %%}%s{%% endblock %%}"
+        "{%% block content %%}%s{%% endblock %%}"
+        % (email_html_base_file, t.heading, t.html)
+    ).render(context)
+
+    if isinstance(recipients, str):
+        if recipients.find(","):
+            recipients = recipients.split(",")
+    elif type(recipients) is not list:
+        recipients = [recipients]
+
+    msg = EmailMultiAlternatives(
+        subject_part,
+        text_part,
+        sender or settings.DEFAULT_FROM_EMAIL,
+        recipients,
+        bcc=bcc,
+        headers=headers,
+    )
+    msg.attach_alternative(html_part, "text/html")
+
+    if files:
+        for filename, filefield in files:
+            filefield.open("rb")
+            content = filefield.read()
+            msg.attach(filename, content)
+            filefield.close()
+    logger.debug("Sending email to: {!r}".format(recipients))
+
+    try:
+        result = msg.send()
+        # ← 埋点：发送成功
+        _inc_counter(
+            HELPDESK_EMAIL_SENT,
+            role=role, template_name=template_name, status="success",
+        )
+        return result
+    except SMTPException as e:
+        logger.exception(
+            "SMTPException raised while sending email to {}".format(recipients)
+        )
+        # ← 埋点：SMTP 失败
+        _inc_counter(
+            HELPDESK_EMAIL_SENT,
+            role=role, template_name=template_name, status="failure",
+        )
+        _inc_counter(
+            HELPDESK_SMTP_FAILURE,
+            template_name=template_name,
+        )
+        if not fail_silently:
+            raise e
+        return 0
+```
+
+**改造要点**：
+1. 文件顶部新增 3 个 `Counter` 定义：`HELPDESK_EMAIL_SENT`（3 个 label：role / template_name / status）、`HELPDESK_SMTP_FAILURE`（1 个 label：template_name）、`HELPDESK_TEMPLATE_MISSING`（1 个 label：template_name）
+2. 从 `context` 字典中取 `role`（由 `Ticket.send()` 传入，见 7.2），默认 `"unknown"`
+3. 原有两个 `return` 点前各插入 `_inc_counter`：模板缺失（第 76 行原 `return`）、发送成功（第 128 行原 `return msg.send()`）、SMTP 异常（第 129 行原 `except`）
+4. 新增 `HELPDESK_METRICS_ENABLED` settings 开关，可在不卸载 prometheus_client 的情况下通过配置关闭埋点
+
+**关键约束**：`context` 字典必须包含 `"role"` key。当前 `Ticket.send()` 中的 `send(role, recipient)` 闭包（`src/helpdesk/models.py:674-684`）调用 `send_templated_mail` 时**不传 role**，需要改造 `Ticket.send()`（见 7.2）。
+
+---
+
+### 7.2 埋点改造 2：`Ticket.send()` 传递 role 到 `send_templated_mail`
+
+**对应 PromQL 表达式**：通过 `helpdesk_email_sent_total{role="assigned_to"}` 等实现按角色分维度的监控。
+
+**指标类型**：本改造不新增指标，而是在 `send_templated_mail` 调用前向 `context` 注入 `role`，使 7.1 的 `HELPDESK_EMAIL_SENT` Counter 能正确按 role 分类。
+
+**埋点文件**：`src/helpdesk/models.py`
+
+**改造位置**：`Ticket.send()` 内的 `send(role, recipient)` 闭包（第 674-684 行）
+
+**原始代码**（`src/helpdesk/models.py:674-684`）：
+```python
+def send(role, recipient):
+    if recipient and recipient not in recipients and role in roles:
+        template, context = roles[role]
+        send_templated_mail(
+            template,
+            context,
+            recipient,
+            sender=self.queue.from_address,
+            **kwargs,
+        )
+        recipients.add(recipient)
+```
+
+**改造后**：
+```python
+def send(role, recipient):
+    if recipient and recipient not in recipients and role in roles:
+        template, context = roles[role]
+        context["role"] = role  # ← 注入 role，供 send_templated_mail 的 Counter 使用
+        send_templated_mail(
+            template,
+            context,
+            recipient,
+            sender=self.queue.from_address,
+            **kwargs,
+        )
+        recipients.add(recipient)
+```
+
+**仅新增一行**：`context["role"] = role`。因为 `context` 是字典引用，修改会影响本次发送的模板渲染，但 `"role"` 不是任何现有模板使用的变量名（模板变量来自 `safe_template_context()` 返回的 `ticket` / `queue` / `comment` 等），不会产生副作用。
+
+---
+
+### 7.3 埋点改造 3：`Ticket.send()` 中 ticket_cc 的发送尝试与跳过
+
+**对应 PromQL 表达式**：
+- `helpdesk_ticket_cc_skip_total{reason="queue_disabled"}` → §6.3.2 `HelpdeskTicketCCQueueDisabled`
+- `helpdesk_ticket_cc_skip_total{reason="role_absent"}` → 调用方 roles 字典未含 `ticket_cc`
+- `helpdesk_ticket_cc_skip_total{reason="recipient_empty"}` → SSO 用户 email 为空
+- `helpdesk_ticket_cc_attempts_total` → §6.3.2 `HelpdeskTicketCCDeliveryDrop`
+
+**指标类型**：`Counter`
+
+**埋点文件**：`src/helpdesk/models.py`
+
+**改造位置**：`Ticket.send()` 方法（第 638-694 行）
+
+**原始代码**（`src/helpdesk/models.py:686-693`）：
+```python
+send("submitter", self.submitter_email)
+send("ticket_cc", self.queue.updated_ticket_cc)
+send("new_ticket_cc", self.queue.new_ticket_cc)
+if self.assigned_to:
+    send("assigned_to", self.assigned_to.email)
+if self.queue.enable_notifications_on_email_events:
+    for cc in self.ticketcc_set.all():
+        send("ticket_cc", cc.email_address)
+```
+
+**改造后**（在 `Ticket.send()` 方法的 `send` 闭包定义之后、第一个 `send()` 调用之前，新增 Counter 定义和埋点逻辑）：
+
+```python
+# src/helpdesk/models.py — 在 Ticket.send() 方法内，send 闭包之后新增
+
+from prometheus_client import Counter
+
+HELPDESK_TICKET_CC_ATTEMPTS = Counter(
+    "helpdesk_ticket_cc_attempts_total",
+    "TicketCC notification attempts in Ticket.send()",
+    ["queue_slug", "outcome"],
+)
+
+HELPDESK_TICKET_CC_SKIP = Counter(
+    "helpdesk_ticket_cc_skip_total",
+    "TicketCC notification skips in Ticket.send()",
+    ["queue_slug", "reason"],
+)
+
+# 在 Ticket.send() 内部替换原来的第 686-693 行：
+
+        send("submitter", self.submitter_email)
+
+        # --- Queue 级 updated_ticket_cc ---
+        queue_cc_addr = self.queue.updated_ticket_cc
+        if queue_cc_addr and queue_cc_addr not in recipients and "ticket_cc" in roles:
+            HELPDESK_TICKET_CC_ATTEMPTS.labels(
+                queue_slug=self.queue.slug, outcome="attempted",
+            ).inc()
+            send("ticket_cc", queue_cc_addr)
+        elif queue_cc_addr and "ticket_cc" not in roles:
+            HELPDESK_TICKET_CC_SKIP.labels(
+                queue_slug=self.queue.slug, reason="role_absent",
+            ).inc()
+        elif not queue_cc_addr:
+            HELPDESK_TICKET_CC_SKIP.labels(
+                queue_slug=self.queue.slug, reason="recipient_empty",
+            ).inc()
+
+        send("new_ticket_cc", self.queue.new_ticket_cc)
+
+        if self.assigned_to:
+            send("assigned_to", self.assigned_to.email)
+
+        # --- 工单级 ticketcc_set ---
+        if self.queue.enable_notifications_on_email_events:
+            for cc in self.ticketcc_set.all():
+                cc_addr = cc.email_address
+                if cc_addr:
+                    HELPDESK_TICKET_CC_ATTEMPTS.labels(
+                        queue_slug=self.queue.slug, outcome="attempted",
+                    ).inc()
+                    send("ticket_cc", cc_addr)
+                else:
+                    # SSO 用户 email 为空
+                    HELPDESK_TICKET_CC_SKIP.labels(
+                        queue_slug=self.queue.slug, reason="recipient_empty",
+                    ).inc()
+        else:
+            # Queue 开关关闭，所有 ticketcc_set 订阅者被跳过
+            cc_count = self.ticketcc_set.count()
+            if cc_count > 0:
+                HELPDESK_TICKET_CC_SKIP.labels(
+                    queue_slug=self.queue.slug, reason="queue_disabled",
+                ).inc(cc_count)
+```
+
+**改造要点**：
+1. `HELPDESK_TICKET_CC_ATTEMPTS` 记录每次实际尝试发送（outcome="attempted"）
+2. `HELPDESK_TICKET_CC_SKIP` 记录跳过的原因（`queue_disabled` / `role_absent` / `recipient_empty`）
+3. `queue_disabled` 分支用 `.inc(cc_count)` 一次递增，避免逐条遍历（Queue 关闭时不需要查 ticketcc_set 的具体内容）
+4. `recipient_empty` 对应 SSO 用户 email 为空场景（`src/helpdesk/models.py:1946-1952` 的 `_email_address` 返回 `None`），被 `should_receive(None)` 过滤（`src/helpdesk/models.py:671-672`）
+
+**对应的 PromQL 更新**（替换 §6.3.2 中的旧表达式）：
+```yaml
+# §6.3.2 HelpdeskTicketCCQueueDisabled 改用：
+- alert: HelpdeskTicketCCQueueDisabled
+  expr: increase(helpdesk_ticket_cc_skip_total{reason="queue_disabled"}[5m]) > 0
+
+# §6.3.2 HelpdeskTicketCCDeliveryDrop 改用：
+- alert: HelpdeskTicketCCDeliveryDrop
+  expr: |
+    rate(helpdesk_ticket_cc_attempts_total{outcome="attempted"}[1h])
+    /
+    (rate(helpdesk_ticket_cc_attempts_total{outcome="attempted"}[1h]) + rate(helpdesk_ticket_cc_skip_total[1h]))
+    < 0.5
+
+# §6.3.2 HelpdeskTicketCCSSOUserEmailEmpty 改用：
+- alert: HelpdeskTicketCCSSOUserEmailEmpty
+  expr: increase(helpdesk_ticket_cc_skip_total{reason="recipient_empty"}[5m]) > 0
+```
+
+---
+
+### 7.4 埋点改造 4：`process_email_notifications_for_ticket_update` 中 assigned_to 通知跳过
+
+**对应 PromQL 表达式**：
+- `helpdesk_assigned_to_notification_skip_total{reason="settings_disabled"}`
+- `helpdesk_assigned_to_notification_skip_total{reason="no_assigned_to"}`
+
+**指标类型**：`Counter`
+
+**埋点文件**：`src/helpdesk/update_ticket.py`
+
+**改造位置**：`process_email_notifications_for_ticket_update()` 函数（第 128-188 行）
+
+**原始代码**（`src/helpdesk/update_ticket.py:164-178`）：
+```python
+if ticket.assigned_to and (
+    ticket.assigned_to.usersettings_helpdesk.email_on_ticket_change
+    or (
+        reassigned
+        and ticket.assigned_to.usersettings_helpdesk.email_on_ticket_assign
+    )
+):
+    messages_sent_to.update(
+        ticket.send(
+            {"assigned_to": (template_prefix + "owner", context)},
+            dont_send_to=messages_sent_to,
+            fail_silently=True,
+            files=files,
+        )
+    )
+```
+
+**改造后**：
+```python
+# src/helpdesk/update_ticket.py — 文件顶部新增
+from prometheus_client import Counter
+
+HELPDESK_ASSIGNED_TO_NOTIFICATION_SKIP = Counter(
+    "helpdesk_assigned_to_notification_skip_total",
+    "Times assigned_to notification was skipped in process_email_notifications_for_ticket_update",
+    ["reason"],
+)
+
+# 替换 update_ticket.py:164-178
+if ticket.assigned_to:
+    change_enabled = ticket.assigned_to.usersettings_helpdesk.email_on_ticket_change
+    assign_enabled = ticket.assigned_to.usersettings_helpdesk.email_on_ticket_assign
+    should_send = change_enabled or (reassigned and assign_enabled)
+    if should_send:
+        messages_sent_to.update(
+            ticket.send(
+                {"assigned_to": (template_prefix + "owner", context)},
+                dont_send_to=messages_sent_to,
+                fail_silently=True,
+                files=files,
+            )
+        )
+    else:
+        # ← 埋点：assigned_to 存在但通知被 UserSettings 开关跳过
+        HELPDESK_ASSIGNED_TO_NOTIFICATION_SKIP.labels(
+            reason="settings_disabled",
+        ).inc()
+else:
+    # ← 埋点：无 assigned_to
+    HELPDESK_ASSIGNED_TO_NOTIFICATION_SKIP.labels(
+        reason="no_assigned_to",
+    ).inc()
+```
+
+**改造要点**：
+1. 将原始的 `if ... and (...)` 条件拆分为三个变量 `change_enabled` / `assign_enabled` / `should_send`，便于在 else 分支精确打点
+2. `reason="settings_disabled"` 对应 `email_on_ticket_change=False` 且 (`email_on_ticket_assign=False` 或非重新分配)，即**用户侧静默关闭通知**的场景
+3. `reason="no_assigned_to"` 对应工单无负责人（非异常，但可用于统计）
+
+**新增 PromQL**：
+```yaml
+- alert: HelpdeskAssignedToNotificationSkipped
+  expr: increase(helpdesk_assigned_to_notification_skip_total{reason="settings_disabled"}[1h]) > 5
+  for: 5m
+  labels:
+    severity: info
+    team: sre
+    category: helpdesk_notification
+  annotations:
+    summary: "assigned_to notifications skipped due to UserSettings in last 1h"
+    description: "Users have email_on_ticket_change=False and email_on_ticket_assign=False. Source: src/helpdesk/update_ticket.py:164-170"
+```
+
+---
+
+### 7.5 埋点改造 5：`create_usersettings` 管理命令中 UserSettings 补全计数
+
+**对应 PromQL 表达式**：
+- `helpdesk_usersettings_created_total`（新创建的 UserSettings 数量）
+- `helpdesk_usersettings_missing_total`（仍缺失的 UserSettings 数量，需配合 `export_helpdesk_metrics` 导出）
+
+**指标类型**：`Counter` + `Gauge`
+
+**埋点文件**：`src/helpdesk/management/commands/create_usersettings.py`
+
+**原始代码**（`src/helpdesk/management/commands/create_usersettings.py:30-33`）：
+```python
+def handle(self, *args, **options):
+    """handle command line"""
+    for u in User.objects.all():
+        UserSettings.objects.get_or_create(user=u)
+```
+
+**改造后**：
+```python
+# src/helpdesk/management/commands/create_usersettings.py — 完整替换
+from django.contrib.auth import get_user_model
+from django.core.management.base import BaseCommand
+from django.utils.translation import gettext as _
+from helpdesk.models import UserSettings
+from prometheus_client import Counter, Gauge, CollectorRegistry, write_to_textfile
+import time
+
+User = get_user_model()
+
+HELPDESK_USERSETTINGS_CREATED = Counter(
+    "helpdesk_usersettings_created_total",
+    "Number of UserSettings created by create_usersettings command",
+)
+
+HELPDESK_USERSETTINGS_MISSING = Gauge(
+    "helpdesk_usersettings_missing_total",
+    "Number of User rows without corresponding UserSettings",
+)
+
+HELPDESK_USERSETTINGS_MISSING_ASSIGNED = Gauge(
+    "helpdesk_usersettings_missing_assigned_total",
+    "Number of Users with assigned open tickets but no UserSettings",
+)
+
+HELPDESK_EXPORT_TIMESTAMP = Gauge(
+    "helpdesk_usersettings_missing_timestamp_seconds",
+    "Timestamp of last create_usersettings run",
+)
+
+
+class Command(BaseCommand):
+    """create_usersettings command"""
+
+    help = _(
+        "Check for user without django-helpdesk UserSettings "
+        "and create settings if required. Uses "
+        "settings.DEFAULT_USER_SETTINGS which can be overridden to "
+        "suit your situation."
+    )
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--export-metrics",
+            type=str,
+            default=None,
+            help="Path to write Prometheus .prom file (for node_exporter textfile collector)",
+        )
+
+    def handle(self, *args, **options):
+        """handle command line"""
+        created_count = 0
+        for u in User.objects.all():
+            _, created = UserSettings.objects.get_or_create(user=u)
+            if created:
+                created_count += 1
+                HELPDESK_USERSETTINGS_CREATED.inc()
+
+        if created_count:
+            self.stdout.write(
+                self.style.SUCCESS("Created %d UserSettings" % created_count)
+            )
+        else:
+            self.stdout.write("All users have UserSettings already")
+
+        # 导出 Gauge metrics（可选，通过 --export-metrics 参数）
+        export_path = options.get("export_metrics")
+        if export_path:
+            missing = User.objects.exclude(
+                pk__in=UserSettings.objects.values_list("user_id", flat=True)
+            ).count()
+            HELPDESK_USERSETTINGS_MISSING.set(missing)
+
+            from helpdesk.settings import TICKET_OPEN_STATUSES
+            missing_assigned = User.objects.filter(
+                assigned_to__status__in=TICKET_OPEN_STATUSES
+            ).exclude(
+                pk__in=UserSettings.objects.values_list("user_id", flat=True)
+            ).distinct().count()
+            HELPDESK_USERSETTINGS_MISSING_ASSIGNED.set(missing_assigned)
+
+            HELPDESK_EXPORT_TIMESTAMP.set(time.time())
+
+            registry = CollectorRegistry()
+            registry.register(HELPDESK_USERSETTINGS_MISSING)
+            registry.register(HELPDESK_USERSETTINGS_MISSING_ASSIGNED)
+            registry.register(HELPDESK_EXPORT_TIMESTAMP)
+            write_to_textfile(export_path, registry)
+            self.stdout.write("Metrics exported to %s" % export_path)
+```
+
+**改造要点**：
+1. `get_or_create` 返回 `(obj, created)` 元组，原代码忽略了 `created` 布尔值，现在用 `Counter` 记录新创建的数量
+2. `--export-metrics` 参数可选，不传时行为与原版一致（向后兼容）
+3. Gauge 指标 `helpdesk_usersettings_missing_total` / `helpdesk_usersettings_missing_assigned_total` 与 §6.1.2 的告警表达式直接对应
+4. `helpdesk_usersettings_missing_timestamp_seconds` 用于 §6.1.2 的 `HelpdeskCreateUserSettingsCronStale` 告警
+
+**Cron 更新**：
+```cron
+0 3 * * * cd /path/to/project && /path/to/venv/bin/python manage.py create_usersettings --export-metrics /var/lib/node_exporter/helpdesk.prom >> /var/log/helpdesk-create-usersettings.log 2>&1
+```
+
+---
+
+### 7.6 埋点改造 6：`TicketCC` 中 SSO 用户 email 为空检测
+
+**对应 PromQL 表达式**：`helpdesk_ticketcc_sso_email_empty_total`
+
+**指标类型**：`Gauge`（快照值，由 `export_helpdesk_metrics` 定期导出）
+
+**埋点文件**：`src/helpdesk/management/commands/export_helpdesk_metrics.py`（§6.1.1 中新增的命令）
+
+**改造位置**：在 `export_helpdesk_metrics.py` 的 `handle()` 方法中新增一段查询
+
+**新增代码**（在 `handle()` 方法内、`write_to_textfile` 之前插入）：
+```python
+# 检测 TicketCC 中关联了 user 但 user.email 为空的订阅
+HELPDESK_TICKETCC_SSO_EMAIL_EMPTY = Gauge(
+    "helpdesk_ticketcc_sso_email_empty_total",
+    "Number of TicketCC records where user is set but user.email is empty",
+    registry=REGISTRY,
+)
+
+sso_email_empty_count = TicketCC.objects.filter(
+    user__isnull=False,
+    user__email="",
+).count()
+HELPDESK_TICKETCC_SSO_EMAIL_EMPTY.set(sso_email_empty_count)
+```
+
+**代码引用**：此 Gauge 对应 `src/helpdesk/models.py:1946-1952` 中 `_email_address` 属性的逻辑 — 当 `self.user` 存在但 `self.user.email` 为空字符串时，属性返回 `self.email`（可能也为空），导致 `should_receive` 返回 False（`src/helpdesk/models.py:671-672`），邮件被静默丢弃。
+
+---
+
+### 7.7 完整改造对应关系表
+
+| §6 PromQL 表达式 | 指标类型 | 埋点改造节 | 埋点文件 | 埋点位置（行号） |
+|------------------|---------|----------|---------|----------------|
+| `helpdesk_email_sent_total{role, template_name, status}` | Counter | §7.1 | `src/helpdesk/templated_email.py` | 第 76 行（模板缺失 return 前）、第 128 行（msg.send() 成功后）、第 129-134 行（SMTPException except 内） |
+| `helpdesk_smtp_failure_total{template_name}` | Counter | §7.1 | `src/helpdesk/templated_email.py` | 第 129-134 行（SMTPException except 内） |
+| `helpdesk_template_missing_total{template_name}` | Counter | §7.1 | `src/helpdesk/templated_email.py` | 第 74-76 行（EmailTemplate.DoesNotExist 内层 except） |
+| `context["role"] = role` 传递 | — | §7.2 | `src/helpdesk/models.py` | 第 676 行（send 闭包内，send_templated_mail 调用前） |
+| `helpdesk_ticket_cc_attempts_total{queue_slug, outcome}` | Counter | §7.3 | `src/helpdesk/models.py` | 第 687 行（queue.updated_ticket_cc 发送前）、第 691-693 行（ticketcc_set 遍历内） |
+| `helpdesk_ticket_cc_skip_total{queue_slug, reason}` | Counter | §7.3 | `src/helpdesk/models.py` | 第 687 行附近（queue_disabled / role_absent / recipient_empty 三种跳过） |
+| `helpdesk_assigned_to_notification_skip_total{reason}` | Counter | §7.4 | `src/helpdesk/update_ticket.py` | 第 164-178 行（if 条件拆分后的 else 分支） |
+| `helpdesk_usersettings_created_total` | Counter | §7.5 | `src/helpdesk/management/commands/create_usersettings.py` | 第 32-33 行（get_or_create 返回值解包） |
+| `helpdesk_usersettings_missing_total` | Gauge | §7.5 | `src/helpdesk/management/commands/create_usersettings.py` | handle() 方法内 `--export-metrics` 分支 |
+| `helpdesk_usersettings_missing_assigned_total` | Gauge | §7.5 | `src/helpdesk/management/commands/create_usersettings.py` | handle() 方法内 `--export-metrics` 分支 |
+| `helpdesk_usersettings_missing_timestamp_seconds` | Gauge | §7.5 | `src/helpdesk/management/commands/create_usersettings.py` | handle() 方法内 `--export-metrics` 分支 |
+| `helpdesk_ticketcc_sso_email_empty_total` | Gauge | §7.6 | `src/helpdesk/management/commands/export_helpdesk_metrics.py` | handle() 方法内（TicketCC user__email="" 查询） |
+
+---
+
+### 7.8 冒烟验证步骤（改造完成后按顺序执行）
+
+#### 步骤 1：验证 metrics 端点可达
+
+```bash
+curl -s http://localhost:8000/metrics | grep helpdesk_
+```
+
+**预期输出**（至少包含以下行，值为 0 是正常的，因为还没有触发通知）：
+```
+# HELP helpdesk_email_sent_total Total helpdesk notification emails attempted
+# TYPE helpdesk_email_sent_total counter
+helpdesk_email_sent_total{role="unknown",template_name="",status="success"} 0
+# HELP helpdesk_ticket_cc_attempts_total TicketCC notification attempts in Ticket.send()
+# TYPE helpdesk_ticket_cc_attempts_total counter
+helpdesk_ticket_cc_attempts_total{queue_slug="",outcome="attempted"} 0
+# HELP helpdesk_usersettings_created_total Number of UserSettings created by create_usersettings command
+# TYPE helpdesk_usersettings_created_total counter
+helpdesk_usersettings_created_total 0
+```
+
+如果没有 `helpdesk_` 前缀的任何行，检查：
+- `django_prometheus` 是否在 `INSTALLED_APPS`
+- `PrometheusBeforeMiddleware` / `PrometheusAfterMiddleware` 是否在 `MIDDLEWARE`
+- `/metrics/` URL 是否正确映射
+
+#### 步骤 2：验证 UserSettings 补全 + Gauge 导出
+
+```bash
+# 执行命令并导出 metrics
+python manage.py create_usersettings --export-metrics /tmp/helpdesk-test.prom
+
+# 检查 .prom 文件内容
+cat /tmp/helpdesk-test.prom | grep helpdesk_usersettings
+```
+
+**预期输出**：
+```
+# HELP helpdesk_usersettings_missing_total Number of User rows without corresponding UserSettings
+# TYPE helpdesk_usersettings_missing_total gauge
+helpdesk_usersettings_missing_total 0.0
+# HELP helpdesk_usersettings_missing_assigned_total Number of Users with assigned open tickets but no UserSettings
+# TYPE helpdesk_usersettings_missing_assigned_total gauge
+helpdesk_usersettings_missing_assigned_total 0.0
+# HELP helpdesk_usersettings_missing_timestamp_seconds Timestamp of last create_usersettings run
+# TYPE helpdesk_usersettings_missing_timestamp_seconds gauge
+helpdesk_usersettings_missing_timestamp_seconds 1.7e+09
+```
+
+如果 `helpdesk_usersettings_missing_total > 0`，说明有用户缺失 UserSettings，命令应该已经补全（下次再跑一次确认归零）。
+
+#### 步骤 3：验证邮件发送 Counter
+
+```bash
+# 触发一次工单更新（创建评论）
+python manage.py shell -c "
+from helpdesk.models import Ticket
+from helpdesk.update_ticket import update_ticket
+from django.contrib.auth import get_user_model
+User = get_user_model()
+ticket = Ticket.objects.filter(assigned_to__isnull=False).first()
+if ticket:
+    update_ticket(
+        user=User.objects.filter(is_staff=True).first(),
+        ticket=ticket,
+        comment='smoke test comment',
+        public=True,
+    )
+    print(f'Updated ticket {ticket.ticket}')
+else:
+    print('No ticket with assigned_to found')
+"
+
+# 检查 Counter 是否增长
+curl -s http://localhost:8000/metrics | grep 'helpdesk_email_sent_total{' | grep -v '0$'
+```
+
+**预期输出**（至少一行非零值）：
+```
+helpdesk_email_sent_total{role="assigned_to",template_name="updated_owner",status="success"} 1
+helpdesk_email_sent_total{role="submitter",template_name="updated_submitter",status="success"} 1
+helpdesk_email_sent_total{role="ticket_cc",template_name="updated_cc",status="success"} 1
+```
+
+如果只有 `role="unknown"` 的行，说明 §7.2 的 `context["role"] = role` 没有生效，检查 `Ticket.send()` 的改造是否正确。
+
+#### 步骤 4：验证 ticket_cc 跳过 Counter
+
+```bash
+# 找一个 enable_notifications_on_email_events=False 的 Queue
+python manage.py shell -c "
+from helpdesk.models import Queue, Ticket
+q = Queue.objects.filter(enable_notifications_on_email_events=False).first()
+if q:
+    ticket = Ticket.objects.filter(queue=q).first()
+    if ticket:
+        print(f'Queue {q.slug} has ticket {ticket.ticket}, CC disabled')
+    else:
+        print(f'Queue {q.slug} has no tickets')
+else:
+    print('No Queue with enable_notifications_on_email_events=False found')
+"
+
+# 触发一次该 Queue 工单的更新
+# ... (同步骤 3 的 update_ticket 调用，但用该 Queue 的 ticket)
+
+# 检查 skip Counter
+curl -s http://localhost:8000/metrics | grep 'helpdesk_ticket_cc_skip_total'
+```
+
+**预期输出**：
+```
+helpdesk_ticket_cc_skip_total{queue_slug="your-queue-slug",reason="queue_disabled"} 1
+```
+
+#### 步骤 5：验证 assigned_to 跳过 Counter
+
+```bash
+# 将某个负责人的 email_on_ticket_change 设为 False
+python manage.py shell -c "
+from helpdesk.models import UserSettings, Ticket
+from helpdesk.update_ticket import update_ticket
+from django.contrib.auth import get_user_model
+User = get_user_model()
+ticket = Ticket.objects.filter(assigned_to__isnull=False).first()
+if ticket:
+    UserSettings.objects.filter(user=ticket.assigned_to).update(email_on_ticket_change=False)
+    update_ticket(
+        user=User.objects.filter(is_staff=True).first(),
+        ticket=ticket,
+        comment='test skip notification',
+        public=True,
+    )
+    print('Done - check metrics')
+else:
+    print('No ticket with assigned_to found')
+"
+
+# 检查 skip Counter
+curl -s http://localhost:8000/metrics | grep 'helpdesk_assigned_to_notification_skip_total'
+```
+
+**预期输出**：
+```
+helpdesk_assigned_to_notification_skip_total{reason="settings_disabled"} 1
+```
+
+#### 步骤 6：验证 Prometheus 能抓到所有 series
+
+```bash
+# 在 Prometheus 已配置 scrape 目标后，查询是否有数据
+curl -s 'http://prometheus:9090/api/v1/query?query=helpdesk_email_sent_total' | python -m json.tool
+
+# 或在 Prometheus UI 中查询：
+# count(helpdesk_email_sent_total)
+# 预期返回 > 0 的 value
+```
+
+#### 步骤 7：验证 Grafana 看板
+
+导入 §6.4 的 JSON 骨架后：
+1. 将所有 `datasource.uid` 替换为你的 Prometheus 数据源 UID
+2. 将看板时间范围设为 "Last 5 minutes"
+3. 执行一次工单更新操作
+4. 刷新看板，确认以下面板有数据：
+   - **Email Delivery Metrics**：应出现 role 分类的 success/failure 折线
+   - **TicketCC subscriptions on disabled Queues**：如果存在 disabled Queue 应显示非零值
+   - **Seconds since last create_usersettings run**：应 < 300（5 分钟内）
+
+---
+
+### 7.9 依赖的 settings 项汇总
+
+| Settings 项 | 默认值 | 用途 | 影响的埋点 |
+|------------|--------|------|----------|
+| `HELPDESK_METRICS_ENABLED` | `True` | 全局开关，关闭后所有 `_inc_counter` 调用不执行 | §7.1, §7.3, §7.4 |
+| `HELPDESK_DEFAULT_SETTINGS["email_on_ticket_change"]` | `True` | 新 UserSettings 的缺省值 | §7.4（决定 assigned_to 通知是否被跳过） |
+| `HELPDESK_DEFAULT_SETTINGS["email_on_ticket_assign"]` | `True` | 新 UserSettings 的缺省值 | §7.4（决定分配通知是否被跳过） |
+| Queue.`enable_notifications_on_email_events` | —（按 Queue 配置） | 控制 ticketcc_set 是否被遍历 | §7.3（决定 ticket_cc 跳过的 reason） |
+| `HELPDESK_NOTIFY_SUBMITTER_FOR_ALL_TICKET_CHANGES` | `False` | 提交人是否接收所有变更 | 不直接影响埋点，但影响 submitter 角色的 Counter 值分布 |
+| `HELPDESK_PRIVATE_FOLLOWUP_MEANS_NO_EMAILS` | `False` | 私有 follow-up 是否跳过所有邮件 | 不直接影响埋点，但设为 True 时私有评论场景所有 Counter 不会增长 |
+
