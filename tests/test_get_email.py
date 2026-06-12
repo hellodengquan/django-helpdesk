@@ -8,6 +8,7 @@ from django.core.management import call_command
 from django.shortcuts import get_object_or_404
 from django.test import override_settings, TestCase
 from django.utils import timezone
+from datetime import timedelta
 from email.mime.message import MIMEMessage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -35,6 +36,7 @@ from tempfile import mkdtemp
 import time
 import typing
 from unittest import mock
+from freezegun import freeze_time
 
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -781,6 +783,109 @@ class DuplicateTicketPreventionTests(TestCase):
         self.assertEqual(ticket2.id, ticket1.id)
         self.assertEqual(Ticket.objects.count(), 1)
         self.assertEqual(FollowUp.objects.filter(ticket=ticket1).count(), 2)
+
+    def test_fuzzy_dedup_merges_when_message_id_missing_and_fingerprint_matches(self):
+        """When Message-Id and References are both missing but sender+subject
+        match a recent ticket in the same queue, the email should be merged
+        into that ticket instead of creating a new one."""
+        subject = "Printer on floor 3 is jammed"
+        sender_email = "fuzzy-test@example.com"
+
+        message1, _, _ = utils.generate_email_with_subject(
+            subject=subject, body="Initial report"
+        )
+        del message1["From"]
+        message1["From"] = f"Reporter <{sender_email}>"
+        del message1["Message-Id"]
+        ticket1 = helpdesk.email.extract_email_metadata(
+            message1.as_string(), self.queue, self.logger
+        )
+        self.assertIsNotNone(ticket1)
+        self.assertEqual(Ticket.objects.count(), 1)
+
+        message2, _, _ = utils.generate_email_with_subject(
+            subject=f"Re: {subject}", body="Still jammed"
+        )
+        del message2["From"]
+        message2["From"] = f"Reporter <{sender_email}>"
+        del message2["Message-Id"]
+        if "In-Reply-To" in message2:
+            del message2["In-Reply-To"]
+        if "References" in message2:
+            del message2["References"]
+        ticket2 = helpdesk.email.extract_email_metadata(
+            message2.as_string(), self.queue, self.logger
+        )
+        self.assertEqual(ticket2.id, ticket1.id)
+        self.assertEqual(Ticket.objects.count(), 1)
+        self.assertEqual(FollowUp.objects.filter(ticket=ticket1).count(), 2)
+
+    def test_fuzzy_dedup_creates_new_when_fingerprint_does_not_match(self):
+        """When Message-Id is missing and the fingerprint (sender+subject)
+        does not match any recent ticket, a new ticket should be created."""
+        subject_a = "Printer on floor 3 is jammed"
+        subject_b = "VPN connection drops randomly"
+        sender_email = "fuzzy-nomatch@example.com"
+
+        message1, _, _ = utils.generate_email_with_subject(
+            subject=subject_a, body="Issue A"
+        )
+        del message1["From"]
+        message1["From"] = f"Reporter <{sender_email}>"
+        ticket1 = helpdesk.email.extract_email_metadata(
+            message1.as_string(), self.queue, self.logger
+        )
+        self.assertIsNotNone(ticket1)
+
+        message2, _, _ = utils.generate_email_with_subject(
+            subject=subject_b, body="Issue B"
+        )
+        del message2["From"]
+        message2["From"] = f"Reporter <{sender_email}>"
+        del message2["Message-Id"]
+        if "In-Reply-To" in message2:
+            del message2["In-Reply-To"]
+        if "References" in message2:
+            del message2["References"]
+        ticket2 = helpdesk.email.extract_email_metadata(
+            message2.as_string(), self.queue, self.logger
+        )
+        self.assertNotEqual(ticket2.id, ticket1.id)
+        self.assertEqual(Ticket.objects.count(), 2)
+
+    @override_settings(HELPDESK_FUZZY_DEDUP_TIME_WINDOW_HOURS=24)
+    def test_fuzzy_dedup_creates_new_after_time_window_expires(self):
+        """When Message-Id is missing but the matching ticket was created more
+        than 24 hours ago, a new ticket should be created instead of merging."""
+        subject = "Slow WiFi in building B"
+        sender_email = "fuzzy-expired@example.com"
+
+        with freeze_time(timezone.now() - timedelta(hours=25)):
+            message1, _, _ = utils.generate_email_with_subject(
+                subject=subject, body="Original report"
+            )
+            del message1["From"]
+            message1["From"] = f"Reporter <{sender_email}>"
+            ticket1 = helpdesk.email.extract_email_metadata(
+                message1.as_string(), self.queue, self.logger
+            )
+            self.assertIsNotNone(ticket1)
+
+        message2, _, _ = utils.generate_email_with_subject(
+            subject=f"Re: {subject}", body="Still slow"
+        )
+        del message2["From"]
+        message2["From"] = f"Reporter <{sender_email}>"
+        del message2["Message-Id"]
+        if "In-Reply-To" in message2:
+            del message2["In-Reply-To"]
+        if "References" in message2:
+            del message2["References"]
+        ticket2 = helpdesk.email.extract_email_metadata(
+            message2.as_string(), self.queue, self.logger
+        )
+        self.assertNotEqual(ticket2.id, ticket1.id)
+        self.assertEqual(Ticket.objects.count(), 2)
 
 
 class EmailTaskTests(TestCase):

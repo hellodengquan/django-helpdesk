@@ -585,6 +585,64 @@ def create_ticket_cc(ticket, cc_list, logger):
     return new_ticket_ccs
 
 
+def _is_reply_subject(message) -> bool:
+    """Check if the original (un-stripped) Subject header indicates a reply or
+    forward, which is a prerequisite for the fuzzy dedup path.
+
+    We inspect the raw Subject header rather than the stripped version so that
+    we can distinguish a brand-new ticket from a follow-up whose tracking ID
+    was lost by the MTA.
+    """
+    raw_subject = message.get("Subject", "")
+    if not raw_subject:
+        return False
+    raw_subject_lower = raw_subject.lower()
+    for prefix in [s.lower() for s in STRIPPED_SUBJECT_STRINGS]:
+        if raw_subject_lower.startswith(prefix):
+            return True
+    return False
+
+
+def match_ticket_by_fingerprint(
+    sender_email: str, subject: str, queue: Queue, logger: logging.Logger
+) -> typing.Optional[Ticket]:
+    """Find a recent ticket using a fuzzy fingerprint composed of sender,
+    normalised subject and a configurable time window.
+
+    This is a last-resort fallback for old MTAs that strip Message-Id and
+    References headers during forwarding, so the usual header-based matching
+    cannot work.  The fingerprint matches when the same sender submitted a
+    ticket with the same stripped subject in the same queue within the
+    deduplication time window (default 24 hours).
+
+    :param sender_email: the email address of the sender
+    :param subject: the subject with Re/Fw prefixes already stripped
+    :param queue: the queue the incoming email is assigned to
+    :param logger: logger instance
+    :returns: the matched Ticket or None
+    """
+    window_hours = helpdesk_settings.FUZZY_DEDUP_TIME_WINDOW_HOURS
+    cutoff = timezone.now() - timedelta(hours=window_hours)
+
+    normalised_subject = subject.strip().lower()
+
+    candidates = Ticket.objects.filter(
+        submitter_email=sender_email,
+        queue=queue,
+        created__gte=cutoff,
+    ).order_by("-created")
+
+    for candidate in candidates:
+        if candidate.title.strip().lower() == normalised_subject:
+            logger.info(
+                "Fuzzy fingerprint matched existing ticket %s-%s (sender=%s, subject=%s, window=%dh)"
+                % (candidate.queue.slug, candidate.id, sender_email, subject, window_hours)
+            )
+            return candidate
+
+    return None
+
+
 def create_object_from_email_message(message, ticket_id, payload, files, logger):
     ticket, previous_followup, new = None, None, False
     now = timezone.now()
@@ -653,24 +711,37 @@ def create_object_from_email_message(message, ticket_id, payload, files, logger)
                 ticket = ticket.merged_to
     # New issue, create a new <Ticket> instance
     if ticket is None:
-        if not getattr(settings, "QUEUE_EMAIL_BOX_UPDATE_ONLY", False):
-            ticket = Ticket.objects.create(
-                title=payload["subject"],
-                queue=queue,
-                submitter_email=sender_email,
-                created=now,
-                description=payload["body"],
-                priority=payload["priority"],
+        has_no_message_headers = not message_id and not in_reply_to and not references
+        is_likely_reply = _is_reply_subject(message)
+        if has_no_message_headers and is_likely_reply and ticket_id is None and previous_followup is None:
+            matched = match_ticket_by_fingerprint(
+                sender_email, payload["subject"], queue, logger
             )
-            ticket.save()
-            logger.debug("Created new ticket %s-%s" % (ticket.queue.slug, ticket.id))
-            new = True
-        else:
-            # Possibly an email with no body but has an attachment
-            logger.debug(
-                "The QUEUE_EMAIL_BOX_UPDATE_ONLY setting is True so new ticket not created."
-            )
-            return None
+            if matched is not None:
+                ticket = matched
+                new = False
+                logger.info(
+                    "Fuzzy dedup merged incoming email into existing ticket %s-%s"
+                    % (ticket.queue.slug, ticket.id)
+                )
+        if ticket is None:
+            if not getattr(settings, "QUEUE_EMAIL_BOX_UPDATE_ONLY", False):
+                ticket = Ticket.objects.create(
+                    title=payload["subject"],
+                    queue=queue,
+                    submitter_email=sender_email,
+                    created=now,
+                    description=payload["body"],
+                    priority=payload["priority"],
+                )
+                ticket.save()
+                logger.debug("Created new ticket %s-%s" % (ticket.queue.slug, ticket.id))
+                new = True
+            else:
+                logger.debug(
+                    "The QUEUE_EMAIL_BOX_UPDATE_ONLY setting is True so new ticket not created."
+                )
+                return None
     # Old issue being re-opened
     elif ticket.status == Ticket.CLOSED_STATUS:
         ticket.status = Ticket.REOPENED_STATUS
