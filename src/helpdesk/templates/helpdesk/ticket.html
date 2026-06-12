@@ -256,7 +256,9 @@
 
         <button class="btn btn-primary float-end" type='submit' onclick='$("#ShowFurtherEditOptions").click()'>{% trans "Update This Ticket" %}</button>
 
-        {% csrf_token %}</form>
+        {% csrf_token %}
+        <input type="hidden" name="_last_modified" value="{{ last_modified }}">
+        </form>
 
             </div>
         </div>

@@ -1,0 +1,171 @@
+{% extends "helpdesk/base.html" %}
+
+{% load i18n bootstrap4form %}
+
+{% block helpdesk_title %}{% trans "Edit Conflict Detected" %}{% endblock %}
+
+{% block helpdesk_breadcrumb %}
+    <li class="breadcrumb-item">
+        <a href="{% url 'helpdesk:list' %}">{% trans "Tickets" %}</a>
+    </li>
+    <li class="breadcrumb-item">
+        <a href="{{ ticket.get_absolute_url }}">{{ ticket.queue.slug }}-{{ ticket.id }}</a>
+    </li>
+    <li class="breadcrumb-item active">{% trans "Edit Conflict" %}</li>
+{% endblock %}
+
+{% block helpdesk_body %}
+<div class="col-lg-12">
+    <div class="card mb-3 border-warning">
+        <div class="card-header bg-warning text-white">
+            <h5><i class="fas fa-exclamation-triangle"></i> {% trans "Edit Conflict Detected" %}</h5>
+        </div>
+        <div class="card-body">
+            <p class="lead">
+                {% blocktrans %}This ticket has been modified by <strong>{{ conflicts.0.changed_by|default:"someone" }}</strong> since you began editing it at {{ conflicts.0.changed_at|date:"DATETIME_FORMAT" }}.{% endblocktrans %}
+            </p>
+            <p>
+                {% trans "The following fields have conflicting changes. Please review the differences and decide whether to overwrite with your changes or use the latest values." %}
+            </p>
+
+            <div class="table-responsive mt-4">
+                <table class="table table-bordered table-striped">
+                    <thead class="thead-light">
+                        <tr>
+                            <th>{% trans "Field" %}</th>
+                            <th>{% trans "Value When You Started Editing" %}</th>
+                            <th>{% trans "Current Value In Database" %}</th>
+                            <th>{% trans "Your Submitted Value" %}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for conflict in conflicts %}
+                        <tr class="{% if conflict.submitted_value and conflict.submitted_value != conflict.current_value %}table-danger{% else %}table-info{% endif %}">
+                            <td><strong>{{ conflict.label }}</strong></td>
+                            <td class="text-muted">
+                                {% if conflict.original_value %}
+                                    {{ conflict.original_value|linebreaksbr }}
+                                {% else %}
+                                    <em class="text-muted">{% trans "(empty)" %}</em>
+                                {% endif %}
+                            </td>
+                            <td class="font-weight-bold text-primary">
+                                {% if conflict.current_value %}
+                                    {{ conflict.current_value|linebreaksbr }}
+                                {% else %}
+                                    <em class="text-muted">{% trans "(empty)" %}</em>
+                                {% endif %}
+                                {% if conflict.changed_by %}
+                                    <br><small class="text-muted">{% trans "by" %} {{ conflict.changed_by }}</small>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if conflict.submitted_value %}
+                                    {{ conflict.submitted_value|linebreaksbr }}
+                                {% else %}
+                                    <em class="text-muted">{% trans "(no change)" %}</em>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h6>{% trans "How would you like to proceed?" %}</h6>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6 mb-2">
+                            <form method="post" action="{{ return_url }}">
+                                {% csrf_token %}
+                                {% if post_data %}
+                                    {% for key, value in post_data.items %}
+                                        {% if key != 'csrfmiddlewaretoken' and key != 'force_save' %}
+                                            {% if key == 'attachment' %}
+                                                {# Skip file attachments - user will need to re-upload #}
+                                            {% else %}
+                                                <input type="hidden" name="{{ key }}" value="{{ value }}">
+                                            {% endif %}
+                                        {% endif %}
+                                    {% endfor %}
+                                {% endif %}
+                                <input type="hidden" name="_last_modified" value="{{ last_modified }}">
+                                <input type="hidden" name="force_save" value="1">
+                                <button type="submit" class="btn btn-danger btn-block">
+                                    <i class="fas fa-save"></i>
+                                    {% trans "Overwrite With My Changes" %}
+                                </button>
+                                <small class="form-text text-muted mt-1">
+                                    {% trans "Warning: This will overwrite all changes made by others in the conflicting fields." %}
+                                </small>
+                            </form>
+                        </div>
+                        <div class="col-md-6 mb-2">
+                            <a href="{{ return_url }}" class="btn btn-secondary btn-block">
+                                <i class="fas fa-redo"></i>
+                                {% trans "Discard My Changes & Refresh" %}
+                            </a>
+                            <small class="form-text text-muted mt-1">
+                                {% trans "Reload the page with the latest data. Your current edits will be lost." %}
+                            </small>
+                        </div>
+                    </div>
+                    {% if from_ticket_view %}
+                    <div class="row mt-2">
+                        <div class="col-md-12">
+                            <a href="{{ ticket.get_absolute_url }}" class="btn btn-info btn-block">
+                                <i class="fas fa-eye"></i>
+                                {% trans "Back To Ticket (Keep My Comment In Clipboard)" %}
+                            </a>
+                            <small class="form-text text-muted mt-1">
+                                {% trans "Return to the ticket page. Copy your comment first if needed." %}
+                            </small>
+                        </div>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+
+            {% if conflicts %}
+                {% for conflict in conflicts %}
+                    {% if conflict.field == 'comment' %}
+                    <div class="card mt-4 border-info">
+                        <div class="card-header bg-info text-white">
+                            <h6><i class="fas fa-comments"></i> {% trans "Comment Details" %}</h6>
+                        </div>
+                        <div class="card-body">
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <h6>{% trans "New Comment Added (by others)" %}</h6>
+                                    <div class="bg-light p-3 rounded">
+                                        {% if conflict.current_value %}
+                                            {{ conflict.current_value|linebreaksbr }}
+                                        {% else %}
+                                            <em class="text-muted">{% trans "(none)" %}</em>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <h6>{% trans "Your Comment" %}</h6>
+                                    <div class="bg-light p-3 rounded">
+                                        {% if conflict.submitted_value %}
+                                            {{ conflict.submitted_value|linebreaksbr }}
+                                        {% else %}
+                                            <em class="text-muted">{% trans "(none)" %}</em>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {% endif %}
+                {% endfor %}
+            {% endif %}
+
+        </div>
+    </div>
+</div>
+{% endblock %}

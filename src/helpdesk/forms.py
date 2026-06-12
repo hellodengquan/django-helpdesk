@@ -111,6 +111,11 @@ class CustomFieldMixin(object):
 
 
 class EditTicketForm(CustomFieldMixin, forms.ModelForm):
+    _last_modified = forms.DateTimeField(
+        required=False,
+        widget=forms.HiddenInput(),
+    )
+
     class Meta:
         model = Ticket
         exclude = (
@@ -131,6 +136,8 @@ class EditTicketForm(CustomFieldMixin, forms.ModelForm):
         Add any custom fields that are defined to the form
         """
         super(EditTicketForm, self).__init__(*args, **kwargs)
+        if self.instance and self.instance.modified:
+            self.initial["_last_modified"] = self.instance.modified
 
         # Since title is max 100 characters limit it in editing
         if "title" in self.fields:

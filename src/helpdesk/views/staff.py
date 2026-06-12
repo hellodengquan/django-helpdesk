@@ -146,6 +146,159 @@ def get_form_extra_kwargs(user) -> dict[str, object]:
     }
 
 
+CONFLICT_FIELD_LABELS = {
+    "title": _("Title"),
+    "queue": _("Queue"),
+    "assigned_to": _("Assigned to"),
+    "status": _("Status"),
+    "description": _("Description"),
+    "resolution": _("Resolution"),
+    "priority": _("Priority"),
+    "due_date": _("Due on"),
+    "comment": _("Comment"),
+}
+
+
+def get_display_value(ticket, field_name):
+    """Get human-readable display value for a ticket field"""
+    if field_name == "status":
+        return ticket.get_status_display()
+    elif field_name == "queue":
+        return str(ticket.queue)
+    elif field_name == "assigned_to":
+        return ticket.get_assigned_to
+    elif field_name == "priority":
+        return ticket.get_priority_display()
+    value = getattr(ticket, field_name, "")
+    return str(value) if value else ""
+
+
+def detect_conflict_fields(original_ticket, current_ticket, submitted_data, submitted_customfields=None):
+    """Detect which fields have been changed by others vs what user submitted.
+    
+    Returns a list of dicts with conflict info:
+    [
+        {
+            'field': 'status',
+            'label': 'Status',
+            'original_value': 'Open',
+            'current_value': 'Resolved',
+            'submitted_value': 'Open',
+            'changed_by': 'username',
+            'changed_at': datetime,
+        }
+    ]
+    """
+    conflicts = []
+    
+    fields_to_check = ["title", "queue", "assigned_to", "status", "description", "resolution", "priority", "due_date"]
+    
+    latest_followup = current_ticket.followup_set.order_by("-date").first()
+    changed_by = None
+    changed_at = current_ticket.modified
+    if latest_followup and latest_followup.user:
+        changed_by = latest_followup.user.get_full_name() or latest_followup.user.get_username()
+    
+    for field in fields_to_check:
+        original_val = getattr(original_ticket, field)
+        current_val = getattr(current_ticket, field)
+        submitted_val = None
+        
+        if field in submitted_data:
+            submitted_val = submitted_data[field]
+            if field == "queue" and submitted_val:
+                try:
+                    q = Queue.objects.get(id=int(submitted_val))
+                    submitted_val = q
+                except (Queue.DoesNotExist, ValueError, TypeError):
+                    pass
+            elif field == "assigned_to" and submitted_val not in (None, "", -1, 0):
+                try:
+                    u = User.objects.get(id=int(submitted_val))
+                    submitted_val = u
+                except (User.DoesNotExist, ValueError, TypeError):
+                    pass
+            elif field == "priority" and submitted_val:
+                try:
+                    submitted_val = int(submitted_val)
+                except (ValueError, TypeError):
+                    pass
+        
+        if original_val != current_val:
+            orig_display = get_display_value(original_ticket, field)
+            curr_display = get_display_value(current_ticket, field)
+            sub_display = ""
+            if submitted_val is not None:
+                if field == "status":
+                    status_dict = dict(Ticket.STATUS_CHOICES)
+                    sub_display = status_dict.get(int(submitted_val), str(submitted_val)) if submitted_val else ""
+                elif field == "priority":
+                    prio_dict = dict(Ticket.PRIORITY_CHOICES)
+                    sub_display = prio_dict.get(int(submitted_val), str(submitted_val)) if submitted_val else ""
+                elif field == "queue":
+                    sub_display = str(submitted_val)
+                elif field == "assigned_to":
+                    if submitted_val == 0:
+                        sub_display = _("Unassigned")
+                    else:
+                        sub_display = str(submitted_val)
+                else:
+                    sub_display = str(submitted_val) if submitted_val else ""
+            
+            conflicts.append({
+                "field": field,
+                "label": CONFLICT_FIELD_LABELS.get(field, field),
+                "original_value": orig_display,
+                "current_value": curr_display,
+                "submitted_value": sub_display,
+                "changed_by": changed_by,
+                "changed_at": changed_at,
+            })
+    
+    comment = submitted_data.get("comment", "")
+    if comment and latest_followup and latest_followup.comment:
+        prev_last = original_ticket.followup_set.order_by("-date").first()
+        if (not prev_last or prev_last.id != latest_followup.id) and latest_followup.comment:
+            conflicts.append({
+                "field": "comment",
+                "label": CONFLICT_FIELD_LABELS.get("comment", "Comment"),
+                "original_value": prev_last.comment if prev_last else "",
+                "current_value": latest_followup.comment,
+                "submitted_value": comment,
+                "changed_by": changed_by,
+                "changed_at": latest_followup.date,
+            })
+    
+    if submitted_customfields and submitted_customfields.is_valid():
+        for field in CustomField.objects.all():
+            field_key = f"custom_{field.name}"
+            try:
+                orig_cf = TicketCustomFieldValue.objects.get(ticket=original_ticket, field=field)
+                orig_val = orig_cf.value
+            except TicketCustomFieldValue.DoesNotExist:
+                orig_val = None
+            try:
+                curr_cf = TicketCustomFieldValue.objects.get(ticket=current_ticket, field=field)
+                curr_val = curr_cf.value
+            except TicketCustomFieldValue.DoesNotExist:
+                curr_val = None
+            sub_val = submitted_customfields.cleaned_data.get(field_key, None)
+            sub_val = str(sub_val) if sub_val else ""
+            
+            if orig_val != curr_val:
+                conflicts.append({
+                    "field": field_key,
+                    "label": field.label,
+                    "original_value": str(orig_val) if orig_val else "",
+                    "current_value": str(curr_val) if curr_val else "",
+                    "submitted_value": sub_val,
+                    "changed_by": changed_by,
+                    "changed_at": changed_at,
+                })
+    
+    return conflicts
+
+
 @helpdesk_staff_member_required
 def dashboard(request):
     """
@@ -534,6 +687,7 @@ def view_ticket(request, ticket_id):
             "assignable_users": get_assignable_users(
                 helpdesk_settings.HELPDESK_STAFF_ONLY_TICKET_OWNERS
             ),
+            "last_modified": ticket.modified.isoformat() if ticket.modified else "",
             **extra_context_kwargs,
         },
     )
@@ -665,7 +819,7 @@ def update_ticket_view(request, ticket_id, *args, **kwargs):
     return UpdateTicketView.as_view()(request, *args, ticket_id=ticket_id, **kwargs)
 
 
-def save_ticket_update(form, ticket, user):
+def save_ticket_update(form, ticket, user, request=None):
     comment = form.data.get("comment", "")
     new_status = int(form.data.get("new_status", ticket.status))
     title = form.cleaned_data.get("title", ticket.title)
@@ -673,17 +827,48 @@ def save_ticket_update(form, ticket, user):
     priority = int(form.cleaned_data.get("priority", ticket.priority))
     queue = int(form.cleaned_data.get("queue", ticket.queue.id))
 
-    # custom fields
+    last_modified_str = form.data.get("_last_modified", "")
+    force_save = form.data.get("force_save", "0") == "1"
+    conflicts = None
+    if request and last_modified_str and not force_save:
+        from django.utils.dateparse import parse_datetime
+        try:
+            last_modified = parse_datetime(last_modified_str)
+        except (ValueError, TypeError):
+            last_modified = None
+        
+        if last_modified:
+            ticket.refresh_from_db()
+            db_modified = ticket.modified
+            if db_modified and db_modified > last_modified:
+                submitted_data = {
+                    "comment": comment,
+                    "title": title,
+                    "status": new_status,
+                    "owner": owner,
+                    "priority": priority,
+                    "queue": queue,
+                    "due_date": get_due_date_from_form_or_ticket(form, ticket),
+                }
+                customfields_form = EditTicketCustomFieldForm(
+                    form.cleaned_data or None, instance=ticket
+                )
+                conflicts = detect_conflicts_simple(
+                    ticket,
+                    last_modified,
+                    submitted_data,
+                    customfields_form,
+                )
+                return ticket, conflicts
+
     customfields_form = EditTicketCustomFieldForm(
         form.cleaned_data or None, instance=ticket
     )
 
-    # Check if a change happened on checklists
     new_checklists = {}
     changes_in_checklists = False
     for checklist in ticket.checklists.all():
         old_completed = set(checklist.tasks.completed().values_list("id", flat=True))
-        # Checklists will not be in the cleaned_data so access the submitted data
         new_checklist = set(
             map(int, form.data.getlist(f"checklist-{checklist.id}", []))
         )
@@ -691,9 +876,6 @@ def save_ticket_update(form, ticket, user):
         if new_checklist != old_completed:
             changes_in_checklists = True
 
-    # NOTE: jQuery's default for dates is mm/dd/yy
-    # very US-centric but for now that's the only format supported
-    # until we clean up code to internationalize a little more
     due_date = get_due_date_from_form_or_ticket(form, ticket)
     no_changes = all(
         [
@@ -712,7 +894,7 @@ def save_ticket_update(form, ticket, user):
         ]
     )
     if no_changes:
-        return ticket
+        return ticket, None
 
     update_ticket(
         user,
@@ -731,7 +913,7 @@ def save_ticket_update(form, ticket, user):
         customfields_form=customfields_form,
     )
 
-    return ticket
+    return ticket, None
 
 
 def return_to_ticket(user, ticket):
@@ -1310,13 +1492,299 @@ def timeline_ticket_list(request, query):
     return JsonResponse(query.get_timeline_context(), status=status.HTTP_200_OK)
 
 
+def get_original_ticket_snapshot(ticket, target_modified):
+    """Try to reconstruct the state of ticket at target_modified time by
+    looking at FollowUp and TicketChange records.
+    Returns a dict of field values.
+    """
+    snapshot = {
+        "title": ticket.title,
+        "queue": ticket.queue,
+        "queue_id": ticket.queue_id,
+        "assigned_to": ticket.assigned_to,
+        "assigned_to_id": ticket.assigned_to_id if ticket.assigned_to else None,
+        "status": ticket.status,
+        "description": ticket.description,
+        "resolution": ticket.resolution,
+        "priority": ticket.priority,
+        "due_date": ticket.due_date,
+    }
+    
+    field_map = {
+        _("Title"): "title",
+        _("Queue"): "queue_id",
+        _("Owner"): "assigned_to_id",
+        _("Status"): "status",
+        _("Priority"): "priority",
+        _("Due on"): "due_date",
+    }
+    
+    later_followups = FollowUp.objects.filter(
+        ticket=ticket,
+        date__gt=target_modified
+    ).order_by("-date")
+    
+    for fu in later_followups:
+        for tc in fu.ticketchange_set.all():
+            field_name = field_map.get(tc.field)
+            if field_name and tc.old_value is not None:
+                if field_name == "queue_id":
+                    try:
+                        snapshot[field_name] = int(tc.old_value)
+                        snapshot["queue"] = Queue.objects.get(id=int(tc.old_value))
+                    except (ValueError, Queue.DoesNotExist):
+                        pass
+                elif field_name == "assigned_to_id":
+                    if tc.old_value == _("Unassigned"):
+                        snapshot[field_name] = None
+                        snapshot["assigned_to"] = None
+                    else:
+                        try:
+                            u = User.objects.get(username=tc.old_value)
+                            snapshot[field_name] = u.id
+                            snapshot["assigned_to"] = u
+                        except User.DoesNotExist:
+                            try:
+                                u = User.objects.get(id=int(tc.old_value))
+                                snapshot[field_name] = u.id
+                                snapshot["assigned_to"] = u
+                            except (ValueError, User.DoesNotExist):
+                                pass
+                elif field_name == "status":
+                    status_reverse = {v: k for k, v in Ticket.STATUS_CHOICES}
+                    snapshot[field_name] = status_reverse.get(tc.old_value, ticket.status)
+                elif field_name == "priority":
+                    try:
+                        snapshot[field_name] = int(tc.old_value)
+                    except ValueError:
+                        pass
+                else:
+                    snapshot[field_name] = tc.old_value
+        
+        if fu.new_status is not None and fu.date > target_modified:
+            prev_fus = FollowUp.objects.filter(
+                ticket=ticket,
+                date__lt=fu.date,
+                new_status__isnull=False
+            ).order_by("-date")
+            if prev_fus.exists():
+                snapshot["status"] = prev_fus.first().new_status
+            else:
+                snapshot["status"] = Ticket.OPEN_STATUS
+    
+    return snapshot
+
+
+class SnapshotTicket:
+    """Lightweight wrapper to mimic a Ticket object from a snapshot dict"""
+    def __init__(self, snapshot, ticket):
+        self.title = snapshot["title"]
+        self.queue = snapshot["queue"]
+        self.assigned_to = snapshot["assigned_to"]
+        self.status = snapshot["status"]
+        self.description = snapshot["description"]
+        self.resolution = snapshot["resolution"]
+        self.priority = snapshot["priority"]
+        self.due_date = snapshot["due_date"]
+        self._meta = ticket._meta
+    
+    def get_status_display(self):
+        return dict(Ticket.STATUS_CHOICES).get(self.status, str(self.status))
+    
+    def get_assigned_to(self):
+        if not self.assigned_to:
+            return _("Unassigned")
+        if self.assigned_to.get_full_name():
+            return self.assigned_to.get_full_name()
+        return self.assigned_to.get_username()
+    get_assigned_to = property(get_assigned_to)
+    
+    def get_priority_display(self):
+        return dict(Ticket.PRIORITY_CHOICES).get(self.priority, str(self.priority))
+
+
+def detect_conflicts_simple(ticket, last_modified, submitted_data, customfields_form=None):
+    """Detect conflicts by comparing snapshot at last_modified time with current DB."""
+    conflicts = []
+    snapshot_dict = get_original_ticket_snapshot(ticket, last_modified)
+    original_ticket = SnapshotTicket(snapshot_dict, ticket)
+    
+    latest_followup = ticket.followup_set.order_by("-date").first()
+    changed_by = None
+    changed_at = ticket.modified
+    if latest_followup and latest_followup.user:
+        changed_by = latest_followup.user.get_full_name() or latest_followup.user.get_username()
+    
+    fields_to_check = [
+        ("title", str, None),
+        ("queue", str, None),
+        ("assigned_to", str, _("Unassigned")),
+        ("status", "status_display", None),
+        ("description", str, None),
+        ("resolution", str, None),
+        ("priority", "priority_display", None),
+        ("due_date", str, None),
+    ]
+    
+    for field, display_type, default_none in fields_to_check:
+        if display_type == "status_display":
+            orig_val = original_ticket.get_status_display()
+            curr_val = ticket.get_status_display()
+        elif display_type == "priority_display":
+            orig_val = original_ticket.get_priority_display()
+            curr_val = ticket.get_priority_display()
+        elif field == "queue":
+            orig_val = str(getattr(original_ticket, field))
+            curr_val = str(getattr(ticket, field))
+        elif field == "assigned_to":
+            orig_val = original_ticket.get_assigned_to
+            curr_val = ticket.get_assigned_to
+        else:
+            orig_val = str(getattr(original_ticket, field) or "") if getattr(original_ticket, field) else (default_none or "")
+            curr_val = str(getattr(ticket, field) or "") if getattr(ticket, field) else (default_none or "")
+        
+        sub_display = ""
+        if field in submitted_data:
+            sv = submitted_data[field]
+            if field == "status":
+                try:
+                    sub_display = dict(Ticket.STATUS_CHOICES).get(int(sv), str(sv))
+                except (ValueError, TypeError):
+                    sub_display = str(sv) if sv else ""
+            elif field == "priority":
+                try:
+                    sub_display = dict(Ticket.PRIORITY_CHOICES).get(int(sv), str(sv))
+                except (ValueError, TypeError):
+                    sub_display = str(sv) if sv else ""
+            elif field == "queue":
+                try:
+                    q = Queue.objects.get(id=int(sv))
+                    sub_display = str(q)
+                except (Queue.DoesNotExist, ValueError, TypeError):
+                    sub_display = str(sv) if sv else ""
+            elif field == "assigned_to":
+                if sv in (0, "0", None, ""):
+                    sub_display = _("Unassigned")
+                elif sv == -1:
+                    sub_display = curr_val
+                else:
+                    try:
+                        u = User.objects.get(id=int(sv))
+                        if u.get_full_name():
+                            sub_display = u.get_full_name()
+                        else:
+                            sub_display = u.get_username()
+                    except (User.DoesNotExist, ValueError, TypeError):
+                        sub_display = str(sv) if sv else ""
+            else:
+                sub_display = str(sv) if sv else ""
+        
+        if orig_val != curr_val:
+            conflicts.append({
+                "field": field,
+                "label": CONFLICT_FIELD_LABELS.get(field, field),
+                "original_value": orig_val,
+                "current_value": curr_val,
+                "submitted_value": sub_display,
+                "changed_by": changed_by,
+                "changed_at": changed_at,
+            })
+    
+    comment = submitted_data.get("comment", "")
+    if comment and latest_followup and latest_followup.comment:
+        prev_followups = FollowUp.objects.filter(
+            ticket=ticket,
+            date__lte=last_modified
+        ).order_by("-date")
+        prev_last = prev_followups.first()
+        if (not prev_last or prev_last.id != latest_followup.id) and latest_followup.comment:
+            conflicts.append({
+                "field": "comment",
+                "label": CONFLICT_FIELD_LABELS.get("comment", "Comment"),
+                "original_value": prev_last.comment if prev_last and prev_last.comment else "",
+                "current_value": latest_followup.comment,
+                "submitted_value": comment,
+                "changed_by": changed_by,
+                "changed_at": latest_followup.date,
+            })
+    
+    if customfields_form and customfields_form.is_valid():
+        for field in CustomField.objects.all():
+            field_key = f"custom_{field.name}"
+            try:
+                curr_cf = TicketCustomFieldValue.objects.get(ticket=ticket, field=field)
+                curr_val = curr_cf.value
+            except TicketCustomFieldValue.DoesNotExist:
+                curr_val = None
+            
+            orig_val = None
+            tcs = TicketChange.objects.filter(
+                followup__ticket=ticket,
+                followup__date__gt=last_modified,
+                field=field.name
+            ).order_by("-id")
+            if tcs.exists():
+                orig_val = tcs.first().old_value
+            else:
+                orig_val = curr_val
+            
+            sub_val = customfields_form.cleaned_data.get(field_key, None)
+            sub_display = str(sub_val) if sub_val else ""
+            
+            orig_display = str(orig_val) if orig_val else ""
+            curr_display = str(curr_val) if curr_val else ""
+            
+            if orig_display != curr_display:
+                conflicts.append({
+                    "field": field_key,
+                    "label": field.label,
+                    "original_value": orig_display,
+                    "current_value": curr_display,
+                    "submitted_value": sub_display,
+                    "changed_by": changed_by,
+                    "changed_at": changed_at,
+                })
+    
+    return conflicts
+
+
 @helpdesk_staff_member_required
 def edit_ticket(request, ticket_id):
     ticket = get_object_or_404(Ticket, id=ticket_id)
     ticket_perm_check(request, ticket)
 
     form = EditTicketForm(request.POST or None, instance=ticket)
-    if form.is_valid():
+    if request.method == "POST" and form.is_valid():
+        last_modified = form.cleaned_data.get("_last_modified")
+        force_save = request.POST.get("force_save", "0") == "1"
+
+        if last_modified and not force_save:
+            ticket.refresh_from_db()
+            db_modified = ticket.modified
+            if db_modified and db_modified > last_modified:
+                conflicts = detect_conflicts_simple(
+                    ticket,
+                    last_modified,
+                    form.cleaned_data,
+                    None
+                )
+                
+                if conflicts:
+                    customfields_form = EditTicketCustomFieldForm(request.POST or None, instance=ticket)
+                    return render(
+                        request,
+                        "helpdesk/ticket_conflict.html",
+                        {
+                            "form": form,
+                            "ticket": ticket,
+                            "conflicts": conflicts,
+                            "customfields_form": customfields_form,
+                            "post_data": request.POST,
+                            "last_modified": db_modified.isoformat(),
+                            "return_url": reverse("helpdesk:edit_ticket", args=[ticket.id]),
+                        },
+                    )
+
         ticket = form.save()
         return redirect(ticket)
 
@@ -1413,8 +1881,25 @@ class UpdateTicketView(
             )
         except PermissionDenied:
             return redirect_to_login(self.request.path, "helpdesk:login")
-        # Avoid calling super as it will call the save() method on the form
-        save_ticket_update(form, self.ticket, self.request.user)
+        self.ticket, conflicts = save_ticket_update(form, self.ticket, self.request.user, request=self.request)
+        if conflicts:
+            customfields_form = EditTicketCustomFieldForm(
+                self.request.POST or None, instance=self.ticket
+            )
+            return render(
+                self.request,
+                "helpdesk/ticket_conflict.html",
+                {
+                    "form": form,
+                    "ticket": self.ticket,
+                    "conflicts": conflicts,
+                    "customfields_form": customfields_form,
+                    "post_data": self.request.POST,
+                    "last_modified": self.ticket.modified.isoformat(),
+                    "return_url": reverse("helpdesk:view", args=[self.ticket.id]),
+                    "from_ticket_view": True,
+                },
+            )
         return return_to_ticket(self.request.user, self.ticket)
 
 
