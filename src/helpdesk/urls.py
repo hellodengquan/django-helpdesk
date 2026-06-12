@@ -115,6 +115,11 @@ if helpdesk_settings.HELPDESK_UI_ENABLED:
         path("rss/", staff.rss_list, name="rss_index"),
         path("reports/", staff.report_index, name="report_index"),
         re_path(r"^reports/(?P<report>\w+)/$", staff.run_report, name="run_report"),
+        path(
+            "dedup-metrics/",
+            staff.dedup_metrics_dashboard,
+            name="dedup_metrics_dashboard",
+        ),
         path("saved-searches/", staff.saved_searches_list, name="saved_searches_list"),
         path("save_query/", staff.save_query, name="savequery"),
         path("delete_query/<int:pk>/", staff.delete_saved_query, name="delete_query"),

@@ -1,0 +1,103 @@
+{% extends "helpdesk/base.html" %}{% load i18n %}
+
+{% block helpdesk_title %}{% trans "Deduplication Metrics" %}{% endblock %}
+
+{% block helpdesk_breadcrumb %}
+<li class="breadcrumb-item">
+    <a href="{% url 'helpdesk:report_index' %}">{% trans "Reports &amp; Statistics" %}</a>
+</li>
+<li class="breadcrumb-item active">{% trans "Deduplication Metrics" %}</li>
+{% endblock %}
+
+{% block helpdesk_body %}
+<h2>{% trans "Fuzzy Deduplication Metrics — Last 7 Days" %}</h2>
+
+<p class="text-muted">
+{% blocktrans %}These counters track incoming emails handled by the fuzzy
+fingerprint dedup path, which triggers when Message-Id and References
+headers are missing.{% endblocktrans %}
+{% if prometheus_available %}
+<span class="badge bg-success ms-2">Prometheus exporter enabled</span>
+{% else %}
+<span class="badge bg-secondary ms-2">Prometheus client unavailable — using in-process counters only</span>
+{% endif %}
+</p>
+
+<div class="card mb-3">
+    <div class="card-header">
+        <i class="fas fa-chart-bar"></i>
+        {% trans "Aggregate Totals" %}
+    </div>
+    <div class="card-body">
+        <div class="row">
+            <div class="col-md-4 mb-3">
+                <div class="card text-white bg-success o-hidden h-100">
+                    <div class="card-body">
+                        <div class="card-body-icon"><i class="fas fa-link"></i></div>
+                        <div class="me-5">{{ totals.merge_hits }} {% trans "Merged" %}</div>
+                    </div>
+                    <div class="card-footer text-white clearfix small z-1">
+                        <span class="float-start">{% trans "Fingerprint match — merged into existing ticket" %}</span>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4 mb-3">
+                <div class="card text-white bg-info o-hidden h-100">
+                    <div class="card-body">
+                        <div class="card-body-icon"><i class="fas fa-plus-circle"></i></div>
+                        <div class="me-5">{{ totals.new_tickets }} {% trans "New" %}</div>
+                    </div>
+                    <div class="card-footer text-white clearfix small z-1">
+                        <span class="float-start">{% trans "No fingerprint match — created new ticket" %}</span>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4 mb-3">
+                <div class="card text-white bg-warning o-hidden h-100">
+                    <div class="card-body">
+                        <div class="card-body-icon"><i class="fas fa-clock"></i></div>
+                        <div class="me-5">{{ totals.window_misses }} {% trans "Window Miss" %}</div>
+                    </div>
+                    <div class="card-footer text-white clearfix small z-1">
+                        <span class="float-start">{% trans "Fingerprint matched but outside dedup window" %}</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card mb-3">
+    <div class="card-header">
+        <i class="fas fa-list"></i>
+        {% trans "Per-Queue Breakdown" %}
+    </div>
+    <div class="card-body">
+        <div class="table-responsive">
+            <table class="table table-striped table-bordered table-hover">
+                <thead>
+                    <tr>
+                        <th>{% trans "Queue" %}</th>
+                        <th class="text-end">{% trans "Merged" %}</th>
+                        <th class="text-end">{% trans "New Tickets" %}</th>
+                        <th class="text-end">{% trans "Window Miss" %}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in rows %}
+                    <tr data-queue-slug="{{ row.queue_slug }}">
+                        <td><strong>{{ row.queue_title }}</strong> <span class="text-muted small">({{ row.queue_slug }})</span></td>
+                        <td class="text-end">{{ row.merge_hits }}</td>
+                        <td class="text-end">{{ row.new_tickets }}</td>
+                        <td class="text-end">{{ row.window_misses }}</td>
+                    </tr>
+                    {% empty %}
+                    <tr><td colspan="4">{% trans "No data available yet." %}</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+{% endblock %}

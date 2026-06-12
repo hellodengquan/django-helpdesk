@@ -2220,3 +2220,58 @@ def delete_checklist_template(request, checklist_template_id):
             "checklist_template": checklist_template,
         },
     )
+
+
+@helpdesk_staff_member_required
+def dedup_metrics_dashboard(request):
+    """Show the last 7 days of fuzzy dedup counters grouped by queue.
+
+    Displays three counters per queue:
+      * merge hits   - incoming emails merged into existing tickets
+      * new tickets  - incoming emails that did not match and opened a ticket
+      * window misses - sender+subject matched but the ticket was outside the
+                       dedup time window, causing a new ticket to be opened.
+    """
+    from helpdesk import metrics as dedup_metrics
+
+    user_queues = HelpdeskUser(request.user).get_queues()
+    visible_queues = user_queues if user_queues else Queue.objects.all()
+
+    all_counts = dedup_metrics.get_all_queues_7day_counts()
+
+    rows = []
+    for queue in visible_queues:
+        counts = all_counts.get(
+            queue.slug,
+            {
+                dedup_metrics.METRIC_MERGE_HIT: 0,
+                dedup_metrics.METRIC_NEW_TICKET: 0,
+                dedup_metrics.METRIC_WINDOW_MISS: 0,
+            },
+        )
+        rows.append(
+            {
+                "queue_id": queue.id,
+                "queue_slug": queue.slug,
+                "queue_title": queue.title,
+                "merge_hits": counts.get(dedup_metrics.METRIC_MERGE_HIT, 0),
+                "new_tickets": counts.get(dedup_metrics.METRIC_NEW_TICKET, 0),
+                "window_misses": counts.get(dedup_metrics.METRIC_WINDOW_MISS, 0),
+            }
+        )
+
+    totals = {
+        "merge_hits": sum(row["merge_hits"] for row in rows),
+        "new_tickets": sum(row["new_tickets"] for row in rows),
+        "window_misses": sum(row["window_misses"] for row in rows),
+    }
+
+    return render(
+        request,
+        "helpdesk/dedup_metrics_dashboard.html",
+        {
+            "rows": rows,
+            "totals": totals,
+            "prometheus_available": dedup_metrics.PROMETHEUS_AVAILABLE,
+        },
+    )

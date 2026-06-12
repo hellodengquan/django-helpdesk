@@ -23,6 +23,7 @@ from email_reply_parser import EmailReplyParser
 from helpdesk import settings as helpdesk_settings
 from helpdesk.exceptions import DeleteIgnoredTicketException, IgnoreTicketException
 from helpdesk.lib import process_attachments, safe_template_context
+from helpdesk import metrics as dedup_metrics
 from helpdesk.models import FollowUp, IgnoreEmail, Queue, Ticket
 from helpdesk.signals import new_ticket_done, update_ticket_done
 import imaplib
@@ -605,7 +606,7 @@ def _is_reply_subject(message) -> bool:
 
 def match_ticket_by_fingerprint(
     sender_email: str, subject: str, queue: Queue, logger: logging.Logger
-) -> typing.Optional[Ticket]:
+) -> typing.Tuple[typing.Optional[Ticket], bool]:
     """Find a recent ticket using a fuzzy fingerprint composed of sender,
     normalised subject and a configurable time window.
 
@@ -619,7 +620,9 @@ def match_ticket_by_fingerprint(
     :param subject: the subject with Re/Fw prefixes already stripped
     :param queue: the queue the incoming email is assigned to
     :param logger: logger instance
-    :returns: the matched Ticket or None
+    :returns: a 2-tuple ``(matched_ticket, was_window_miss)``.  The second
+        element is True only when a ticket with a matching sender+subject
+        exists but is older than the configured dedup window.
     """
     if queue.fingerprint_window_hours is not None:
         window_hours = queue.fingerprint_window_hours
@@ -631,13 +634,13 @@ def match_ticket_by_fingerprint(
 
     normalised_subject = subject.strip().lower()
 
-    candidates = Ticket.objects.filter(
+    in_window = Ticket.objects.filter(
         submitter_email=sender_email,
         queue=queue,
         created__gte=cutoff,
     ).order_by("-created")
 
-    for candidate in candidates:
+    for candidate in in_window:
         if candidate.title.strip().lower() == normalised_subject:
             logger.info(
                 "Fuzzy fingerprint matched existing ticket %s-%s "
@@ -651,9 +654,29 @@ def match_ticket_by_fingerprint(
                     source,
                 )
             )
-            return candidate
+            return candidate, False
 
-    return None
+    older = Ticket.objects.filter(
+        submitter_email=sender_email,
+        queue=queue,
+        created__lt=cutoff,
+    ).order_by("-created")
+
+    for candidate in older:
+        if candidate.title.strip().lower() == normalised_subject:
+            logger.info(
+                "Fuzzy fingerprint found ticket %s-%s but it is older "
+                "than the %dh dedup window (source=%s); skipping merge"
+                % (
+                    candidate.queue.slug,
+                    candidate.id,
+                    window_hours,
+                    source,
+                )
+            )
+            return None, True
+
+    return None, False
 
 
 def create_object_from_email_message(message, ticket_id, payload, files, logger):
@@ -726,16 +749,25 @@ def create_object_from_email_message(message, ticket_id, payload, files, logger)
     if ticket is None:
         has_no_message_headers = not message_id and not in_reply_to and not references
         is_likely_reply = _is_reply_subject(message)
+        used_fuzzy_match = False
         if has_no_message_headers and is_likely_reply and ticket_id is None and previous_followup is None:
-            matched = match_ticket_by_fingerprint(
+            matched, was_window_miss = match_ticket_by_fingerprint(
                 sender_email, payload["subject"], queue, logger
             )
             if matched is not None:
                 ticket = matched
                 new = False
+                used_fuzzy_match = True
+                dedup_metrics.inc_metric(
+                    dedup_metrics.METRIC_MERGE_HIT, queue.slug
+                )
                 logger.info(
                     "Fuzzy dedup merged incoming email into existing ticket %s-%s"
                     % (ticket.queue.slug, ticket.id)
+                )
+            elif was_window_miss:
+                dedup_metrics.inc_metric(
+                    dedup_metrics.METRIC_WINDOW_MISS, queue.slug
                 )
         if ticket is None:
             if not getattr(settings, "QUEUE_EMAIL_BOX_UPDATE_ONLY", False):
@@ -750,6 +782,10 @@ def create_object_from_email_message(message, ticket_id, payload, files, logger)
                 ticket.save()
                 logger.debug("Created new ticket %s-%s" % (ticket.queue.slug, ticket.id))
                 new = True
+                if has_no_message_headers and is_likely_reply and ticket_id is None and previous_followup is None:
+                    dedup_metrics.inc_metric(
+                        dedup_metrics.METRIC_NEW_TICKET, queue.slug
+                    )
             else:
                 logger.debug(
                     "The QUEUE_EMAIL_BOX_UPDATE_ONLY setting is True so new ticket not created."
