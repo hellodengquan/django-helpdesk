@@ -543,3 +543,1025 @@ print(f'已关闭 {updated} 个 SSO 用户的邮件通知')
 | 3 | Queue 开关生效 | 选一个 Queue 关 `enable_notifications_on_email_events` → 上述 SSO 用户在该队列工单的订阅 → 添加评论 | 用户**不**收到邮件（验证开关可控） | §5.1.2 Queue 级别开关 |
 | 4 | UserSettings 默认值正确 | 新建 SSO 用户 → 查其 `usersettings_helpdesk.email_on_ticket_change` | 值为 `True`（或你在 `HELPDESK_DEFAULT_SETTINGS` 中设的值） | §4.2 默认值来源 |
 | 5 | cron 定时补全生效 | 手动往 auth_user 插一个测试用户（绕过 post_save） → 手动跑 `create_usersettings` → 验证该用户有了 UserSettings | 新用户 UserSettings 被创建 | §5.3 cron 补全 |
+
+---
+
+## 六、Monitoring Playbook（Prometheus + Grafana 可直接落地版）
+
+> 本章节提供**可直接复制粘贴**的 Prometheus 告警规则、metrics 导出方法、以及 Grafana 看板 JSON 骨架。所有规则均对应前面章节提到的三类问题：UserSettings 缺失、assigned_to 邮件丢失、ticket_cc 抄送失效。
+
+### 前置条件：安装 django-prometheus
+
+django-helpdesk 源码本身没有内置 metrics 导出（`grep -i "prometheus\|metrics" src/helpdesk/` 无匹配），需要通过 `django-prometheus` 来暴露 Django 层和数据库层 metrics。
+
+**安装**：
+```bash
+pip install django-prometheus
+```
+
+**配置 `settings.py`**：
+```python
+INSTALLED_APPS = [
+    'django_prometheus',
+    'helpdesk',
+    # ...
+]
+
+MIDDLEWARE = [
+    'django_prometheus.middleware.PrometheusBeforeMiddleware',
+    # ... 其他 middleware ...
+    'django_prometheus.middleware.PrometheusAfterMiddleware',
+]
+
+# 数据库后端（可选，但推荐，可获取 DB 操作 metrics）
+DATABASES = {
+    'default': {
+        'ENGINE': 'django_prometheus.db.backends.postgresql',  # 或 mysql / sqlite3
+        'NAME': 'helpdesk',
+        # ...
+    }
+}
+```
+
+**配置 `urls.py`**：
+```python
+from django_prometheus import exports
+
+urlpatterns = [
+    # ...
+    path('metrics/', exports.ExportToDjangoView.as_view(), name='prometheus-metrics'),
+]
+```
+
+---
+
+### 6.1 问题分类一：UserSettings 缺失（导致 `RelatedObjectDoesNotExist` → 500）
+
+**代码路径**：
+
+1. 分配工单 / 评论更新时直接访问反向外键，无 try/except 兜底：
+   ```python
+   # src/helpdesk/update_ticket.py:164-170
+   if ticket.assigned_to and (
+       ticket.assigned_to.usersettings_helpdesk.email_on_ticket_change  # ← 不存在抛异常
+       or (reassigned and ticket.assigned_to.usersettings_helpdesk.email_on_ticket_assign)
+   ):
+   ```
+   同样的模式出现在 `src/helpdesk/forms.py:425-428`（新工单分配）和 `src/helpdesk/views/staff.py:849-852`（批量关闭）。
+
+2. `post_save` 信号仅在 `created=True` 时触发，`bulk_create` / 原生 SQL / 已存在用户后续 save 均不触发：
+   ```python
+   # src/helpdesk/models.py:1786-1799
+   def create_usersettings(sender, instance, created, **kwargs):
+       if created:  # ← 仅新建时
+           UserSettings.objects.create(user=instance)
+   ```
+
+3. `create_usersettings` 管理命令使用 `get_or_create` 兜底（cron 执行）：
+   ```python
+   # src/helpdesk/management/commands/create_usersettings.py:30-33
+   def handle(self, *args, **options):
+       for u in User.objects.all():
+           UserSettings.objects.get_or_create(user=u)  # ← 幂等
+   ```
+
+#### 6.1.1 监控方案
+
+**方案 A：通过自定义 Django Command 导出 Gauge（推荐，最准确）**
+
+新增 `src/helpdesk/management/commands/export_helpdesk_metrics.py`：
+```python
+from django.contrib.auth import get_user_model
+from django.core.management.base import BaseCommand
+from helpdesk.models import UserSettings, Ticket, Queue, TicketCC
+from prometheus_client import CollectorRegistry, Gauge, write_to_textfile
+
+User = get_user_model()
+REGISTRY = CollectorRegistry()
+
+HELPDESK_USERSETTINGS_MISSING = Gauge(
+    'helpdesk_usersettings_missing_total',
+    'Number of User rows without corresponding UserSettings',
+    registry=REGISTRY,
+)
+
+HELPDESK_USERSETTINGS_MISSING_ASSIGNED = Gauge(
+    'helpdesk_usersettings_missing_assigned_total',
+    'Number of Users with assigned open tickets but no UserSettings (HIGH RISK)',
+    registry=REGISTRY,
+)
+
+HELPDESK_TICKETCC_QUEUE_DISABLED = Gauge(
+    'helpdesk_ticketcc_queue_disabled_total',
+    'Number of active TicketCC subscriptions whose Queue has enable_notifications_on_email_events=False',
+    ['queue_slug'],
+    registry=REGISTRY,
+)
+
+HELPDESK_EMAIL_SEND_FAILURES = Gauge(
+    'helpdesk_email_send_failures_total',
+    'Count of SMTP failures captured from helpdesk logs',
+    ['role', 'template_name'],
+    registry=REGISTRY,
+)
+
+class Command(BaseCommand):
+    help = 'Export helpdesk metrics to Prometheus .prom file'
+
+    def add_arguments(self, parser):
+        parser.add_argument('output_path', type=str, help='Path to write .prom file')
+
+    def handle(self, *args, **options):
+        missing = User.objects.exclude(
+            pk__in=UserSettings.objects.values_list('user_id', flat=True)
+        ).count()
+        HELPDESK_USERSETTINGS_MISSING.set(missing)
+
+        from helpdesk.settings import TICKET_OPEN_STATUSES
+        missing_assigned = User.objects.filter(
+            assigned_to__status__in=TICKET_OPEN_STATUSES
+        ).exclude(
+            pk__in=UserSettings.objects.values_list('user_id', flat=True)
+        ).distinct().count()
+        HELPDESK_USERSETTINGS_MISSING_ASSIGNED.set(missing_assigned)
+
+        for q in Queue.objects.all():
+            count = TicketCC.objects.filter(
+                ticket__queue=q,
+                ticket__status__in=TICKET_OPEN_STATUSES,
+            ).count() if not q.enable_notifications_on_email_events else 0
+            HELPDESK_TICKETCC_QUEUE_DISABLED.labels(queue_slug=q.slug).set(count)
+
+        write_to_textfile(options['output_path'], REGISTRY)
+        self.stdout.write(self.style.SUCCESS('Metrics exported successfully'))
+```
+
+**配合 cron 定时导出 + node_exporter textfile collector**：
+```cron
+# 每 5 分钟导出一次
+*/5 * * * * cd /path/to/project && /path/to/venv/bin/python manage.py export_helpdesk_metrics /var/lib/node_exporter/helpdesk.prom
+```
+
+**方案 B：无代码侵入，仅用 django-prometheus 自带 metrics + 日志监控**
+
+如果不想新增代码，可以通过以下组合间接监控：
+
+1. **HTTP 500 异常率监控**（`django_http_responses_total_by_status_total{status="500"}`）
+2. **日志关键字告警**（`RelatedObjectDoesNotExist` / `UserSettings`）
+
+---
+
+#### 6.1.2 Prometheus 告警规则（可直接复制）
+
+```yaml
+groups:
+- name: helpdesk_usersettings
+  rules:
+
+  # 告警级别：CRITICAL — 有开放工单的负责人缺失 UserSettings，下一次评论/更新必 500
+  - alert: HelpdeskUserSettingsMissingForAssigned
+    expr: helpdesk_usersettings_missing_assigned_total > 0
+    for: 1m
+    labels:
+      severity: critical
+      team: sre
+      category: helpdesk_notification
+    annotations:
+      summary: "High risk: {{ $value }} User(s) with open assigned tickets have NO UserSettings"
+      description: "These users are assigned to at least one open ticket but lack UserSettings. Any follow-up / reassign on those tickets will trigger HTTP 500. Run `python manage.py create_usersettings` immediately. Source: src/helpdesk/update_ticket.py:164-170"
+      runbook: "docs/notification-recipients.md#612-prometheus-"
+
+  # 告警级别：WARNING — 存在缺失 UserSettings 的用户（暂时未分配工单，但风险存在）
+  - alert: HelpdeskUserSettingsMissing
+    expr: helpdesk_usersettings_missing_total > 0
+    for: 5m
+    labels:
+      severity: warning
+      team: sre
+      category: helpdesk_notification
+    annotations:
+      summary: "{{ $value }} User(s) are missing UserSettings"
+      description: "These users were likely synced via LDAP/SSO bypassing post_save signal (src/helpdesk/models.py:1786-1799). Run `python manage.py create_usersettings` (src/helpdesk/management/commands/create_usersettings.py:30-33) or ensure cron job is running."
+      runbook: "docs/notification-recipients.md#52-当天首次补全放流量前必须执行"
+
+  # 告警级别：WARNING — create_usersettings cron 未在预期时间执行（每天 >24h 未执行）
+  - alert: HelpdeskCreateUserSettingsCronStale
+    expr: time() - helpdesk_usersettings_missing_timestamp_seconds > 86400
+    for: 10m
+    labels:
+      severity: warning
+      team: sre
+      category: helpdesk_notification
+    annotations:
+      summary: "create_usersettings cron job hasn't run for more than 24h"
+      description: "Check cron status at /etc/cron.d/helpdesk. Expected: 0 3 * * * (src/helpdesk/management/commands/create_usersettings.py:30-33)"
+```
+
+> **注**：`helpdesk_usersettings_missing_timestamp_seconds` 是在 export 命令末尾追加的时间戳 gauge，建议加入 export 脚本：
+> ```python
+> HELPDESK_EXPORT_TIMESTAMP = Gauge('helpdesk_usersettings_missing_timestamp_seconds', 'Last export time', registry=REGISTRY)
+> HELPDESK_EXPORT_TIMESTAMP.set(time.time())
+> ```
+
+---
+
+### 6.2 问题分类二：assigned_to 邮件丢失（用户收不到分配/变更通知）
+
+**代码路径**：
+
+`send_templated_mail` 是所有邮件的统一出口，定义于 `src/helpdesk/templated_email.py:11-135`。
+
+关键调用链（assigned_to 通知）：
+1. 各场景判断是否发送（基于 `usersettings_helpdesk.email_on_ticket_change/assign`）→ `src/helpdesk/update_ticket.py:164-170`
+2. 调用 `ticket.send()` → `src/helpdesk/models.py:638-694`
+3. 内部 `send(role, recipient)` 闭包调用 `send_templated_mail` → `src/helpdesk/models.py:674-684`
+4. `send_templated_mail` 捕获 `SMTPException`，记录 `logger.exception()`，根据 `fail_silently` 决定是否向上抛 → `src/helpdesk/templated_email.py:127-134`
+
+**注意**：批量关闭和工单合并场景传入了 `fail_silently=True`（`src/helpdesk/views/staff.py:858`, `src/helpdesk/views/staff.py:985`），此时 SMTP 失败不会抛 500，但**仍然会写 `logger.exception` 日志**。
+
+**用户侧静默失败原因**：
+- UserSettings 的 `email_on_ticket_change=False` 或 `email_on_ticket_assign=False`（代码根本不会调用 `send_templated_mail`）
+- SMTP 服务器拒绝（被 logger.exception 捕获）
+- 邮件模板不存在（`EmailTemplate.DoesNotExist`）→ 写 `logger.warning`，`return` 不发送（`src/helpdesk/templated_email.py:65-76`）
+
+#### 6.2.1 监控方案
+
+**基于日志 + promtail 采集**（推荐，最准确）：
+
+`promtail-config.yaml` 关键配置：
+```yaml
+scrape_configs:
+- job_name: helpdesk_app_logs
+  static_configs:
+  - targets:
+      - localhost
+    labels:
+      job: helpdesk_app_logs
+      __path__: /var/log/helpdesk/*.log
+
+  pipeline_stages:
+  # 匹配 SMTPException 日志
+  - match:
+      selector: '{job="helpdesk_app_logs"}'
+      stages:
+      - regex:
+          expression: 'SMTPException raised while sending email to (?P<recipient>\S+)'
+      - labels:
+          recipient:
+      - match:
+          selector: '{job="helpdesk_app_logs", recipient!=""}'
+          stages:
+          - metrics:
+              helpdesk_smtp_failure_total:
+                type: Counter
+                description: "Total SMTP failures when sending helpdesk emails"
+                config:
+                  match_all: true
+                  action: inc
+
+  # 匹配模板不存在日志
+  - match:
+      selector: '{job="helpdesk_app_logs"}'
+      stages:
+      - regex:
+          expression: 'template "(?P<template_name>\S+)" does not exist'
+      - labels:
+          template_name:
+      - match:
+          selector: '{job="helpdesk_app_logs", template_name!=""}'
+          stages:
+          - metrics:
+              helpdesk_template_missing_total:
+                type: Counter
+                description: "Total missing template incidents"
+                config:
+                  match_all: true
+                  action: inc
+```
+
+#### 6.2.2 Prometheus 告警规则
+
+```yaml
+groups:
+- name: helpdesk_assigned_to_email
+  rules:
+
+  # 告警级别：WARNING — 最近 5 分钟内 SMTP 发送失败 > 0
+  - alert: HelpdeskSMTPFailures
+    expr: increase(helpdesk_smtp_failure_total[5m]) > 0
+    for: 1m
+    labels:
+      severity: warning
+      team: sre
+      category: helpdesk_notification
+    annotations:
+      summary: "{{ $value | humanize }} SMTP failure(s) in last 5 minutes"
+      description: "Failed to send email to recipients. Check SMTP server status and helpdesk logs. Source: src/helpdesk/templated_email.py:127-134 (SMTPException handler)"
+      affected_role: "assigned_to (src/helpdesk/update_ticket.py:164-170 calls ticket.send → src/helpdesk/models.py:674-684 → send_templated_mail)"
+
+  # 告警级别：CRITICAL — 邮件模板缺失（该场景所有邮件都发不出）
+  - alert: HelpdeskEmailTemplateMissing
+    expr: increase(helpdesk_template_missing_total[5m]) > 0
+    for: 1m
+    labels:
+      severity: critical
+      team: sre
+      category: helpdesk_notification
+    annotations:
+      summary: "Email template '{{ $labels.template_name }}' is missing!"
+      description: "All emails using this template will be silently dropped. Source: src/helpdesk/templated_email.py:65-76 (EmailTemplate.DoesNotExist handler)"
+      runbook: "Go to Django Admin → EmailTemplate and create template '{{ $labels.template_name }}' for the required locale"
+
+  # 告警级别：INFO — assigned_to 角色通知比率下降（可选，需配合自定义 metrics）
+  # 如果你在代码中加入了发送计数 Counter（如下），可以用该规则监控静默失败：
+  #
+  #   # 在 send_templated_mail 开头加：
+  #   from prometheus_client import Counter
+  #   EMAIL_SENT = Counter('helpdesk_email_sent_total', 'Emails sent', ['role', 'template_name', 'status'])
+  #   # 成功发送后: EMAIL_SENT.labels(role=context.get('role', 'unknown'), template_name=template_name, status='success').inc()
+  #   # 失败后: EMAIL_SENT.labels(role=context.get('role', 'unknown'), template_name=template_name, status='failure').inc()
+  #
+  - alert: HelpdeskAssignedToEmailDrop
+    expr: |
+      rate(helpdesk_email_sent_total{role="assigned_to",status="success"}[1h])
+      /
+      (rate(helpdesk_email_sent_total{role="assigned_to",status="success"}[1h]) + rate(helpdesk_email_sent_total{role="assigned_to",status="failure"}[1h]))
+      < 0.8
+    for: 15m
+    labels:
+      severity: warning
+      team: sre
+      category: helpdesk_notification
+    annotations:
+      summary: "Assigned_to email delivery ratio dropped below 80%"
+      description: "Check if assigned_to users have email_on_ticket_change=False (src/helpdesk/update_ticket.py:164-170 condition) or SMTP issues"
+```
+
+---
+
+### 6.3 问题分类三：ticket_cc 抄送失效（订阅者收不到通知）
+
+**代码路径**：
+
+`Ticket.send()` 中决定是否遍历 `ticketcc_set` 的条件（`src/helpdesk/models.py:691-693`）：
+```python
+# src/helpdesk/models.py:691-693
+if self.queue.enable_notifications_on_email_events:
+    for cc in self.ticketcc_set.select_related("user").all():
+        send("ticket_cc", cc.email_address)  # ← 仅当 Queue 开关打开时才会遍历
+```
+
+`TicketCC.email_address` 的解析（`src/helpdesk/models.py:1946-1952`）：
+```python
+# src/helpdesk/models.py:1946-1952
+def _email_address(self):
+    if self.user and self.user.email is not None:
+        return self.user.email    # ← SSO 外部用户走这里
+    else:
+        return self.email          # ← 裸邮箱订阅走这里
+email_address = property(_email_address)
+```
+
+**抄送失效根因**：
+1. `queue.enable_notifications_on_email_events=False` → 整支循环被跳过（最常见）
+2. `TicketCC.user` 为 SSO 用户但该用户的 `user.email` 为空 → 返回 `None` → `should_receive(None)` 返回 False（`src/helpdesk/models.py:671-672`）
+3. 调用方 `roles` 字典未包含 `ticket_cc` key → `send(role, recipient)` 闭包中的 `role in roles` 条件不满足（`src/helpdesk/models.py:675`）
+4. Queue 级 `updated_ticket_cc` 为空（该地址始终会被尝试发送，但空值被 `should_receive` 过滤）
+
+#### 6.3.1 监控方案
+
+**基于自定义 metrics（§6.1.1 的 `export_helpdesk_metrics` 命令已有）**：
+- `helpdesk_ticketcc_queue_disabled_total{queue_slug="..."}`：每个 Queue 下有多少活跃 TicketCC 订阅但 Queue 开关为 False
+
+**可选：在 `Ticket.send()` 中加入计数 Counter**（如果你愿意改代码，最精确）：
+
+在 `src/helpdesk/models.py:638` 之前添加：
+```python
+from prometheus_client import Counter
+
+TICKET_CC_ATTEMPTS = Counter(
+    'helpdesk_ticket_cc_attempts_total',
+    'Number of ticket_cc notification attempts',
+    ['queue_slug', 'enabled', 'role_present', 'recipient_valid'],
+)
+```
+
+然后在 `send("ticket_cc", ...)` 调用前后（`src/helpdesk/models.py:687`, `src/helpdesk/models.py:691-693`）埋点：
+```python
+# 发送 queue.updated_ticket_cc 前
+cc_enabled = self.queue.enable_notifications_on_email_events
+role_present = "ticket_cc" in roles
+recipient_valid = should_receive(self.queue.updated_ticket_cc)
+TICKET_CC_ATTEMPTS.labels(
+    queue_slug=self.queue.slug,
+    enabled=str(cc_enabled),
+    role_present=str(role_present),
+    recipient_valid=str(recipient_valid),
+).inc()
+send("ticket_cc", self.queue.updated_ticket_cc)
+
+# 遍历 ticketcc_set 前
+if cc_enabled:
+    for cc in self.ticketcc_set.select_related("user").all():
+        cc_addr = cc.email_address
+        recipient_valid = should_receive(cc_addr)
+        TICKET_CC_ATTEMPTS.labels(
+            queue_slug=self.queue.slug,
+            enabled=str(cc_enabled),
+            role_present=str(role_present),
+            recipient_valid=str(recipient_valid),
+        ).inc()
+        send("ticket_cc", cc_addr)
+```
+
+#### 6.3.2 Prometheus 告警规则
+
+```yaml
+groups:
+- name: helpdesk_ticket_cc
+  rules:
+
+  # 告警级别：WARNING — Queue 开关为 False 但有活跃订阅者（订阅全失效）
+  - alert: HelpdeskTicketCCQueueDisabled
+    expr: helpdesk_ticketcc_queue_disabled_total > 0
+    for: 5m
+    labels:
+      severity: warning
+      team: sre
+      category: helpdesk_notification
+    annotations:
+      summary: "Queue '{{ $labels.queue_slug }}' has {{ $value }} active TicketCC subscriptions but enable_notifications_on_email_events=False"
+      description: "All ticket_cc notifications for this Queue are skipped. Source: src/helpdesk/models.py:691-693 (if condition gate)"
+      runbook: "docs/notification-recipients.md#512-queue-级别-enable_notifications_on_email_events-核对"
+      fix_command: "python manage.py shell -c \"from helpdesk.models import Queue; Queue.objects.filter(slug='{{ $labels.queue_slug }}').update(enable_notifications_on_email_events=True)\""
+
+  # 告警级别：WARNING — ticket_cc 发送成功率下降（需要埋点 Counter）
+  - alert: HelpdeskTicketCCDeliveryDrop
+    expr: |
+      rate(helpdesk_ticket_cc_attempts_total{recipient_valid="True"}[1h])
+      /
+      rate(helpdesk_ticket_cc_attempts_total[1h])
+      < 0.5
+    for: 15m
+    labels:
+      severity: warning
+      team: sre
+      category: helpdesk_notification
+    annotations:
+      summary: "ticket_cc delivery ratio below 50% on queue {{ $labels.queue_slug }}"
+      description: "role_present={{ $labels.role_present }}, enabled={{ $labels.enabled }}. Check if TicketCC.user.email is empty (src/helpdesk/models.py:1946-1952) or roles dict missing 'ticket_cc' key (src/helpdesk/models.py:675)"
+
+  # 告警级别：WARNING — SSO 用户订阅但 email 为空
+  # (需要额外埋点，或在 export 命令中加入)
+  - alert: HelpdeskTicketCCSSOUserEmailEmpty
+    expr: helpdesk_ticketcc_sso_email_empty_total > 0
+    for: 5m
+    labels:
+      severity: warning
+      team: sre
+      category: helpdesk_notification
+    annotations:
+      summary: "{{ $value }} TicketCC subscription(s) have SSO user with empty email"
+      description: "TicketCC references a user (likely SSO-synced) whose user.email is None. These subscriptions will silently fail. Source: src/helpdesk/models.py:1946-1952 (_email_address property)"
+```
+
+---
+
+### 6.4 Grafana 看板 JSON 骨架（仅必填字段，可直接导入）
+
+将以下 JSON 保存为 `helpdesk-notification-dashboard.json`，在 Grafana → Dashboards → Import 中导入即可。
+
+```json
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "expr": "helpdesk_usersettings_missing_assigned_total",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "title": "⚠️ HIGH RISK: Users with open tickets but NO UserSettings",
+      "type": "stat",
+      "description": "src/helpdesk/update_ticket.py:164-170 will throw RelatedObjectDoesNotExist on next update"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "expr": "helpdesk_usersettings_missing_total",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "title": "Total Users missing UserSettings",
+      "type": "stat",
+      "description": "These users were synced bypassing post_save (src/helpdesk/models.py:1786-1799)"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (role) (rate(helpdesk_email_sent_total{status=\"success\"}[5m]))",
+          "legendFormat": "{{role}} - success",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "sum by (role) (rate(helpdesk_email_sent_total{status=\"failure\"}[5m]))",
+          "legendFormat": "{{role}} - failure",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "sum by (role) (rate(helpdesk_smtp_failure_total[5m]))",
+          "legendFormat": "SMTP exceptions",
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "title": "Email Delivery Metrics (5m rate)",
+      "type": "timeseries",
+      "description": "Source: send_templated_mail in src/helpdesk/templated_email.py:11-135"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "expr": "sum(helpdesk_ticketcc_queue_disabled_total)",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "title": "TicketCC subscriptions on disabled Queues",
+      "type": "stat",
+      "description": "These subscriptions receive no notifications. src/helpdesk/models.py:691-693"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "expr": "time() - helpdesk_usersettings_missing_timestamp_seconds",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "title": "Seconds since last create_usersettings run",
+      "type": "stat",
+      "description": "Should be < 86400 (24h). cron: src/helpdesk/management/commands/create_usersettings.py:30-33"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (queue_slug, enabled) (rate(helpdesk_ticket_cc_attempts_total[5m]))",
+          "legendFormat": "queue={{queue_slug}} enabled={{enabled}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "title": "TicketCC Notification Attempts (5m rate)",
+      "type": "timeseries",
+      "description": "Source: src/helpdesk/models.py:687 and src/helpdesk/models.py:691-693"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "helpdesk",
+    "notification",
+    "sso"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": false,
+          "text": "prometheus",
+          "value": "prometheus"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Data Source",
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "queryValue": "",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Helpdesk Notification Health",
+  "uid": "helpdesk-notification-health",
+  "version": 1,
+  "weekStart": ""
+}
+```
+
+**看板包含的面板**：
+1. **HIGH RISK: Users with open tickets but NO UserSettings**（Stat 面板，红色阈值）→ CRITICAL 级
+2. **Total Users missing UserSettings**（Stat 面板，黄色阈值）→ WARNING 级
+3. **Email Delivery Metrics (5m rate)**（TimeSeries，按 role 区分成功/失败/SMTP 异常）
+4. **TicketCC subscriptions on disabled Queues**（Stat，统计被 Queue 开关屏蔽的订阅数）
+5. **Seconds since last create_usersettings run**（Stat，监控 cron 新鲜度，>24h 告警）
+6. **TicketCC Notification Attempts (5m rate)**（TimeSeries，按 Queue + enabled 状态拆分）
+
+**导入后需要修改的项**（均在看板变量 `templating.list[0]` 中）：
+- `datasource.uid`：替换为你的 Grafana 中 Prometheus 数据源的实际 UID
+- 各 panel 的 `datasource.uid`：同上
+
+---
+
+### 6.5 三类监控问题速查表
+
+| 问题 | 根因代码位置 | 监控方式 | PromQL 关键字段 | 告警级别 |
+|------|-------------|---------|----------------|---------|
+| **UserSettings 缺失 + 持开放工单** | `src/helpdesk/update_ticket.py:164-170`（无兜底直接访问反向外键） | 自定义 Command + node_exporter textfile | `helpdesk_usersettings_missing_assigned_total > 0` | **CRITICAL** |
+| **UserSettings 缺失（暂无工单）** | `src/helpdesk/models.py:1786-1799`（post_save 仅 created=True） | 同上 | `helpdesk_usersettings_missing_total > 0` | WARNING |
+| **cron 未执行** | `src/helpdesk/management/commands/create_usersettings.py:30-33`（get_or_create 兜底） | 同上 + 时间戳 gauge | `time() - helpdesk_usersettings_missing_timestamp_seconds > 86400` | WARNING |
+| **SMTP 发送失败** | `src/helpdesk/templated_email.py:127-134`（SMTPException 捕获） | promtail 日志解析 | `increase(helpdesk_smtp_failure_total[5m]) > 0` | WARNING |
+| **邮件模板缺失** | `src/helpdesk/templated_email.py:65-76`（EmailTemplate.DoesNotExist） | promtail 日志解析 | `increase(helpdesk_template_missing_total[5m]) > 0` | **CRITICAL** |
+| **Queue 关闭但有活跃订阅** | `src/helpdesk/models.py:691-693`（if 开关判断） | 自定义 Command | `helpdesk_ticketcc_queue_disabled_total > 0` | WARNING |
+| **SSO 用户订阅但 email 为空** | `src/helpdesk/models.py:1946-1952`（email_address 属性） | 自定义 Command + 埋点 | `helpdesk_ticketcc_sso_email_empty_total > 0` | WARNING |
+
