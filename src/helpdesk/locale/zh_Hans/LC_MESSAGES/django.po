@@ -2392,3 +2392,137 @@ msgstr "待办按照状态"
 #: views/staff.py:1043
 msgid "Queue by Month"
 msgstr "待办按月"
+
+#: templates/helpdesk/include/ticket_follow_list.html
+msgid "Tickets you are following"
+msgstr "您关注的工单"
+
+#: templates/helpdesk/include/ticket_follow_list.html
+msgid "You are not following any tickets yet."
+msgstr "您还没有关注任何工单。"
+
+#: templates/helpdesk/include/ticket_follow_list.html
+msgid "All statuses"
+msgstr "全部"
+
+#: templates/helpdesk/include/ticket_follow_list.html
+msgid "Filter"
+msgstr "筛选"
+
+#: templates/helpdesk/include/ticket_follow_list.html
+msgid "Last Modified"
+msgstr "最近更新"
+
+#: templates/helpdesk/ticket_desc_table.html
+msgid "Click to unfollow this ticket and stop receiving notifications"
+msgstr "点击取消关注此工单，停止接收通知"
+
+#: templates/helpdesk/ticket_desc_table.html
+msgid "Following"
+msgstr "已关注"
+
+#: templates/helpdesk/ticket_desc_table.html
+msgid "Click to follow this ticket and receive status change notifications"
+msgstr "点击关注此工单，接收状态变更通知"
+
+#: templates/helpdesk/ticket_desc_table.html
+msgid "Follow"
+msgstr "关注"
+
+#: templates/helpdesk/emails/assigned_follower_subject.txt
+#, python-format
+msgid "(Assigned) Ticket %(ticket_id)s - %(ticket_title)s"
+msgstr "(已分配) 工单 %(ticket_id)s - %(ticket_title)s"
+
+#: templates/helpdesk/emails/closed_follower_subject.txt
+#, python-format
+msgid "(Closed) Ticket %(ticket_id)s - %(ticket_title)s"
+msgstr "(已关闭) 工单 %(ticket_id)s - %(ticket_title)s"
+
+#: templates/helpdesk/emails/resolved_follower_subject.txt
+#, python-format
+msgid "(Resolved) Ticket %(ticket_id)s - %(ticket_title)s"
+msgstr "(已解决) 工单 %(ticket_id)s - %(ticket_title)s"
+
+#: templates/helpdesk/emails/updated_follower_subject.txt
+#, python-format
+msgid "(Updated) Ticket %(ticket_id)s - %(ticket_title)s"
+msgstr "(已更新) 工单 %(ticket_id)s - %(ticket_title)s"
+
+#: templates/helpdesk/emails/assigned_follower.txt
+msgid "Hello,"
+msgstr "您好，"
+
+#: templates/helpdesk/emails/resolved_follower.txt
+msgid "The following ticket, which you are following, has been resolved:"
+msgstr "您关注的以下工单已解决："
+
+#: templates/helpdesk/emails/resolved_follower.txt
+msgid "The original ticket description was:"
+msgstr "原始工单描述："
+
+#: templates/helpdesk/emails/resolved_follower.txt
+msgid "This resolution has been e-mailed to the submitter, who will verify it before you can close this ticket."
+msgstr "此方案已邮件发送给提交者，在关闭之前需要他先确认。"
+
+#: templates/helpdesk/emails/updated_follower.txt
+msgid "Original description:"
+msgstr "原始描述："
+
+#: templates/helpdesk/emails/updated_follower.txt
+msgid "The following comment was added:"
+msgstr "已添加以下评论："
+
+#: templates/helpdesk/emails/updated_follower.txt
+msgid "This information has not been e-mailed to the submitter."
+msgstr "此信息未邮件发送给提交者。"
+
+#: templates/helpdesk/emails/updated_follower.txt
+msgid "This information has been e-mailed to the submitter."
+msgstr "此信息已邮件发送给提交者。"
+
+#: templates/helpdesk/emails/assigned_follower.html
+msgid "Ticket Assigned - Followed Ticket"
+msgstr "关注的工单已分配"
+
+#: templates/helpdesk/emails/closed_follower.html
+msgid "Ticket Closed - Followed Ticket"
+msgstr "关注的工单已关闭"
+
+#: templates/helpdesk/emails/resolved_follower.html
+msgid "Ticket Resolved - Followed Ticket"
+msgstr "关注的工单已解决"
+
+#: templates/helpdesk/emails/resolved_follower.html
+msgid "The following ticket, which you are following, has been resolved."
+msgstr "您关注的以下工单已解决。"
+
+#: templates/helpdesk/emails/resolved_follower.html
+msgid "The resolution that was added was:"
+msgstr "增加的解决方案为："
+
+#: templates/helpdesk/emails/updated_follower.html
+msgid "Ticket Updated - Followed Ticket"
+msgstr "关注的工单已更新"
+
+#: templates/helpdesk/emails/assigned_follower.html
+#: templates/helpdesk/emails/closed_follower.html
+#: templates/helpdesk/emails/updated_follower.html
+msgid "Just for reference, the original ticket description was:"
+msgstr "原工单描述参考："
+
+#: templates/helpdesk/emails/closed_follower.html
+msgid "The resolution provided was:"
+msgstr "提供的解决方案为："
+
+#: templates/helpdesk/emails/assigned_follower.txt
+#: templates/helpdesk/emails/closed_follower.txt
+#: templates/helpdesk/emails/resolved_follower.txt
+#: templates/helpdesk/emails/updated_follower.txt
+msgid "login required"
+msgstr "需要登录"
+
+#: templates/helpdesk/emails/assigned_follower.txt
+#: templates/helpdesk/emails/updated_follower.txt
+msgid "Unknown"
+msgstr "未知"
