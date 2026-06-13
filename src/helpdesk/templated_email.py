@@ -1,11 +1,43 @@
 from django.conf import settings
 from django.utils.safestring import mark_safe
+from django.utils.translation import activate, get_language
 import logging
 import os
 from smtplib import SMTPException
 
 
 logger = logging.getLogger("helpdesk")
+
+
+def _render_file_template(template_name, context, locale):
+    """Render email templates from files using Django's template engine.
+
+    Supports full i18n via {% trans %} / {% blocktrans %} tags,
+    and strings can be extracted with ``makemessages``.
+    """
+    from django.template.loader import render_to_string
+
+    old_lang = get_language()
+    try:
+        activate(locale)
+        subject = render_to_string(
+            f"helpdesk/emails/{template_name}_subject.txt", context
+        ).strip()
+        text = render_to_string(f"helpdesk/emails/{template_name}.txt", context)
+        if "comment" in context:
+            context["comment"] = mark_safe(context["comment"].replace("\r\n", "<br>"))
+        html = render_to_string(f"helpdesk/emails/{template_name}.html", context)
+        return subject, text, html
+    except Exception:
+        logger.warning(
+            'file template "%s" (locale=%s) could not be rendered',
+            template_name,
+            locale,
+            exc_info=True,
+        )
+        return None, None, None
+    finally:
+        activate(old_lang)
 
 
 def send_templated_mail(
@@ -62,6 +94,11 @@ def send_templated_mail(
 
     locale = context["queue"].get("locale") or HELPDESK_EMAIL_FALLBACK_LOCALE
 
+    use_file_template = False
+    subject_part = None
+    text_part = None
+    html_part = None
+
     try:
         t = EmailTemplate.objects.get(
             template_name__iexact=template_name, locale=locale
@@ -72,33 +109,41 @@ def send_templated_mail(
                 template_name__iexact=template_name, locale__isnull=True
             )
         except EmailTemplate.DoesNotExist:
-            logger.warning('template "%s" does not exist, no mail sent', template_name)
-            return  # just ignore if template doesn't exist
+            use_file_template = True
 
-    subject_part = (
-        from_string(HELPDESK_EMAIL_SUBJECT_TEMPLATE % {"subject": t.subject})
-        .render(context)
-        .replace("\n", "")
-        .replace("\r", "")
-    )
+    if use_file_template:
+        subject_part, text_part, html_part = _render_file_template(
+            template_name, context, locale
+        )
+        if subject_part is None:
+            logger.warning(
+                'template "%s" does not exist, no mail sent', template_name
+            )
+            return
+    else:
+        subject_part = (
+            from_string(HELPDESK_EMAIL_SUBJECT_TEMPLATE % {"subject": t.subject})
+            .render(context)
+            .replace("\n", "")
+            .replace("\r", "")
+        )
 
-    footer_file = os.path.join("helpdesk", locale, "email_text_footer.txt")
+        footer_file = os.path.join("helpdesk", locale, "email_text_footer.txt")
 
-    text_part = from_string(
-        "%s\n\n{%% include '%s' %%}" % (t.plain_text, footer_file)
-    ).render(context)
+        text_part = from_string(
+            "%s\n\n{%% include '%s' %%}" % (t.plain_text, footer_file)
+        ).render(context)
 
-    email_html_base_file = os.path.join("helpdesk", locale, "email_html_base.html")
-    # keep new lines in html emails
-    if "comment" in context:
-        context["comment"] = mark_safe(context["comment"].replace("\r\n", "<br>"))
+        email_html_base_file = os.path.join("helpdesk", locale, "email_html_base.html")
+        if "comment" in context:
+            context["comment"] = mark_safe(context["comment"].replace("\r\n", "<br>"))
 
-    html_part = from_string(
-        "{%% extends '%s' %%}"
-        "{%% block title %%}%s{%% endblock %%}"
-        "{%% block content %%}%s{%% endblock %%}"
-        % (email_html_base_file, t.heading, t.html)
-    ).render(context)
+        html_part = from_string(
+            "{%% extends '%s' %%}"
+            "{%% block title %%}%s{%% endblock %%}"
+            "{%% block content %%}%s{%% endblock %%}"
+            % (email_html_base_file, t.heading, t.html)
+        ).render(context)
 
     if isinstance(recipients, str):
         if recipients.find(","):

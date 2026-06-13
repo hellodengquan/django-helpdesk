@@ -1,0 +1,30 @@
+{% extends "helpdesk/emails/base_email.html" %}{% load i18n %}
+
+{% block header %}{% trans "Ticket Resolved - Followed Ticket" %}{% endblock %}
+
+{% block content %}
+<p style="font-family: sans-serif; font-size: 1em;">{% trans "Hello," %}</p>
+
+<p style="font-family: sans-serif; font-size: 1em;">{% trans "The following ticket, which you are following, has been resolved." %}</p>
+
+<p style="font-family: sans-serif; font-size: 1em;">
+<b>{% trans "Ticket ID" %}</b>: {{ ticket.ticket }}<br>
+<b>{% trans "Queue" %}</b>: {{ queue.title }}<br>
+<b>{% trans "Title" %}</b>: {{ ticket.title }}<br>
+<b>{% trans "Opened" %}</b>: {{ ticket.created|date:"DATETIME_FORMAT" }}<br>
+<b>{% trans "Submitter" %}</b>: {{ ticket.submitter_email|default:_("Unknown") }}<br>
+<b>{% trans "Priority" %}</b>: {{ ticket.get_priority_display }}<br>
+<b>{% trans "Status" %}</b>: {{ ticket.get_status }}<br>
+<b>{% trans "Assigned to" %}</b>: {{ ticket.get_assigned_to }}<br>
+<b><a href='{{ ticket.staff_url }}'>{% trans "View Online" %}</a></b> {% trans "to update this ticket (login required)" %}</p>
+
+<p style="font-family: sans-serif; font-size: 1em;">{% trans "Just for reference, the original ticket description was:" %}</p>
+
+<blockquote style="font-family: sans-serif; font-size: 1em;">{{ ticket.description|linebreaksbr }}</blockquote>
+
+<p style="font-family: sans-serif; font-size: 1em;">{% trans "The resolution that was added was:" %}</p>
+
+<blockquote style="font-family: sans-serif; font-size: 1em;">{{ ticket.resolution }}</blockquote>
+
+<p style="font-family: sans-serif; font-size: 1em;">{% trans "This resolution has been e-mailed to the submitter, who will verify it before you can close this ticket." %}</p>
+{% endblock %}

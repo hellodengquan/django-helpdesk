@@ -1,0 +1,24 @@
+{% load i18n %}
+{% blocktrans trimmed with ticket_id=ticket.ticket ticket_title=ticket.title %}
+Hello,
+
+Ticket {{ ticket_id }} ("{{ ticket_title }}"){% if ticket.assigned_to %}, assigned to {{ assigned_to }}{% endif %}, which you are following, has been closed.
+{% endblocktrans %}
+
+{% trans "Ticket ID" %}: {{ ticket.ticket }}
+{% trans "Queue" %}: {{ queue.title }}
+{% trans "Title" %}: {{ ticket.title }}
+{% trans "Opened" %}: {{ ticket.created|date:"DATETIME_FORMAT" }}
+{% trans "Submitter" %}: {{ ticket.submitter_email|default:_("Unknown") }}
+{% trans "Priority" %}: {{ ticket.get_priority_display }}
+{% trans "Status" %}: {{ ticket.get_status }}
+{% trans "Assigned to" %}: {{ ticket.get_assigned_to }}
+{% trans "View Online" %}: {{ ticket.staff_url }} ({% trans "login required" %})
+
+{% trans "The original description was:" %}
+
+{{ ticket.description }}
+
+{% trans "The resolution provided was:" %}
+
+{{ resolution }}

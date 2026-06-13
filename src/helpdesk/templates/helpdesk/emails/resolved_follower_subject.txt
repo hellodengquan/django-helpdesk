@@ -1,0 +1,1 @@
+{% load i18n %}{% blocktrans with ticket_id=ticket.ticket ticket_title=ticket.title %}(Resolved) Ticket {{ ticket_id }} - {{ ticket_title }}{% endblocktrans %}

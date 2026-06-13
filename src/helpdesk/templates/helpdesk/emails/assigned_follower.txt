@@ -1,0 +1,20 @@
+{% load i18n %}
+{% blocktrans trimmed %}
+Hello,
+
+This is a courtesy e-mail to let you know that ticket {{ ticket_id }} ("{{ ticket_title }}") for {{ submitter_email }}, which you are following, has been {% if ticket.assigned_to %}assigned to {{ assigned_to }}{% else %}unassigned{% endif %}.
+{% endblocktrans %}
+
+{% trans "Ticket ID" %}: {{ ticket.ticket }}
+{% trans "Queue" %}: {{ queue.title }}
+{% trans "Title" %}: {{ ticket.title }}
+{% trans "Opened" %}: {{ ticket.created|date:"DATETIME_FORMAT" }}
+{% trans "Submitter" %}: {{ ticket.submitter_email|default:_("Unknown") }}
+{% trans "Priority" %}: {{ ticket.get_priority_display }}
+{% trans "Status" %}: {{ ticket.get_status }}
+{% trans "Assigned to" %}: {{ ticket.get_assigned_to }}
+{% trans "View Online" %}: {{ ticket.staff_url }} ({% trans "login required" %})
+
+{% trans "The original ticket description was:" %}
+
+{{ ticket.description }}

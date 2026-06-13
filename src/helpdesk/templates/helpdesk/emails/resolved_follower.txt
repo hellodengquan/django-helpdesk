@@ -1,0 +1,24 @@
+{% load i18n %}
+{% trans "Hello," %}
+
+{% trans "The following ticket, which you are following, has been resolved:" %}
+
+{% trans "Ticket ID" %}: {{ ticket.ticket }}
+{% trans "Queue" %}: {{ queue.title }}
+{% trans "Title" %}: {{ ticket.title }}
+{% trans "Opened" %}: {{ ticket.created|date:"DATETIME_FORMAT" }}
+{% trans "Submitter" %}: {{ ticket.submitter_email|default:_("Unknown") }}
+{% trans "Priority" %}: {{ ticket.get_priority_display }}
+{% trans "Status" %}: {{ ticket.get_status }}
+{% trans "Assigned to" %}: {{ ticket.get_assigned_to }}
+{% trans "View Online" %}: {{ ticket.staff_url }} ({% trans "login required" %})
+
+{% trans "The original ticket description was:" %}
+
+{{ ticket.description }}
+
+{% trans "The resolution provided was:" %}
+
+{{ ticket.resolution }}
+
+{% trans "This resolution has been e-mailed to the submitter, who will verify it before you can close this ticket." %}

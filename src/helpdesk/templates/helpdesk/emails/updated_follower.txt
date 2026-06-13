@@ -1,0 +1,28 @@
+{% load i18n %}
+{% blocktrans trimmed %}
+Hello,
+
+This is a courtesy e-mail to let you know that ticket {{ ticket_id }} ("{{ ticket_title }}") for {{ submitter_email }}, which you are following, has been updated.
+{% endblocktrans %}
+
+{% trans "Ticket ID" %}: {{ ticket.ticket }}
+{% trans "Queue" %}: {{ queue.title }}
+{% trans "Title" %}: {{ ticket.title }}
+{% trans "Opened" %}: {{ ticket.created|date:"DATETIME_FORMAT" }}
+{% trans "Submitter" %}: {{ ticket.submitter_email|default:_("Unknown") }}
+{% trans "Priority" %}: {{ ticket.get_priority_display }}
+{% trans "Status" %}: {{ ticket.get_status }}
+{% trans "Assigned to" %}: {{ ticket.get_assigned_to }}
+{% trans "View Online" %}: {{ ticket.staff_url }} ({% trans "login required" %})
+
+{% trans "Original description:" %}
+
+{{ ticket.description }}
+
+{% trans "The following comment was added:" %}
+
+{{ comment }}
+
+{% if private %}{% trans "This information has not been e-mailed to the submitter." %}{% else %}{% trans "This information has been e-mailed to the submitter." %}{% endif %}
+
+{% trans "If you wish to view this ticket online, you can visit" %} {{ ticket.staff_url }}.

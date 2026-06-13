@@ -225,7 +225,8 @@ def dashboard(request):
             .order_by(all_tickets_reported_sort)
         )
 
-    followed_tickets = (
+    followed_tickets_status = request.GET.get("ft_status", "")
+    followed_tickets_qs = (
         Ticket.objects.select_related("queue")
         .filter(
             followers__user=request.user,
@@ -233,8 +234,10 @@ def dashboard(request):
         .exclude(
             assigned_to=request.user,
         )
-        .order_by(followed_tickets_sort)
     )
+    if followed_tickets_status and followed_tickets_status.isdigit():
+        followed_tickets_qs = followed_tickets_qs.filter(status=int(followed_tickets_status))
+    followed_tickets = followed_tickets_qs.order_by(followed_tickets_sort)
 
     tickets_in_queues = Ticket.objects.filter(
         queue__in=user_queues,
@@ -319,6 +322,8 @@ def dashboard(request):
             "all_tickets_reported_sort": all_tickets_reported_sort,
             "unassigned_tickets_sort": unassigned_tickets_sort,
             "followed_tickets_sort": followed_tickets_sort,
+            "followed_tickets_status": followed_tickets_status,
+            "status_choices": Ticket.STATUS_CHOICES,
         },
     )
 
