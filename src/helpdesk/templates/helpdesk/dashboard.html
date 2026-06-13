@@ -28,6 +28,10 @@
 {% include 'helpdesk/include/tickets.html' with ticket_list=user_tickets ticket_list_empty_message=no_assigned_tickets page_var=page_var sort_param='ut_sort' current_sort=user_tickets_sort %}
 {% trans "una_page" as page_var %}
 {% include 'helpdesk/include/unassigned.html' with page_var=page_var %}
+{% trans "Tickets you are following" as ticket_list_caption %}
+{% trans "You are not following any tickets yet." as no_followed_tickets %}
+{% trans "ft_page" as page_var %}
+{% include 'helpdesk/include/tickets.html' with ticket_list=followed_tickets ticket_list_empty_message=no_followed_tickets page_var=page_var sort_param='ft_sort' current_sort=followed_tickets_sort %}
 {% if user_tickets_closed_resolved %}
     {% trans "Closed & resolved Tickets you used to work on" as ticket_list_caption %}
     {% trans "utcr_page" as page_var %}

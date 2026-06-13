@@ -77,6 +77,7 @@ if helpdesk_settings.HELPDESK_UI_ENABLED:
         path("tickets/<int:ticket_id>/delete/", staff.delete_ticket, name="delete"),
         path("tickets/<int:ticket_id>/hold/", staff.hold_ticket, name="hold"),
         path("tickets/<int:ticket_id>/unhold/", staff.unhold_ticket, name="unhold"),
+        path("tickets/<int:ticket_id>/follow/", staff.toggle_follow_ticket, name="follow_ticket"),
         path("tickets/<int:ticket_id>/cc/", staff.ticket_cc, name="ticket_cc"),
         path(
             "tickets/<int:ticket_id>/cc/add/", staff.ticket_cc_add, name="ticket_cc_add"

@@ -78,6 +78,7 @@ from helpdesk.models import (
     TicketCustomFieldValue,
     TicketDependency,
     UserSettings,
+    UserTicketFollow,
 )
 from helpdesk.query import get_query_class, query_from_base64, query_to_base64
 from helpdesk.user import HelpdeskUser
@@ -159,17 +160,19 @@ def dashboard(request):
     else:
         tickets_per_page = 25
 
-    # page vars for the four ticket tables
+    # page vars for the ticket tables
     user_tickets_page = request.GET.get(_("ut_page"), 1)
     user_tickets_closed_resolved_page = request.GET.get(_("utcr_page"), 1)
     all_tickets_reported_by_current_user_page = request.GET.get(_("atrbcu_page"), 1)
     unassigned_tickets_page = request.GET.get(_("una_page"), 1)
+    followed_tickets_page = request.GET.get(_("ft_page"), 1)
 
     # sorting parameters for each table
     user_tickets_sort = request.GET.get("ut_sort", "-created")
     user_tickets_closed_sort = request.GET.get("utcr_sort", "-created")
     all_tickets_reported_sort = request.GET.get("atrbcu_sort", "-created")
     unassigned_tickets_sort = request.GET.get("una_sort", "-created")
+    followed_tickets_sort = request.GET.get("ft_sort", "-modified")
 
     huser = HelpdeskUser(request.user)
     active_tickets = Ticket.objects.select_related("queue").exclude(
@@ -221,6 +224,17 @@ def dashboard(request):
             )
             .order_by(all_tickets_reported_sort)
         )
+
+    followed_tickets = (
+        Ticket.objects.select_related("queue")
+        .filter(
+            followers__user=request.user,
+        )
+        .exclude(
+            assigned_to=request.user,
+        )
+        .order_by(followed_tickets_sort)
+    )
 
     tickets_in_queues = Ticket.objects.filter(
         queue__in=user_queues,
@@ -280,6 +294,15 @@ def dashboard(request):
     except EmptyPage:
         unassigned_tickets = paginator.page(paginator.num_pages)
 
+    # get followed tickets page
+    paginator = Paginator(followed_tickets, tickets_per_page)
+    try:
+        followed_tickets = paginator.page(followed_tickets_page)
+    except PageNotAnInteger:
+        followed_tickets = paginator.page(1)
+    except EmptyPage:
+        followed_tickets = paginator.page(paginator.num_pages)
+
     return render(
         request,
         "helpdesk/dashboard.html",
@@ -287,6 +310,7 @@ def dashboard(request):
             "user_tickets": tickets,
             "user_tickets_closed_resolved": tickets_closed_resolved,
             "unassigned_tickets": unassigned_tickets,
+            "followed_tickets": followed_tickets,
             "kbitems": kbitems,
             "all_tickets_reported_by_current_user": all_tickets_reported_by_current_user,
             "basic_ticket_stats": basic_ticket_stats,
@@ -294,6 +318,7 @@ def dashboard(request):
             "user_tickets_closed_sort": user_tickets_closed_sort,
             "all_tickets_reported_sort": all_tickets_reported_sort,
             "unassigned_tickets_sort": unassigned_tickets_sort,
+            "followed_tickets_sort": followed_tickets_sort,
         },
     )
 
@@ -516,6 +541,8 @@ def view_ticket(request, ticket_id):
     # add custom fields to further details panel
     customfields_form = EditTicketCustomFieldForm(None, instance=ticket)
 
+    is_following = UserTicketFollow.is_following(request.user, ticket)
+
     return render(
         request,
         "helpdesk/ticket.html",
@@ -529,6 +556,7 @@ def view_ticket(request, ticket_id):
             ),
             "ticketcc_string": ticketcc_string,
             "SHOW_SUBSCRIBE": show_subscribe,
+            "is_following": is_following,
             "checklist_form": checklist_form,
             "customfields_form": customfields_form,
             "assignable_users": get_assignable_users(
@@ -1483,6 +1511,20 @@ def unhold_ticket(request, ticket_id):
 
 
 unhold_ticket = staff_member_required(unhold_ticket)
+
+
+@helpdesk_staff_member_required
+def toggle_follow_ticket(request, ticket_id):
+    """Toggle follow status for current user on a ticket."""
+    ticket = get_object_or_404(Ticket, id=ticket_id)
+    ticket_perm_check(request, ticket)
+
+    UserTicketFollow.toggle_follow(request.user, ticket)
+
+    return HttpResponseRedirect(reverse("helpdesk:view", args=[ticket.id]))
+
+
+toggle_follow_ticket = staff_member_required(toggle_follow_ticket)
 
 
 @helpdesk_staff_member_required

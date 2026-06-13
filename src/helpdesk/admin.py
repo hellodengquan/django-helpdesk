@@ -16,6 +16,7 @@ from helpdesk.models import (
     Queue,
     Ticket,
     TicketChange,
+    UserTicketFollow,
 )
 
 
@@ -157,3 +158,13 @@ class ChecklistAdmin(admin.ModelAdmin):
 
 admin.site.register(PreSetReply)
 admin.site.register(EscalationExclusion)
+
+
+@admin.register(UserTicketFollow)
+class UserTicketFollowAdmin(admin.ModelAdmin):
+    list_display = ("user", "ticket", "created")
+    list_filter = ("created",)
+    search_fields = ("user__username", "user__email", "ticket__id", "ticket__title")
+    autocomplete_fields = ("user", "ticket")
+    list_select_related = ("user", "ticket")
+    date_hierarchy = "created"

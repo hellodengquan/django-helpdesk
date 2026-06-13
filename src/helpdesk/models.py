@@ -1967,6 +1967,72 @@ class TicketCC(models.Model):
             raise ValidationError("User has no email address")
 
 
+class UserTicketFollow(models.Model):
+    """
+    Allows staff users to follow/subscribe to specific tickets to receive
+    notifications when the ticket status changes or updates are made.
+    This is distinct from TicketCC which is for email-based CC'ing.
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="followed_tickets",
+        verbose_name=_("User"),
+        help_text=_("User who is following this ticket."),
+    )
+
+    ticket = models.ForeignKey(
+        Ticket,
+        on_delete=models.CASCADE,
+        related_name="followers",
+        verbose_name=_("Ticket"),
+        help_text=_("Ticket being followed."),
+    )
+
+    created = models.DateTimeField(
+        _("Created"),
+        default=timezone.now,
+        help_text=_("Date when the user started following this ticket."),
+    )
+
+    class Meta:
+        unique_together = (("user", "ticket"),)
+        verbose_name = _("Ticket Follow")
+        verbose_name_plural = _("Ticket Follows")
+        ordering = ("-created",)
+
+    def __str__(self):
+        return _("%(user)s follows %(ticket)s") % {
+            "user": self.user,
+            "ticket": self.ticket,
+        }
+
+    @staticmethod
+    def is_following(user, ticket):
+        """Check if a user is following a specific ticket."""
+        if not user or not user.is_authenticated:
+            return False
+        return UserTicketFollow.objects.filter(
+            user=user, ticket=ticket
+        ).exists()
+
+    @staticmethod
+    def toggle_follow(user, ticket):
+        """Toggle follow status for a user on a ticket.
+        Returns (follow_object, created) tuple if created,
+        (None, False) if removed."""
+        if not user or not user.is_authenticated:
+            return None, False
+        try:
+            follow = UserTicketFollow.objects.get(user=user, ticket=ticket)
+            follow.delete()
+            return None, False
+        except UserTicketFollow.DoesNotExist:
+            follow = UserTicketFollow.objects.create(user=user, ticket=ticket)
+            return follow, True
+
+
 class CustomFieldManager(models.Manager):
     def get_queryset(self):
         return super(CustomFieldManager, self).get_queryset().order_by("ordering")

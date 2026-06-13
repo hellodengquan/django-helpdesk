@@ -1,6 +1,6 @@
 import typing
 
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from django.utils.translation import gettext as _
@@ -8,6 +8,7 @@ from django.utils.translation import gettext as _
 from helpdesk.lib import safe_template_context
 from helpdesk import settings as helpdesk_settings
 from helpdesk.lib import process_attachments
+from helpdesk.templated_email import send_templated_mail
 from helpdesk.decorators import (
     is_helpdesk_staff,
 )
@@ -15,6 +16,7 @@ from helpdesk.models import (
     FollowUp,
     Ticket,
     TicketCC,
+    UserTicketFollow,
 )
 from helpdesk.signals import update_ticket_done
 
@@ -185,6 +187,29 @@ def process_email_notifications_for_ticket_update(
             files=files,
         )
     )
+
+    followers = UserTicketFollow.objects.filter(ticket=ticket).select_related("user")
+    for follow in followers:
+        follower_user = follow.user
+        if not follower_user or not follower_user.email:
+            continue
+        if follower_user.email in messages_sent_to:
+            continue
+        try:
+            user_settings = follower_user.usersettings_helpdesk
+            if not user_settings.email_on_ticket_change:
+                continue
+        except (AttributeError, ObjectDoesNotExist):
+            pass
+        send_templated_mail(
+            template_prefix + "follower",
+            context,
+            follower_user.email,
+            sender=ticket.queue.from_address,
+            fail_silently=True,
+            files=files,
+        )
+        messages_sent_to.add(follower_user.email)
 
 
 def get_email_template_prefix(reassigned, follow_up: FollowUp) -> str:

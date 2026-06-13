@@ -1918,6 +1918,102 @@
             "html": "<p style=\"font-family: sans-serif; font-size: 1em;\">Hei,</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">T\u00e4m\u00e4 on s\u00e4hk\u00f6postitiedote siit\u00e4 ett\u00e4 j\u00e4tt\u00e4m\u00e4\u00e4si palvelupyynt\u00f6\u00e4 <i>{{ ticket.title }}</i> on p\u00e4ivitetty.</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">Seuraava kommentti lis\u00e4ttiin palvelupyynt\u00f6\u00f6n <b>{{ ticket.ticket }}</b>:</p>\r\n\r\n<blockquote style=\"font-family: sans-serif; font-size: 1em;\">{{ comment }}</blockquote>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">Jos sinun on annettava meille lis\u00e4tietoja, vastaa t\u00e4h\u00e4n s\u00e4hk\u00f6postiin ja pid\u00e4 otsikko ennallaan. Voit my\u00f6s tarkastella ja p\u00e4ivitt\u00e4\u00e4 lippua verkossa k\u00e4ym\u00e4ll\u00e4 <a href=\"{{ ticket.ticket_url|safe }}\">{{ ticket.ticket_url|safe }}</a>.</p>",
             "locale": "fi"
         }
+    },
+    {
+        "model": "helpdesk.emailtemplate",
+        "pk": 161,
+        "fields": {
+            "template_name": "assigned_follower",
+            "subject": "(Assigned)",
+            "heading": "Ticket Assigned - Followed Ticket",
+            "plain_text": "Hello,\r\n\r\nThis is a courtesy e-mail to let you know that ticket {{ ticket.ticket }} (\"{{ ticket.title }}\") for {{ ticket.submitter_email }}, which you are following, has been {% if ticket.assigned_to %}assigned to {{ ticket.assigned_to }}{% else %}unassigned{% endif %}.\r\n\r\nTicket ID: {{ ticket.ticket }}\r\nQueue: {{ queue.title }}\r\nTitle: {{ ticket.title }}\r\nOpened: {{ ticket.created|date:\"DATETIME_FORMAT\" }}\r\nSubmitter: {{ ticket.submitter_email|default:\"Unknown\" }}\r\nPriority: {{ ticket.get_priority_display }}\r\nStatus: {{ ticket.get_status }}\r\nAssigned to: {{ ticket.get_assigned_to }}\r\nView Online: {{ ticket.staff_url }} (login required)\r\n\r\nThe original ticket description was:\r\n\r\n{{ ticket.description }}\r\n\r\n",
+            "html": "<p style=\"font-family: sans-serif; font-size: 1em;\">Hello,</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">This is a courtesy e-mail to let you know that ticket <a href=\"{{ ticket.staff_url }}\"><b>{{ ticket.ticket }}</b></a> (<em>{{ ticket.title }}</em>) for {{ ticket.submitter_email }}, which you are following, has been {% if ticket.assigned_to %}assigned to {{ ticket.assigned_to }}{% else %}unassigned{% endif %}.</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">\r\n<b>Ticket ID</b>: {{ ticket.ticket }}<br>\r\n<b>Queue</b>: {{ queue.title }}<br>\r\n<b>Title</b>: {{ ticket.title }}<br>\r\n<b>Opened</b>: {{ ticket.created|date:\"DATETIME_FORMAT\" }}<br>\r\n<b>Submitter</b>: {{ ticket.submitter_email|default:\"Unknown\" }}<br>\r\n<b>Priority</b>: {{ ticket.get_priority_display }}<br>\r\n<b>Status</b>: {{ ticket.get_status }}<br>\r\n<b>Assigned to</b>: {{ ticket.get_assigned_to }}<br>\r\n<b><a href='{{ ticket.staff_url }}'>View Online</a></b> to update this ticket (login required)</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">Just for reference, the original ticket description was:</p>\r\n\r\n<blockquote style=\"font-family: sans-serif; font-size: 1em;\">{{ ticket.description|linebreaksbr }}</blockquote>",
+            "locale": "en"
+        }
+    },
+    {
+        "model": "helpdesk.emailtemplate",
+        "pk": 162,
+        "fields": {
+            "template_name": "closed_follower",
+            "subject": "(Closed)",
+            "heading": "Ticket Closed - Followed Ticket",
+            "plain_text": "Hello,\r\n\r\nTicket {{ ticket.ticket }} (\"{{ ticket.title }}\"){% if ticket.assigned_to %}, assigned to {{ ticket.get_assigned_to }}{% endif %}, which you are following, has been closed.\r\n\r\nTicket ID: {{ ticket.ticket }}\r\nQueue: {{ queue.title }}\r\nTitle: {{ ticket.title }}\r\nOpened: {{ ticket.created|date:\"DATETIME_FORMAT\" }}\r\nSubmitter: {{ ticket.submitter_email|default:\"Unknown\" }}\r\nPriority: {{ ticket.get_priority_display }}\r\nStatus: {{ ticket.get_status }}\r\nAssigned to: {{ ticket.get_assigned_to }}\r\nView Online: {{ ticket.staff_url }} (login required)\r\n\r\nThe original description was:\r\n\r\n{{ ticket.description }}\r\n\r\nThe resolution provided was:\r\n\r\n{{ resolution }}\r\n\r\n",
+            "html": "<p style=\"font-family: sans-serif; font-size: 1em;\">Hello,</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">Ticket <i>{{ ticket.ticket }}</i> ('{{ ticket.title }}'){% if ticket.assigned_to %}, assigned to {{ ticket.get_assigned_to }}{% endif %}, which you are following, has been closed.</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">\r\n<b>Ticket ID</b>: {{ ticket.ticket }}<br>\r\n<b>Queue</b>: {{ queue.title }}<br>\r\n<b>Title</b>: {{ ticket.title }}<br>\r\n<b>Opened</b>: {{ ticket.created|date:\"DATETIME_FORMAT\" }}<br>\r\n<b>Submitter</b>: {{ ticket.submitter_email|default:\"Unknown\" }}<br>\r\n<b>Priority</b>: {{ ticket.get_priority_display }}<br>\r\n<b>Status</b>: {{ ticket.get_status }}<br>\r\n<b>Assigned to</b>: {{ ticket.get_assigned_to }}<br>\r\n<b><a href='{{ ticket.staff_url }}'>View Online</a></b> to update this ticket (login required)</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">Just for reference, the original ticket description was:</p>\r\n\r\n<blockquote style=\"font-family: sans-serif; font-size: 1em;\">{{ ticket.description|linebreaksbr }}</blockquote>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">The resolution provided was:</p>\r\n\r\n<blockquote style=\"font-family: sans-serif; font-size: 1em;\">{{ resolution }}</blockquote>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">If you wish to view this ticket online, you can visit <a href='{{ ticket.staff_url }}'>{{ ticket.staff_url }}</a>.</p>",
+            "locale": "en"
+        }
+    },
+    {
+        "model": "helpdesk.emailtemplate",
+        "pk": 163,
+        "fields": {
+            "template_name": "resolved_follower",
+            "subject": "(Resolved)",
+            "heading": "Ticket Resolved - Followed Ticket",
+            "plain_text": "Hello,\r\n\r\nThe following ticket, which you are following, has been resolved:\r\n\r\nTicket ID: {{ ticket.ticket }}\r\nQueue: {{ queue.title }}\r\nTitle: {{ ticket.title }}\r\nOpened: {{ ticket.created|date:\"DATETIME_FORMAT\" }}\r\nSubmitter: {{ ticket.submitter_email|default:\"Unknown\" }}\r\nPriority: {{ ticket.get_priority_display }}\r\nStatus: {{ ticket.get_status }}\r\nAssigned to: {{ ticket.get_assigned_to }}\r\nView Online: {{ ticket.staff_url }} (login required)\r\n\r\nThe original ticket description was:\r\n\r\n{{ ticket.description }}\r\n\r\nThe resolution provided was:\r\n\r\n{{ ticket.resolution }}\r\n\r\nThis resolution has been e-mailed to the submitter, who will verify it before you can close this ticket.\r\n\r\n",
+            "html": "<p style=\"font-family: sans-serif; font-size: 1em;\">Hello,</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">The following ticket, which you are following, has been resolved.</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">\r\n<b>Ticket ID</b>: {{ ticket.ticket }}<br>\r\n<b>Queue</b>: {{ queue.title }}<br>\r\n<b>Title</b>: {{ ticket.title }}<br>\r\n<b>Opened</b>: {{ ticket.created|date:\"DATETIME_FORMAT\" }}<br>\r\n<b>Submitter</b>: {{ ticket.submitter_email|default:\"Unknown\" }}<br>\r\n<b>Priority</b>: {{ ticket.get_priority_display }}<br>\r\n<b>Status</b>: {{ ticket.get_status }}<br>\r\n<b>Assigned to</b>: {{ ticket.get_assigned_to }}<br>\r\n<b><a href='{{ ticket.staff_url }}'>View Online</a></b> to update this ticket (login required)</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">Just for reference, the original ticket description was:</p>\r\n\r\n<blockquote style=\"font-family: sans-serif; font-size: 1em;\">{{ ticket.description|linebreaksbr }}</blockquote>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">The resolution that was added was:</p>\r\n\r\n<blockquote style=\"font-family: sans-serif; font-size: 1em;\">{{ ticket.resolution }}</blockquote>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">This resolution has been e-mailed to the submitter, who will verify it before you can close this ticket.</p>",
+            "locale": "en"
+        }
+    },
+    {
+        "model": "helpdesk.emailtemplate",
+        "pk": 164,
+        "fields": {
+            "template_name": "updated_follower",
+            "subject": "(Updated)",
+            "heading": "Ticket Updated - Followed Ticket",
+            "plain_text": "Hello,\r\n\r\nThis is a courtesy e-mail to let you know that ticket {{ ticket.ticket }} (\"{{ ticket.title }}\") for {{ ticket.submitter_email }}, which you are following, has been updated.\r\n\r\nTicket ID: {{ ticket.ticket }}\r\nQueue: {{ queue.title }}\r\nTitle: {{ ticket.title }}\r\nOpened: {{ ticket.created|date:\"DATETIME_FORMAT\" }}\r\nSubmitter: {{ ticket.submitter_email|default:\"Unknown\" }}\r\nPriority: {{ ticket.get_priority_display }}\r\nStatus: {{ ticket.get_status }}\r\nAssigned to: {{ ticket.get_assigned_to }}\r\nView Online: {{ ticket.staff_url }} (login required)\r\n\r\nOriginal description:\r\n\r\n{{ ticket.description }}\r\n\r\nThe following comment was added:\r\n\r\n{{ comment }}\r\n\r\nThis information has {% if private %}not {% endif %} been e-mailed to the submitter.\r\n\r\nIf you wish to view this ticket online, you can visit {{ ticket.staff_url }}.\r\n\r\n",
+            "html": "<p style=\"font-family: sans-serif; font-size: 1em;\">Hello,</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">This is a courtesy e-mail to let you know that ticket {{ ticket.ticket }} (\"{{ ticket.title }}\") for {{ ticket.submitter_email }}, which you are following, has been updated.</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">\r\n<b>Ticket ID</b>: {{ ticket.ticket }}<br>\r\n<b>Queue</b>: {{ queue.title }}<br>\r\n<b>Title</b>: {{ ticket.title }}<br>\r\n<b>Opened</b>: {{ ticket.created|date:\"DATETIME_FORMAT\" }}<br>\r\n<b>Submitter</b>: {{ ticket.submitter_email|default:\"Unknown\" }}<br>\r\n<b>Priority</b>: {{ ticket.get_priority_display }}<br>\r\n<b>Status</b>: {{ ticket.get_status }}<br>\r\n<b>Assigned to</b>: {{ ticket.get_assigned_to }}<br>\r\n<b><a href='{{ ticket.staff_url }}'>View Online</a></b> to update this ticket (login required)</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">Just for reference, the original ticket description was:</p>\r\n\r\n<blockquote style=\"font-family: sans-serif; font-size: 1em;\">{{ ticket.description|linebreaksbr }}</blockquote>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">The following comment was added:</p>\r\n\r\n<blockquote style=\"font-family: sans-serif; font-size: 1em;\">{{ comment }}</blockquote>\r\n\r\n<p style=\"font-family: Tahoma, Arial, sans-serif; font-size: 11pt;\">This information has {% if private %}not {% endif %} been e-mailed to the submitter.</p>",
+            "locale": "en"
+        }
+    },
+    {
+        "model": "helpdesk.emailtemplate",
+        "pk": 165,
+        "fields": {
+            "template_name": "assigned_follower",
+            "subject": "(已分配)",
+            "heading": "关注的工单已分配",
+            "plain_text": "您好,\r\n\r\n温馨提示, 您关注的工单 {{ ticket.ticket }} (\"{{ ticket.title }}\") 已经 {% if ticket.assigned_to %}分配给 {{ ticket.assigned_to }}{% else %}未分配{% endif %}.\r\n\r\n工单 ID: {{ ticket.ticket }}\r\n待办: {{ queue.title }}\r\n标题: {{ ticket.title }}\r\n已打开: {{ ticket.created|date:\"DATETIME_FORMAT\" }}\r\n提交人: {{ ticket.submitter_email|default:\"Unknown\" }}\r\n优先级:{{ ticket.get_priority_display }}\r\n状态: {{ ticket.get_status }}\r\n已分配给: {{ ticket.get_assigned_to }}\r\n在线查看: {{ ticket.staff_url }} (需要登录)\r\n\r\n原始描述为:\r\n\r\n{{ ticket.description }}\r\n\r\n",
+            "html": "<p style=\"font-family: sans-serif; font-size: 1em;\">您好,</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">温馨提示, 您关注的工单 <a href=\"{{ ticket.staff_url }}\"><b>{{ ticket.ticket }}</b></a> (<em>{{ ticket.title }}</em>)  {% if ticket.assigned_to %}已经分配给 {{ ticket.assigned_to }}{% else %}还未分配{% endif %}.</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">\r\n<b>工单 ID</b>: {{ ticket.ticket }}<br>\r\n<b>待办</b>: {{ queue.title }}<br>\r\n<b>标题</b>: {{ ticket.title }}<br>\r\n<b>已打开</b>: {{ ticket.created|date:\"DATETIME_FORMAT\" }}<br>\r\n<b>提交人</b>: {{ ticket.submitter_email|default:\"Unknown\" }}<br>\r\n<b>优先级</b>: {{ ticket.get_priority_display }}<br>\r\n<b>状态</b>: {{ ticket.get_status }}<br>\r\n<b>已分配给</b>: {{ ticket.get_assigned_to }}<br>\r\n<b><a href='{{ ticket.staff_url }}'>在线查看</a></b> 更新此工单 (需要登录)</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">原工单描述参考：:</p>\r\n\r\n<blockquote style=\"font-family: sans-serif; font-size: 1em;\">{{ ticket.description|linebreaksbr }}</blockquote>",
+            "locale": "zh"
+        }
+    },
+    {
+        "model": "helpdesk.emailtemplate",
+        "pk": 166,
+        "fields": {
+            "template_name": "closed_follower",
+            "subject": "(已关闭)",
+            "heading": "关注的工单已关闭",
+            "plain_text": "您好,\r\n\r\n您关注的工单 {{ ticket.ticket }} (\"{{ ticket.title }}\"){% if ticket.assigned_to %}, 分配给 {{ ticket.assigned_to }}{% endif %} 已经关闭.\r\n\r\n工单 ID: {{ ticket.ticket }}\r\n待办: {{ queue.title }}\r\n标题: {{ ticket.title }}\r\n已打开: {{ ticket.created|date:\"DATETIME_FORMAT\" }}\r\n提交人: {{ ticket.submitter_email|default:\"Unknown\" }}\r\n优先级:{{ ticket.get_priority_display }}\r\n状态: {{ ticket.get_status }}\r\n已分配给: {{ ticket.get_assigned_to }}\r\n在线查看: {{ ticket.staff_url }} (需要登录)\r\n\r\n原始描述为:\r\n\r\n{{ ticket.description }}\r\n\r\n提供的解决方案为:\r\n\r\n{{ resolution }}\r\n\r\n",
+            "html": "<p style=\"font-family: sans-serif; font-size: 1em;\">您好,</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">您关注的工单 <i>{{ ticket.ticket }}</i> ('{{ ticket.title }}'){% if ticket.assigned_to %}, 分配给 {{ ticket.get_assigned_to }}{% endif %} 已经关闭.</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">\r\n<b>工单 ID</b>: {{ ticket.ticket }}<br>\r\n<b>待办</b>: {{ queue.title }}<br>\r\n<b>标题</b>: {{ ticket.title }}<br>\r\n<b>已打开</b>: {{ ticket.created|date:\"DATETIME_FORMAT\" }}<br>\r\n<b>提交人</b>: {{ ticket.submitter_email|default:\"Unknown\" }}<br>\r\n<b>优先级</b>: {{ ticket.get_priority_display }}<br>\r\n<b>状态</b>: {{ ticket.get_status }}<br>\r\n<b>已分配给</b>: {{ ticket.get_assigned_to }}<br>\r\n<b><a href='{{ ticket.staff_url }}'>在线查看</a></b> 更新此工单 (需要登录)</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">原工单描述参考：:</p>\r\n\r\n<blockquote style=\"font-family: sans-serif; font-size: 1em;\">{{ ticket.description|linebreaksbr }}</blockquote>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">提供的解决方案为:</p>\r\n\r\n<blockquote style=\"font-family: sans-serif; font-size: 1em;\">{{ resolution }}</blockquote>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">如果您想在线查看，可以访问 <a href='{{ ticket.staff_url }}'>{{ ticket.staff_url }}</a>.</p>",
+            "locale": "zh"
+        }
+    },
+    {
+        "model": "helpdesk.emailtemplate",
+        "pk": 167,
+        "fields": {
+            "template_name": "resolved_follower",
+            "subject": "(解决)",
+            "heading": "关注的工单已解决",
+            "plain_text": "您好,\r\n\r\n您关注的工单已经解决:\r\n\r\n工单 ID: {{ ticket.ticket }}\r\n待办: {{ queue.title }}\r\n标题: {{ ticket.title }}\r\n已打开: {{ ticket.created|date:\"DATETIME_FORMAT\" }}\r\n提交人: {{ ticket.submitter_email|default:\"Unknown\" }}\r\n优先级:{{ ticket.get_priority_display }}\r\n状态: {{ ticket.get_status }}\r\n已分配给: {{ ticket.get_assigned_to }}\r\n在线查看: {{ ticket.staff_url }} (需要登录)\r\n\r\n原始描述为:\r\n\r\n{{ ticket.description }}\r\n\r\n提供的解决方案为:\r\n\r\n{{ ticket.resolution }}\r\n\r\n此方案已经邮件发送给提交者, 在关闭之前需要他先确认.\r\n\r\n",
+            "html": "<p style=\"font-family: sans-serif; font-size: 1em;\">您好,</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">您关注的工单已经解决.</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">\r\n<b>工单 ID</b>: {{ ticket.ticket }}<br>\r\n<b>待办</b>: {{ queue.title }}<br>\r\n<b>标题</b>: {{ ticket.title }}<br>\r\n<b>已打开</b>: {{ ticket.created|date:\"DATETIME_FORMAT\" }}<br>\r\n<b>提交人</b>: {{ ticket.submitter_email|default:\"Unknown\" }}<br>\r\n<b>优先级</b>: {{ ticket.get_priority_display }}<br>\r\n<b>状态</b>: {{ ticket.get_status }}<br>\r\n<b>已分配给</b>: {{ ticket.get_assigned_to }}<br>\r\n<b><a href='{{ ticket.staff_url }}'>在线查看</a></b> 更新此工单 (需要登录)</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">原工单描述参考：:</p>\r\n\r\n<blockquote style=\"font-family: sans-serif; font-size: 1em;\">{{ ticket.description|linebreaksbr }}</blockquote>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">增加的解决方案为:</p>\r\n\r\n<blockquote style=\"font-family: sans-serif; font-size: 1em;\">{{ ticket.resolution }}</blockquote>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">此方案已经邮件发送给提交者, 在关闭之前需要他先确认.</p>",
+            "locale": "zh"
+        }
+    },
+    {
+        "model": "helpdesk.emailtemplate",
+        "pk": 168,
+        "fields": {
+            "template_name": "updated_follower",
+            "subject": "(已更新)",
+            "heading": "关注的工单已更新",
+            "plain_text": "您好,\r\n\r\n温馨提示, 您关注的工单 {{ ticket.ticket }} (\"{{ ticket.title }}\") 已经更新.\r\n\r\n工单 ID: {{ ticket.ticket }}\r\n待办: {{ queue.title }}\r\n标题: {{ ticket.title }}\r\n已打开: {{ ticket.created|date:\"DATETIME_FORMAT\" }}\r\n提交人: {{ ticket.submitter_email|default:\"Unknown\" }}\r\n优先级:{{ ticket.get_priority_display }}\r\n状态: {{ ticket.get_status }}\r\n已分配给: {{ ticket.get_assigned_to }}\r\n在线查看: {{ ticket.staff_url }} (需要登录)\r\n\r\n原始描述:\r\n\r\n{{ ticket.description }}\r\n\r\n已添加以下评论:\r\n\r\n{{ comment }}\r\n\r\n本信息 {% if private %}还没有{% else %} 已经 {% endif %} 邮件发送给提交者.\r\n\r\n如果您想在线查看, 可以访问 {{ ticket.staff_url }}.\r\n\r\n",
+            "html": "<p style=\"font-family: sans-serif; font-size: 1em;\">您好,</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">温馨提示, 您关注的工单 {{ ticket.ticket }} (\"{{ ticket.title }}\") 已经更新.</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">\r\n<b>工单 ID</b>: {{ ticket.ticket }}<br>\r\n<b>待办</b>: {{ queue.title }}<br>\r\n<b>标题</b>: {{ ticket.title }}<br>\r\n<b>已打开</b>: {{ ticket.created|date:\"DATETIME_FORMAT\" }}<br>\r\n<b>提交人</b>: {{ ticket.submitter_email|default:\"Unknown\" }}<br>\r\n<b>优先级</b>: {{ ticket.get_priority_display }}<br>\r\n<b>状态</b>: {{ ticket.get_status }}<br>\r\n<b>已分配给</b>: {{ ticket.get_assigned_to }}<br>\r\n<b><a href='{{ ticket.staff_url }}'>在线查看</a></b> 更新此工单 (需要登录)</p>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">原工单描述参考：:</p>\r\n\r\n<blockquote style=\"font-family: sans-serif; font-size: 1em;\">{{ ticket.description|linebreaksbr }}</blockquote>\r\n\r\n<p style=\"font-family: sans-serif; font-size: 1em;\">已添加以下评论:</p>\r\n\r\n<blockquote style=\"font-family: sans-serif; font-size: 1em;\">{{ comment }}</blockquote>\r\n\r\n<p style=\"font-family: Tahoma, Arial, sans-serif; font-size: 11pt;\">本信息 {% if private %} 还没有 {% else %} 已经 {% endif %} 邮件发送给提交者.</p>",
+            "locale": "zh"
+        }
     }
 ]
 

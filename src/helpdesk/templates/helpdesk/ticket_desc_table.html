@@ -37,6 +37,19 @@
                                             </button>
                                         </form>
                                     {% endif %}
+                                    |
+                                    <form class="d-inline ticket-follow" method='post' action='{% url 'helpdesk:follow_ticket' ticket.id %}'>
+                                        {% csrf_token %}
+                                        {% if is_following %}
+                                            <button class="btn btn-primary btn-sm" type='submit' data-bs-toggle='tooltip' title='{% trans "Click to unfollow this ticket and stop receiving notifications" %}'>
+                                                <i class="fas fa-star"></i> {% trans "Following" %}
+                                            </button>
+                                        {% else %}
+                                            <button class="btn btn-outline-primary btn-sm" type='submit' data-bs-toggle='tooltip' title='{% trans "Click to follow this ticket and receive status change notifications" %}'>
+                                                <i class="far fa-star"></i> {% trans "Follow" %}
+                                            </button>
+                                        {% endif %}
+                                    </form>
                                 </div>
                             </span>
                         </th>
