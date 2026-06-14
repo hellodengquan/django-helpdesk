@@ -1,4 +1,5 @@
 from datetime import timedelta
+from importlib import import_module
 from unittest import mock
 
 from django.contrib.auth import get_user_model
@@ -11,6 +12,13 @@ from freezegun import freeze_time
 from helpdesk import settings as helpdesk_settings
 from helpdesk.management.commands.escalate_tickets import Command
 from helpdesk.models import FollowUp, Queue, Ticket
+
+
+def _get_migration_backfill():
+    migration_module = import_module(
+        "helpdesk.migrations.0040_ticket_hold_start_time_ticket_total_paused_time"
+    )
+    return migration_module.backfill_hold_times
 
 
 User = get_user_model()
@@ -99,10 +107,15 @@ class TicketEscalationSLATestCase(TestCase):
         self.assertGreaterEqual(ticket.total_paused_time, timedelta(days=2))
         self.assertLess(ticket.total_paused_time, timedelta(days=2, hours=1))
 
-    def test_get_effective_last_escalation_on_hold(self):
-        ticket = Ticket.objects.create(**self.ticket_data)
-        ticket.place_on_hold()
-        self.assertIsNone(ticket.get_effective_last_escalation())
+    def test_get_effective_last_escalation_on_hold_includes_current_pause(self):
+        with freeze_time("2024-01-01 10:00:00"):
+            ticket = Ticket.objects.create(**self.ticket_data)
+            ticket.place_on_hold()
+
+        with freeze_time("2024-01-03 10:00:00"):
+            effective = ticket.get_effective_last_escalation()
+            expected = ticket.created + timedelta(days=2)
+            self.assertEqual(effective, expected)
 
     def test_get_effective_last_escalation_without_pause(self):
         with freeze_time("2024-01-01 10:00:00"):
@@ -123,6 +136,66 @@ class TicketEscalationSLATestCase(TestCase):
         effective = ticket.get_effective_last_escalation()
         expected = ticket.created + timedelta(days=2)
         self.assertEqual(effective, expected)
+
+    def test_get_effective_last_escalation_combined_pause_and_current(self):
+        with freeze_time("2024-01-01 10:00:00"):
+            ticket = Ticket.objects.create(**self.ticket_data)
+
+        with freeze_time("2024-01-02 10:00:00"):
+            ticket.place_on_hold()
+        with freeze_time("2024-01-03 10:00:00"):
+            ticket.take_off_hold()
+
+        with freeze_time("2024-01-04 10:00:00"):
+            ticket.place_on_hold()
+
+        with freeze_time("2024-01-06 10:00:00"):
+            effective = ticket.get_effective_last_escalation()
+            expected = ticket.created + timedelta(days=3)
+            self.assertEqual(effective, expected)
+
+    def test_legacy_on_hold_without_hold_start_time_take_off(self):
+        with freeze_time("2024-01-01 10:00:00"):
+            ticket = Ticket.objects.create(**self.ticket_data)
+            Ticket.objects.filter(id=ticket.id).update(on_hold=True, hold_start_time=None)
+            ticket.refresh_from_db()
+
+        self.assertTrue(ticket.on_hold)
+        self.assertIsNone(ticket.hold_start_time)
+
+        with freeze_time("2024-01-04 10:00:00"):
+            ticket.take_off_hold()
+            ticket.refresh_from_db()
+
+        self.assertFalse(ticket.on_hold)
+        self.assertIsNone(ticket.hold_start_time)
+        self.assertGreaterEqual(ticket.total_paused_time, timedelta(days=3))
+
+    def test_legacy_on_hold_without_hold_start_time_via_save(self):
+        with freeze_time("2024-01-01 10:00:00"):
+            ticket = Ticket.objects.create(**self.ticket_data)
+            Ticket.objects.filter(id=ticket.id).update(on_hold=True, hold_start_time=None)
+            ticket.refresh_from_db()
+
+        with freeze_time("2024-01-03 10:00:00"):
+            ticket.on_hold = False
+            ticket.save()
+            ticket.refresh_from_db()
+
+        self.assertFalse(ticket.on_hold)
+        self.assertGreaterEqual(ticket.total_paused_time, timedelta(days=2))
+
+    def test_legacy_on_hold_without_hold_start_time_get_effective(self):
+        with freeze_time("2024-01-01 10:00:00"):
+            ticket = Ticket.objects.create(**self.ticket_data)
+            Ticket.objects.filter(id=ticket.id).update(
+                on_hold=True, hold_start_time=None, total_paused_time=None
+            )
+            ticket.refresh_from_db()
+
+        with freeze_time("2024-01-05 10:00:00"):
+            effective = ticket.get_effective_last_escalation()
+            self.assertEqual(effective, ticket.created)
 
     def test_save_on_hold_change_via_attribute(self):
         ticket = Ticket.objects.create(**self.ticket_data)
@@ -427,3 +500,141 @@ class TicketConcurrentEscalationTestCase(TestCase):
                 ticket=ticket, title="Ticket Escalated"
             )
             self.assertEqual(followups.count(), 1)
+
+
+class TicketMigrationBackfillTestCase(TestCase):
+    fixtures = ["emailtemplate.json"]
+
+    def setUp(self):
+        self.queue = Queue.objects.create(
+            title="Backfill Test Queue",
+            slug="backfill_test",
+            escalate_days=2,
+        )
+
+    def test_backfill_null_total_paused_time(self):
+        with freeze_time("2024-01-01 10:00:00"):
+            ticket = Ticket.objects.create(
+                queue=self.queue,
+                title="Null Paused Time",
+                priority=3,
+                status=Ticket.OPEN_STATUS,
+            )
+        Ticket.objects.filter(id=ticket.id).update(total_paused_time=None)
+        ticket.refresh_from_db()
+        self.assertIsNone(ticket.total_paused_time)
+
+        backfill = _get_migration_backfill()
+        from django.apps import apps
+        backfill(apps, None)
+
+        ticket.refresh_from_db()
+        self.assertIsNotNone(ticket.total_paused_time)
+        self.assertEqual(ticket.total_paused_time, timedelta())
+
+    def test_backfill_legacy_on_hold_without_start_time(self):
+        with freeze_time("2024-01-01 10:00:00"):
+            ticket = Ticket.objects.create(
+                queue=self.queue,
+                title="Legacy On Hold",
+                priority=3,
+                status=Ticket.OPEN_STATUS,
+            )
+        with freeze_time("2024-01-03 10:00:00"):
+            Ticket.objects.filter(id=ticket.id).update(
+                on_hold=True, hold_start_time=None, modified=timezone.now()
+            )
+        ticket.refresh_from_db()
+
+        backfill = _get_migration_backfill()
+        from django.apps import apps
+        backfill(apps, None)
+
+        ticket.refresh_from_db()
+        self.assertIsNotNone(ticket.hold_start_time)
+        self.assertEqual(ticket.hold_start_time, ticket.modified)
+
+    def test_backfill_non_hold_ticket_unchanged(self):
+        with freeze_time("2024-01-01 10:00:00"):
+            ticket = Ticket.objects.create(
+                queue=self.queue,
+                title="Normal Ticket",
+                priority=3,
+                status=Ticket.OPEN_STATUS,
+                on_hold=False,
+            )
+        original_modified = ticket.modified
+        original_hold_start = ticket.hold_start_time
+
+        backfill = _get_migration_backfill()
+        from django.apps import apps
+        backfill(apps, None)
+
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.hold_start_time, original_hold_start)
+        self.assertEqual(ticket.modified, original_modified)
+
+
+class TicketPauseBoundaryTestCase(TestCase):
+    fixtures = ["emailtemplate.json"]
+
+    def setUp(self):
+        self.queue = Queue.objects.create(
+            title="Boundary Test Queue",
+            slug="boundary_test",
+            escalate_days=2,
+        )
+        self.ticket_data = {
+            "queue": self.queue,
+            "title": "Boundary Test Ticket",
+            "description": "Testing edge cases",
+        }
+
+    def test_take_off_hold_idempotent_when_not_on_hold(self):
+        ticket = Ticket.objects.create(**self.ticket_data)
+        original_paused = ticket.total_paused_time
+
+        ticket.take_off_hold()
+        ticket.take_off_hold()
+
+        ticket.refresh_from_db()
+        self.assertFalse(ticket.on_hold)
+        self.assertEqual(ticket.total_paused_time, original_paused)
+
+    def test_place_on_hold_idempotent(self):
+        with freeze_time("2024-01-01 10:00:00"):
+            ticket = Ticket.objects.create(**self.ticket_data)
+            ticket.place_on_hold()
+            first_start = ticket.hold_start_time
+
+        with freeze_time("2024-01-02 10:00:00"):
+            ticket.place_on_hold()
+            ticket.refresh_from_db()
+
+        self.assertEqual(ticket.hold_start_time, first_start)
+
+    def test_multiple_hold_unhold_cycles(self):
+        with freeze_time("2024-01-01 10:00:00"):
+            ticket = Ticket.objects.create(**self.ticket_data)
+
+        with freeze_time("2024-01-02 10:00:00"):
+            ticket.place_on_hold()
+        with freeze_time("2024-01-03 10:00:00"):
+            ticket.take_off_hold()
+
+        with freeze_time("2024-01-05 10:00:00"):
+            ticket.place_on_hold()
+        with freeze_time("2024-01-07 10:00:00"):
+            ticket.take_off_hold()
+
+        with freeze_time("2024-01-10 10:00:00"):
+            ticket.place_on_hold()
+
+        ticket.refresh_from_db()
+        self.assertTrue(ticket.on_hold)
+        self.assertGreaterEqual(ticket.total_paused_time, timedelta(days=3))
+        self.assertLess(ticket.total_paused_time, timedelta(days=3, hours=1))
+
+        effective = ticket.get_effective_last_escalation()
+        expected = ticket.created + timedelta(days=3) + (timezone.now() - ticket.hold_start_time)
+        self.assertEqual(effective, expected)

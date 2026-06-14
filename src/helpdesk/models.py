@@ -800,41 +800,45 @@ class Ticket(models.Model):
 
     def take_off_hold(self):
         """Take the ticket off hold and accumulate the paused time."""
-        if self.on_hold and self.hold_start_time:
-            paused_duration = timezone.now() - self.hold_start_time
-            if self.total_paused_time is None:
-                self.total_paused_time = datetime.timedelta()
-            self.total_paused_time += paused_duration
-            self.on_hold = False
-            self.hold_start_time = None
-            self.save(
-                update_fields=[
-                    "on_hold",
-                    "hold_start_time",
-                    "total_paused_time",
-                    "modified",
-                ]
-            )
-        elif self.on_hold:
-            self.on_hold = False
-            self.hold_start_time = None
-            self.save(update_fields=["on_hold", "hold_start_time", "modified"])
+        if not self.on_hold:
+            return
+
+        hold_start = self.hold_start_time or self.modified or self.created
+
+        paused_duration = timezone.now() - hold_start
+        if self.total_paused_time is None:
+            self.total_paused_time = datetime.timedelta()
+        self.total_paused_time += paused_duration
+        self.on_hold = False
+        self.hold_start_time = None
+        self.save(
+            update_fields=[
+                "on_hold",
+                "hold_start_time",
+                "total_paused_time",
+                "modified",
+            ]
+        )
 
     def get_effective_last_escalation(self):
         """
         Return the effective last escalation time adjusted for total paused time.
-        If the ticket is currently on hold, returns None (should not escalate).
+        Includes the current on-hold period (if any) for display/inspection purposes.
+        For escalation decisions, callers should still check ticket.on_hold first.
         """
-        if self.on_hold:
-            return None
-
         if not self.last_escalation:
             base_time = self.created
         else:
             base_time = self.last_escalation
 
-        if self.total_paused_time:
-            effective_time = base_time + self.total_paused_time
+        total_paused = self.total_paused_time or datetime.timedelta()
+
+        if self.on_hold and self.hold_start_time:
+            current_paused = timezone.now() - self.hold_start_time
+            total_paused = total_paused + current_paused
+
+        if total_paused:
+            effective_time = base_time + total_paused
         else:
             effective_time = base_time
 
@@ -946,13 +950,16 @@ class Ticket(models.Model):
                 if old_ticket.on_hold != self.on_hold:
                     if self.on_hold and not old_ticket.on_hold:
                         self.hold_start_time = timezone.now()
-                    elif not self.on_hold and old_ticket.on_hold and old_ticket.hold_start_time:
-                        paused_duration = timezone.now() - old_ticket.hold_start_time
+                    elif not self.on_hold and old_ticket.on_hold:
+                        hold_start = (
+                            old_ticket.hold_start_time
+                            or old_ticket.modified
+                            or old_ticket.created
+                        )
+                        paused_duration = timezone.now() - hold_start
                         if self.total_paused_time is None:
                             self.total_paused_time = datetime.timedelta()
                         self.total_paused_time += paused_duration
-                        self.hold_start_time = None
-                    elif not self.on_hold and old_ticket.on_hold:
                         self.hold_start_time = None
             except ObjectDoesNotExist:
                 pass
