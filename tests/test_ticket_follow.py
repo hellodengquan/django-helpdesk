@@ -488,3 +488,160 @@ class MultiTenantFollowTestCase(TestCase):
         ticket_b = self._make_ticket(self.queue_b, title="QB Secret")
         resp = self.client.get(reverse("helpdesk:view", args=[ticket_b.id]))
         self.assertEqual(resp.status_code, 403)
+
+
+class CrossQueueDenialTestCase(TestCase):
+    fixtures = ["emailtemplate.json"]
+
+    def setUp(self):
+        self.queue_a = Queue.objects.create(
+            title="Queue A", slug="qa", allow_public_submission=False,
+        )
+        self.queue_b = Queue.objects.create(
+            title="Queue B", slug="qb", allow_public_submission=False,
+        )
+        self.client = Client()
+        helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION = True
+
+    def tearDown(self):
+        helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION = False
+
+    def _make_staff(self, username="staff"):
+        User = get_user_model()
+        u = User.objects.create(
+            username=username, is_staff=True, email=f"{username}@ex.com",
+        )
+        u.set_password("pw")
+        u.save()
+        return u
+
+    def _grant_queue_perm(self, user, queue):
+        from django.contrib.auth.models import Permission
+        perm = Permission.objects.get(codename=queue.permission_name.split(".")[-1])
+        user.user_permissions.add(perm)
+
+    def _revoke_queue_perm(self, user, queue):
+        from django.contrib.auth.models import Permission
+        perm = Permission.objects.get(codename=queue.permission_name.split(".")[-1])
+        user.user_permissions.remove(perm)
+
+    def _make_ticket(self, queue, **kw):
+        defaults = {"title": "T", "description": "d"}
+        defaults.update(kw)
+        return Ticket.objects.create(queue=queue, **defaults)
+
+    def test_unfollow_inaccessible_queue_ticket_denied(self):
+        user = self._make_staff("staff_a")
+        self._grant_queue_perm(user, self.queue_a)
+        ticket_b = self._make_ticket(self.queue_b, title="QB Unfollow")
+        UserTicketFollow.objects.create(user=user, ticket=ticket_b)
+        self.client.login(username="staff_a", password="pw")
+        url = reverse("helpdesk:follow_ticket", kwargs={"ticket_id": ticket_b.id})
+        resp = self.client.post(url)
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(UserTicketFollow.is_following(user, ticket_b))
+
+    def test_hold_inaccessible_queue_ticket_denied(self):
+        user = self._make_staff("staff_a")
+        self._grant_queue_perm(user, self.queue_a)
+        ticket_b = self._make_ticket(self.queue_b, title="QB Hold")
+        self.client.login(username="staff_a", password="pw")
+        url = reverse("helpdesk:hold", kwargs={"ticket_id": ticket_b.id})
+        resp = self.client.post(url)
+        self.assertEqual(resp.status_code, 403)
+        ticket_b.refresh_from_db()
+        self.assertFalse(ticket_b.on_hold)
+
+    def test_unhold_inaccessible_queue_ticket_denied(self):
+        user = self._make_staff("staff_a")
+        self._grant_queue_perm(user, self.queue_a)
+        ticket_b = self._make_ticket(self.queue_b, title="QB Unhold", on_hold=True)
+        self.client.login(username="staff_a", password="pw")
+        url = reverse("helpdesk:unhold", kwargs={"ticket_id": ticket_b.id})
+        resp = self.client.post(url)
+        self.assertEqual(resp.status_code, 403)
+        ticket_b.refresh_from_db()
+        self.assertTrue(ticket_b.on_hold)
+
+    def test_delete_inaccessible_queue_ticket_denied(self):
+        user = self._make_staff("staff_a")
+        self._grant_queue_perm(user, self.queue_a)
+        ticket_b = self._make_ticket(self.queue_b, title="QB Delete")
+        self.client.login(username="staff_a", password="pw")
+        url = reverse("helpdesk:delete", kwargs={"ticket_id": ticket_b.id})
+        resp = self.client.post(url)
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(Ticket.objects.filter(id=ticket_b.id).exists())
+
+    def test_update_inaccessible_queue_ticket_denied(self):
+        user = self._make_staff("staff_a")
+        self._grant_queue_perm(user, self.queue_a)
+        ticket_b = self._make_ticket(self.queue_b, title="QB Update")
+        self.client.login(username="staff_a", password="pw")
+        resp = self.client.get(reverse("helpdesk:view", args=[ticket_b.id]) + "?take")
+        self.assertEqual(resp.status_code, 403)
+        ticket_b.refresh_from_db()
+        self.assertIsNone(ticket_b.assigned_to)
+
+    def test_permission_revoked_hides_followed_tickets(self):
+        user = self._make_staff("staff_a")
+        self._grant_queue_perm(user, self.queue_a)
+        self._grant_queue_perm(user, self.queue_b)
+        ticket_a = self._make_ticket(self.queue_a, title="QA Revoked")
+        ticket_b = self._make_ticket(self.queue_b, title="QB Revoked")
+        UserTicketFollow.objects.create(user=user, ticket=ticket_a)
+        UserTicketFollow.objects.create(user=user, ticket=ticket_b)
+        self._revoke_queue_perm(user, self.queue_b)
+        self.client.login(username="staff_a", password="pw")
+        resp = self.client.get(reverse("helpdesk:dashboard"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "QA Revoked")
+        self.assertNotContains(resp, "QB Revoked")
+
+    def test_permission_revoked_cannot_toggle_follow(self):
+        user = self._make_staff("staff_a")
+        self._grant_queue_perm(user, self.queue_a)
+        self._grant_queue_perm(user, self.queue_b)
+        ticket_b = self._make_ticket(self.queue_b, title="QB PermRevoked")
+        UserTicketFollow.objects.create(user=user, ticket=ticket_b)
+        self._revoke_queue_perm(user, self.queue_b)
+        self.client.login(username="staff_a", password="pw")
+        url = reverse("helpdesk:follow_ticket", kwargs={"ticket_id": ticket_b.id})
+        resp = self.client.post(url)
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(UserTicketFollow.is_following(user, ticket_b))
+
+    def test_mass_update_skips_inaccessible_queue_tickets(self):
+        user = self._make_staff("staff_a")
+        self._grant_queue_perm(user, self.queue_a)
+        ticket_a = self._make_ticket(self.queue_a, title="QA Mass")
+        ticket_b = self._make_ticket(self.queue_b, title="QB Mass")
+        self.client.login(username="staff_a", password="pw")
+        url = reverse("helpdesk:mass_update")
+        resp = self.client.post(url, {
+            "ticket_id": [str(ticket_a.id), str(ticket_b.id)],
+            "action": "close",
+        })
+        self.assertEqual(resp.status_code, 302)
+        ticket_a.refresh_from_db()
+        ticket_b.refresh_from_db()
+        self.assertEqual(ticket_a.status, Ticket.CLOSED_STATUS)
+        self.assertNotEqual(ticket_b.status, Ticket.CLOSED_STATUS)
+
+    def test_view_ticket_detail_denied_for_inaccessible_queue(self):
+        user = self._make_staff("staff_a")
+        self._grant_queue_perm(user, self.queue_a)
+        ticket_b = self._make_ticket(self.queue_b, title="QB Detail")
+        self.client.login(username="staff_a", password="pw")
+        resp = self.client.get(reverse("helpdesk:view", args=[ticket_b.id]))
+        self.assertEqual(resp.status_code, 403)
+
+    def test_follow_get_method_denied_for_inaccessible_queue(self):
+        user = self._make_staff("staff_a")
+        self._grant_queue_perm(user, self.queue_a)
+        ticket_b = self._make_ticket(self.queue_b, title="QB GetFollow")
+        self.client.login(username="staff_a", password="pw")
+        url = reverse("helpdesk:follow_ticket", kwargs={"ticket_id": ticket_b.id})
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 403)
+        self.assertFalse(UserTicketFollow.is_following(user, ticket_b))

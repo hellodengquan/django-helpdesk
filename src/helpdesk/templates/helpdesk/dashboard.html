@@ -44,8 +44,13 @@
 <script>
 (function() {
     var sseUrl = "{% url 'helpdesk:sse_stream' %}";
-    var eventSource;
-    var reconnectDelay = 3000;
+    var eventSource = null;
+    var reconnectAttempts = 0;
+    var maxReconnectDelay = 30000;
+    var baseReconnectDelay = 1000;
+    var lastMessageTime = 0;
+    var staleThreshold = 45000;
+    var staleCheckInterval = null;
 
     function showToast(title, message, type, url) {
         var container = document.getElementById('sse-toast-container');
@@ -81,20 +86,49 @@
         }, 8000);
     }
 
+    function getReconnectDelay() {
+        var delay = baseReconnectDelay * Math.pow(2, reconnectAttempts);
+        delay = Math.min(delay, maxReconnectDelay);
+        delay = delay * (0.5 + Math.random() * 0.5);
+        return Math.round(delay);
+    }
+
+    function closeSSE() {
+        if (eventSource) {
+            eventSource.onopen = null;
+            eventSource.onmessage = null;
+            eventSource.onerror = null;
+            eventSource.close();
+            eventSource = null;
+        }
+        if (staleCheckInterval) {
+            clearInterval(staleCheckInterval);
+            staleCheckInterval = null;
+        }
+    }
+
     function connectSSE() {
         if (typeof EventSource === 'undefined') {
-            console.log('SSE not supported');
             return;
         }
+
+        closeSSE();
 
         try {
             eventSource = new EventSource(sseUrl);
 
             eventSource.onopen = function() {
-                console.log('SSE connection established');
+                reconnectAttempts = 0;
+                lastMessageTime = Date.now();
+                startStaleCheck();
             };
 
+            eventSource.addEventListener('ping', function() {
+                lastMessageTime = Date.now();
+            });
+
             eventSource.addEventListener('assigned', function(e) {
+                lastMessageTime = Date.now();
                 var data = JSON.parse(e.data);
                 showToast(
                     '{% trans "Ticket Assigned" %}',
@@ -105,6 +139,7 @@
             });
 
             eventSource.addEventListener('updated', function(e) {
+                lastMessageTime = Date.now();
                 var data = JSON.parse(e.data);
                 showToast(
                     '{% trans "Ticket Updated" %}',
@@ -115,6 +150,7 @@
             });
 
             eventSource.addEventListener('resolved', function(e) {
+                lastMessageTime = Date.now();
                 var data = JSON.parse(e.data);
                 showToast(
                     '{% trans "Ticket Resolved" %}',
@@ -125,6 +161,7 @@
             });
 
             eventSource.addEventListener('closed', function(e) {
+                lastMessageTime = Date.now();
                 var data = JSON.parse(e.data);
                 showToast(
                     '{% trans "Ticket Closed" %}',
@@ -135,15 +172,48 @@
             });
 
             eventSource.onerror = function() {
-                console.log('SSE connection error, reconnecting...');
-                if (eventSource.readyState === EventSource.CLOSED) {
-                    setTimeout(connectSSE, reconnectDelay);
+                var readyState = eventSource ? eventSource.readyState : EventSource.CLOSED;
+                if (readyState === EventSource.CLOSED) {
+                    reconnectAttempts++;
+                    var delay = getReconnectDelay();
+                    setTimeout(connectSSE, delay);
                 }
             };
         } catch (e) {
-            console.error('SSE error:', e);
+            reconnectAttempts++;
+            var delay = getReconnectDelay();
+            setTimeout(connectSSE, delay);
         }
     }
+
+    function startStaleCheck() {
+        if (staleCheckInterval) {
+            clearInterval(staleCheckInterval);
+        }
+        staleCheckInterval = setInterval(function() {
+            if (Date.now() - lastMessageTime > staleThreshold) {
+                closeSSE();
+                reconnectAttempts = 0;
+                connectSSE();
+            }
+        }, 10000);
+    }
+
+    document.addEventListener('visibilitychange', function() {
+        if (document.visibilityState === 'visible') {
+            if (Date.now() - lastMessageTime > staleThreshold || !eventSource || eventSource.readyState !== EventSource.OPEN) {
+                closeSSE();
+                reconnectAttempts = 0;
+                connectSSE();
+            }
+        }
+    });
+
+    window.addEventListener('online', function() {
+        closeSSE();
+        reconnectAttempts = 0;
+        connectSSE();
+    });
 
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', connectSSE);

@@ -6,7 +6,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2024-06-14 00:00+0000\n"
+"POT-Creation-Date: 2026-06-14 08:39+0800\n"
 "PO-Revision-Date: 2024-06-14 00:00+0000\n"
 "Last-Translator: Automatically generated\n"
 "Language-Team: none\n"
@@ -16,152 +16,1614 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
 
-#: templates/helpdesk/include/ticket_follow_list.html
-msgid "Tickets you are following"
-msgstr "フォロー中のチケット"
+#: models.py:91 models.py:509 models.py:983 models.py:1534 update_ticket.py:322
+msgid "Title"
+msgstr "タイトル"
 
-#: templates/helpdesk/include/ticket_follow_list.html
-msgid "You are not following any tickets yet."
-msgstr "まだフォローしているチケットはありません。"
+#: models.py:96 models.py:1478 models.py:2081 admin.py:102
+msgid "Slug"
+msgstr "スラッグ"
 
-#: templates/helpdesk/dashboard.html
-msgid "Ticket Assigned"
-msgstr "チケットが割り当てられました"
+#: models.py:100
+msgid ""
+"This slug is used when building ticket ID's. Once set, try not to change it "
+"or e-mailing may get messy."
+msgstr ""
 
-#: templates/helpdesk/dashboard.html
-msgid "Ticket Updated"
-msgstr "チケットが更新されました"
+#: models.py:106 models.py:1835 models.py:1926 models.py:2078
+msgid "E-Mail Address"
+msgstr "メールアドレス"
 
-#: templates/helpdesk/dashboard.html
-msgid "Ticket Resolved"
-msgstr "チケットが解決されました"
+#: models.py:110
+msgid ""
+"All outgoing e-mails for this queue will use this e-mail address. If you use "
+"IMAP or POP3, this should be the e-mail address for that mailbox."
+msgstr ""
 
-#: templates/helpdesk/dashboard.html
-msgid "Ticket Closed"
-msgstr "チケットがクローズされました"
+#: models.py:117 models.py:1445
+msgid "Locale"
+msgstr "ロケール"
 
-#: templates/helpdesk/include/ticket_follow_list.html
-msgid "All statuses"
-msgstr "すべてのステータス"
+#: models.py:122
+msgid ""
+"Locale of this queue. All correspondence in this queue will be in this "
+"language."
+msgstr ""
 
-#: templates/helpdesk/include/ticket_follow_list.html
-msgid "Filter"
-msgstr "フィルター"
+#: models.py:128
+msgid "Allow Public Submission?"
+msgstr "公開投稿を許可しますか？"
 
-#: templates/helpdesk/include/ticket_follow_list.html
-msgid "Last Modified"
-msgstr "最終更新日"
+#: models.py:131
+msgid "Should this queue be listed on the public submission form?"
+msgstr "このキューを公開投稿フォームに表示しますか？"
 
-#: templates/helpdesk/ticket_desc_table.html
-msgid "Click to unfollow this ticket and stop receiving notifications"
-msgstr "クリックしてチケットのフォローを解除し、通知の受信を停止します"
+#: models.py:135
+msgid "Allow E-Mail Submission?"
+msgstr "メール投稿を許可しますか？"
 
-#: templates/helpdesk/ticket_desc_table.html
-msgid "Following"
-msgstr "フォロー中"
+#: models.py:138
+msgid "Do you want to poll the e-mail box below for new tickets?"
+msgstr "以下のメールボックスを新規チケット用に確認しますか？"
 
-#: templates/helpdesk/ticket_desc_table.html
-msgid "Click to follow this ticket and receive status change notifications"
-msgstr "クリックしてチケットをフォローし、ステータス変更通知を受け取ります"
+#: models.py:142
+msgid "Escalation Days"
+msgstr "エスカレーション日数"
 
-#: templates/helpdesk/ticket_desc_table.html
-msgid "Follow"
-msgstr "フォロー"
+#: models.py:146
+msgid ""
+"For tickets which are not held, how often do you wish to increase their "
+"priority? Set to 0 for no escalation."
+msgstr ""
 
-#: templates/helpdesk/emails/assigned_follower_subject.txt
+#: models.py:152
+msgid "New Ticket CC Address"
+msgstr "新規チケットCCアドレス"
+
+#: models.py:157
+msgid ""
+"If an e-mail address is entered here, then it will receive notification of "
+"all new tickets created for this queue. Enter a comma between multiple e-"
+"mail addresses."
+msgstr ""
+
+#: models.py:164
+msgid "Updated Ticket CC Address"
+msgstr "更新チケットCCアドレス"
+
+#: models.py:169
+msgid ""
+"If an e-mail address is entered here, then it will receive notification of "
+"all activity (new tickets, closed tickets, updates, reassignments, etc) for "
+"this queue. Separate multiple addresses with a comma."
+msgstr ""
+
+#: models.py:177
+msgid "Notify contacts when email updates arrive"
+msgstr "メール更新時に連絡先に通知する"
+
+#: models.py:181
+msgid ""
+"When an email arrives to either create a ticket or to interact with an "
+"existing discussion. Should email notifications be sent ? Note: the "
+"new_ticket_cc and updated_ticket_cc work independently of this feature"
+msgstr ""
+
+#: models.py:188
+msgid "E-Mail Box Type"
+msgstr "メールボックスタイプ"
+
+#: models.py:191
+msgid "POP 3"
+msgstr "POP3"
+
+#: models.py:192
+msgid "IMAP"
+msgstr "IMAP"
+
+#: models.py:193
+msgid "IMAP OAUTH"
+msgstr "IMAP OAuth"
+
+#: models.py:194
+msgid "Local Directory"
+msgstr "ローカルディレクトリ"
+
+#: models.py:199
+msgid ""
+"E-Mail server type for creating tickets automatically from a mailbox - both "
+"POP3 and IMAP are supported, as well as reading from a local directory."
+msgstr ""
+
+#: models.py:206
+msgid "E-Mail Hostname"
+msgstr "メールホスト名"
+
+#: models.py:211
+msgid ""
+"Your e-mail server address - either the domain name or IP address. May be "
+"\"localhost\"."
+msgstr ""
+
+#: models.py:217
+msgid "E-Mail Port"
+msgstr "メールポート"
+
+#: models.py:221
+msgid ""
+"Port number to use for accessing e-mail. Default for POP3 is \"110\", and "
+"for IMAP is \"143\". This may differ on some servers. Leave it blank to use "
+"the defaults."
+msgstr ""
+
+#: models.py:228
+msgid "Use SSL for E-Mail?"
+msgstr "メールにSSLを使用しますか？"
+
+#: models.py:232
+msgid ""
+"Whether to use SSL for IMAP or POP3 - the default ports when using SSL are "
+"993 for IMAP and 995 for POP3."
+msgstr ""
+
+#: models.py:238
+msgid "E-Mail Username"
+msgstr "メールユーザー名"
+
+#: models.py:242
+msgid "Username for accessing this mailbox."
+msgstr "このメールボックスにアクセスするためのユーザー名。"
+
+#: models.py:246
+msgid "E-Mail Password"
+msgstr "メールパスワード"
+
+#: models.py:250
+msgid "Password for the above username"
+msgstr "上記ユーザー名のパスワード"
+
+#: models.py:254
+msgid "IMAP Folder"
+msgstr "IMAPフォルダー"
+
+#: models.py:259
+msgid ""
+"If using IMAP, what folder do you wish to fetch messages from? This allows "
+"you to use one IMAP account for multiple queues, by filtering messages on "
+"your IMAP server into separate folders. Default: INBOX."
+msgstr ""
+
+#: models.py:267
+msgid "E-Mail Local Directory"
+msgstr "メールローカルディレクトリ"
+
+#: models.py:272
+msgid ""
+"If using a local directory, what directory path do you wish to poll for new "
+"email? Example: /var/lib/mail/helpdesk/"
+msgstr ""
+
+#: models.py:279
+msgid "Django auth permission name"
+msgstr "Django認証パーミッション名"
+
+#: models.py:284
+msgid "Name used in the django.contrib.auth permission system"
+msgstr "django.contrib.authパーミッションシステムで使用される名前"
+
+#: models.py:288
+msgid "E-Mail Check Interval"
+msgstr "メール確認間隔"
+
+#: models.py:289
+msgid "How often do you wish to check this mailbox? (in Minutes)"
+msgstr "このメールボックスをどのくらいの頻度で確認しますか？（分単位）"
+
+#: models.py:303
+msgid "Socks Proxy Type"
+msgstr "SOCKSプロキシタイプ"
+
+#: models.py:305
+msgid "SOCKS4"
+msgstr "SOCKS4"
+
+#: models.py:305
+msgid "SOCKS5"
+msgstr "SOCKS5"
+
+#: models.py:309
+msgid ""
+"SOCKS4 or SOCKS5 allows you to proxy your connections through a SOCKS server."
+msgstr ""
+
+#: models.py:314
+msgid "Socks Proxy Host"
+msgstr "SOCKSプロキシホスト"
+
+#: models.py:317
+msgid "Socks proxy IP address. Default: 127.0.0.1"
+msgstr "SOCKSプロキシIPアドレス。デフォルト：127.0.0.1"
+
+#: models.py:321
+msgid "Socks Proxy Port"
+msgstr "SOCKSプロキシポート"
+
+#: models.py:324
+msgid "Socks proxy port number. Default: 9150 (default TOR port)"
+msgstr "SOCKSプロキシポート番号。デフォルト：9150（TORデフォルトポート）"
+
+#: models.py:328
+msgid "Logging Type"
+msgstr "ログタイプ"
+
+#: models.py:331
+msgid "None"
+msgstr "なし"
+
+#: models.py:332
+msgid "Debug"
+msgstr "デバッグ"
+
+#: models.py:333
+msgid "Information"
+msgstr "情報"
+
+#: models.py:334
+msgid "Warning"
+msgstr "警告"
+
+#: models.py:335
+msgid "Error"
+msgstr "エラー"
+
+#: models.py:336
+msgid "Critical"
+msgstr "重大"
+
+#: models.py:341
+msgid ""
+"Set the default logging level. All messages at that level or above will be "
+"logged to the directory set below. If no level is set, logging will be "
+"disabled."
+msgstr ""
+
+#: models.py:348
+msgid "Logging Directory"
+msgstr "ログディレクトリ"
+
+#: models.py:353
+msgid ""
+"If logging is enabled, what directory should we use to store log files for "
+"this queue? The standard logging mechanims are used if no directory is set"
+msgstr ""
+
+#: models.py:365
+msgid "Default owner"
+msgstr "デフォルト担当者"
+
+#: models.py:369
+msgid "Time to be spent on this Queue in total"
+msgstr "このキューの合計所要時間"
+
+#: models.py:377 models.py:516 models.py:1096 forms.py:276 update_ticket.py:352
+#: views/staff.py:1766 views/staff.py:1772 views/staff.py:1778
+#: views/staff.py:1784
+msgid "Queue"
+msgstr "キュー"
+
+#: models.py:378
+msgid "Queues"
+msgstr "キュー"
+
+#: models.py:455 management/commands/create_queue_permissions.py:69
+msgid "Permission for queue: "
+msgstr "キューのパーミッション："
+
+#: models.py:520 models.py:1994
+msgid "Created"
+msgstr "作成日"
+
+#: models.py:522
+msgid "Date this ticket was first created"
+msgstr "チケットが最初に作成された日付"
+
+#: models.py:526
+msgid "Modified"
+msgstr "更新日"
+
+#: models.py:528
+msgid "Date this ticket was most recently changed."
+msgstr "チケットが最後に更新された日付。"
+
+#: models.py:532 admin.py:59
+msgid "Submitter E-Mail"
+msgstr "投稿者メール"
+
+#: models.py:536
+msgid ""
+"The submitter will receive an email for all public follow-ups left for this "
+"task."
+msgstr ""
+
+#: models.py:547
+msgid "Assigned to"
+msgstr "担当者"
+
+#: models.py:551 update_ticket.py:330 views/staff.py:910
+msgid "Status"
+msgstr "ステータス"
+
+#: models.py:557 views/staff.py:1502
+msgid "On Hold"
+msgstr "保留中"
+
+#: models.py:560
+msgid "If a ticket is on hold, it will not automatically be escalated."
+msgstr "チケットが保留中の場合、自動的にエスカレーションされません。"
+
+#: models.py:564 models.py:1482 models.py:2326 views/staff.py:913
+msgid "Description"
+msgstr "説明"
+
+#: models.py:567
+msgid "The content of the customers query."
+msgstr "顧客の問い合わせ内容。"
+
+#: models.py:571 views/staff.py:914
+msgid "Resolution"
+msgstr "解決方法"
+
+#: models.py:574
+msgid "The resolution provided to the customer by our staff."
+msgstr "スタッフから顧客に提供された解決方法。"
+
+#: models.py:578 management/commands/escalate_tickets.py:111 forms.py:300
+#: update_ticket.py:344
+msgid "Priority"
+msgstr "優先度"
+
+#: models.py:582
+msgid "1 = Highest Priority, 5 = Low Priority"
+msgstr "1 = 最高優先度、5 = 低優先度"
+
+#: models.py:586 forms.py:314 update_ticket.py:360 views/staff.py:909
+msgid "Due on"
+msgstr "期日"
+
+#: models.py:596
+msgid ""
+"The date this ticket was last escalated - updated automatically by "
+"management/commands/escalate_tickets.py."
+msgstr ""
+
+#: models.py:602
+msgid "Secret key needed for viewing/editing ticket by non-logged in users"
+msgstr "未ログインユーザーがチケットを閲覧/編集するために必要なシークレットキー"
+
+#: models.py:613
+msgid "Knowledge base item the user was viewing when they created this ticket."
+msgstr "ユーザーがこのチケットを作成した際に閲覧していたナレッジベース項目。"
+
+#: models.py:619
+msgid "merged to"
+msgstr "マージ先"
+
+#: models.py:701 update_ticket.py:313 update_ticket.py:339 views/feeds.py:98
+#: views/feeds.py:119 views/feeds.py:172
+msgid "Unassigned"
+msgstr "未担当"
+
+#: models.py:745
+msgid " - On Hold"
+msgstr " - 保留中"
+
+#: models.py:748
+msgid " - Open dependencies"
+msgstr " - 未解決の依存関係"
+
+#: models.py:762
+msgid "No label"
+msgstr "ラベルなし"
+
+#: models.py:849 models.py:977 models.py:1913 models.py:1989 models.py:2212
+#: models.py:2251 models.py:2294
+msgid "Ticket"
+msgstr "チケット"
+
+#: models.py:850
+msgid "Tickets"
+msgstr "チケット"
+
+#: models.py:980 models.py:1384 models.py:1828 models.py:2075
+msgid "Date"
+msgstr "日付"
+
+#: models.py:990 update_ticket.py:122
+msgid "Comment"
+msgstr "コメント"
+
+#: models.py:996
+msgid "Public"
+msgstr "公開"
+
+#: models.py:1000
+msgid ""
+"Public tickets are viewable by the submitter and all staff, but non-public "
+"tickets can only be seen by staff."
+msgstr ""
+
+#: models.py:1010 models.py:1652 models.py:1922 models.py:1981
+#: views/staff.py:1741 views/staff.py:1747 views/staff.py:1754
+#: views/staff.py:1760
+msgid "User"
+msgstr "ユーザー"
+
+#: models.py:1014
+msgid "New Status"
+msgstr "新しいステータス"
+
+#: models.py:1018
+msgid "If the status was changed, what was it changed to?"
+msgstr "ステータスが変更された場合、何に変更されましたか？"
+
+#: models.py:1022
+msgid "E-Mail ID"
+msgstr "メールID"
+
+#: models.py:1026
+msgid "The Message ID of the submitter's email."
+msgstr "投稿者メールのメッセージID。"
+
+#: models.py:1033
+msgid "Time spent on this follow up"
+msgstr "このフォローアップにかかった時間"
+
+#: models.py:1038 models.py:1160 models.py:1277
+msgid "Follow-up"
+msgstr "フォローアップ"
+
+#: models.py:1039
+msgid "Follow-ups"
+msgstr "フォローアップ"
+
+#: models.py:1164 models.py:2218
+msgid "Field"
+msgstr "フィールド"
+
+#: models.py:1169
+msgid "Old Value"
+msgstr "旧値"
+
+#: models.py:1175
+msgid "New Value"
+msgstr "新値"
+
+#: models.py:1183
+msgid "removed"
+msgstr "削除"
+
+#: models.py:1185
 #, python-format
-msgid "(Assigned) Ticket %(ticket_id)s - %(ticket_title)s"
-msgstr "(割り当て済み) チケット %(ticket_id)s - %(ticket_title)s"
+msgid "set to %s"
+msgstr "%sに設定"
 
-#: templates/helpdesk/emails/closed_follower_subject.txt
+#: models.py:1187
 #, python-format
-msgid "(Closed) Ticket %(ticket_id)s - %(ticket_title)s"
-msgstr "(クローズ済み) チケット %(ticket_id)s - %(ticket_title)s"
+msgid "changed from \"%(old_value)s\" to \"%(new_value)s\""
+msgstr "\"%(old_value)s\"から\"%(new_value)s\"に変更"
 
-#: templates/helpdesk/emails/resolved_follower_subject.txt
+#: models.py:1194
+msgid "Ticket change"
+msgstr "チケット変更"
+
+#: models.py:1195
+msgid "Ticket changes"
+msgstr "チケット変更"
+
+#: models.py:1210
+msgid "File"
+msgstr "ファイル"
+
+#: models.py:1217
+msgid "Filename"
+msgstr "ファイル名"
+
+#: models.py:1223
+msgid "MIME Type"
+msgstr "MIMEタイプ"
+
+#: models.py:1229
+msgid "Size"
+msgstr "サイズ"
+
+#: models.py:1231
+msgid "Size of this file in bytes"
+msgstr "このファイルのバイトサイズ"
+
+#: models.py:1268
+msgid "Attachment"
+msgstr "添付ファイル"
+
+#: models.py:1269
+msgid "Attachments"
+msgstr "添付ファイル"
+
+#: models.py:1297 models.py:1608
+msgid "Knowledge base item"
+msgstr "ナレッジベース項目"
+
+#: models.py:1325
+msgid "Pre-set reply"
+msgstr "定型返信"
+
+#: models.py:1326
+msgid "Pre-set replies"
+msgstr "定型返信"
+
+#: models.py:1332
+msgid ""
+"Leave blank to allow this reply to be used for all queues, or select those "
+"queues you wish to limit this reply to."
+msgstr ""
+
+#: models.py:1338 models.py:1379 models.py:1823 models.py:2277 models.py:2297
+msgid "Name"
+msgstr "名前"
+
+#: models.py:1341
+msgid ""
+"Only used to assist users with selecting a reply - not shown to the user."
+msgstr ""
+
+#: models.py:1346
+msgid "Body"
+msgstr "本文"
+
+#: models.py:1348
+msgid ""
+"Context available: {{ ticket }} - ticket object (eg {{ ticket.title }}); "
+"{{ queue }} - The queue; and {{ user }} - the current user."
+msgstr ""
+
+#: models.py:1373
+msgid ""
+"Leave blank for this exclusion to be applied to all queues, or select those "
+"queues you wish to exclude with this entry."
+msgstr ""
+
+#: models.py:1385
+msgid "Date on which escalation should not happen"
+msgstr "エスカレーションが発生しない日付"
+
+#: models.py:1392
+msgid "Escalation exclusion"
+msgstr "エスカレーション除外"
+
+#: models.py:1393
+msgid "Escalation exclusions"
+msgstr "エスカレーション除外"
+
+#: models.py:1406
+msgid "Template Name"
+msgstr "テンプレート名"
+
+#: models.py:1411
+msgid "Subject"
+msgstr "件名"
+
+#: models.py:1414
+msgid ""
+"This will be prefixed with \"[ticket.ticket] ticket.title\". We recommend "
+"something simple such as \"(Updated\") or \"(Closed)\" - the same context is "
+"available as in plain_text, below."
+msgstr ""
+
+#: models.py:1421
+msgid "Heading"
+msgstr "見出し"
+
+#: models.py:1424
+msgid ""
+"In HTML e-mails, this will be the heading at the top of the email - the same "
+"context is available as in plain_text, below."
+msgstr ""
+
+#: models.py:1431
+msgid "Plain Text"
+msgstr "プレーンテキスト"
+
+#: models.py:1433
+msgid ""
+"The context available to you includes {{ ticket }}, {{ queue }}, and "
+"depending on the time of the call: {{ resolution }} or {{ comment }}."
+msgstr ""
+
+#: models.py:1440
+msgid "HTML"
+msgstr "HTML"
+
+#: models.py:1441
+msgid "The same context is available here as in plain_text, above."
+msgstr "上記のplain_textと同じコンテキストが利用可能です。"
+
+#: models.py:1449
+msgid "Locale of this template."
+msgstr "このテンプレートのロケール。"
+
+#: models.py:1457
+msgid "e-mail template"
+msgstr "メールテンプレート"
+
+#: models.py:1458
+msgid "e-mail templates"
+msgstr "メールテンプレート"
+
+#: models.py:1468
+msgid "Name of the category"
+msgstr "カテゴリ名"
+
+#: models.py:1473
+msgid "Title on knowledgebase page"
+msgstr "ナレッジベースページのタイトル"
+
+#: models.py:1491
+msgid "Default queue when creating a ticket after viewing this category."
+msgstr "このカテゴリ閲覧後にチケット作成する際のデフォルトキュー。"
+
+#: models.py:1496
+msgid "Is KBCategory publicly visible?"
+msgstr "ナレッジベースカテゴリは公開表示されますか？"
+
+#: models.py:1504
+msgid "Knowledge base category"
+msgstr "ナレッジベースカテゴリ"
+
+#: models.py:1505
+msgid "Knowledge base categories"
+msgstr "ナレッジベースカテゴリ"
+
+#: models.py:1530
+msgid "Category"
+msgstr "カテゴリ"
+
+#: models.py:1539
+msgid "Question"
+msgstr "質問"
+
+#: models.py:1543
+msgid "Answer"
+msgstr "回答"
+
+#: models.py:1547
+msgid "Votes"
+msgstr "投票数"
+
+#: models.py:1548
+msgid "Total number of votes cast for this item"
+msgstr "この項目への総投票数"
+
+#: models.py:1553
+msgid "Positive Votes"
+msgstr "肯定投票数"
+
+#: models.py:1554
+msgid "Number of votes for this item which were POSITIVE."
+msgstr "この項目への肯定投票数。"
+
+#: models.py:1559
+msgid "Last Updated"
+msgstr "最終更新"
+
+#: models.py:1560
+msgid "The date on which this question was most recently changed."
+msgstr "この質問が最後に変更された日付。"
+
+#: models.py:1567
+msgid "Team"
+msgstr "チーム"
+
+#: models.py:1573
+msgid "Order"
+msgstr "順序"
+
+#: models.py:1579
+msgid "Enabled to display to users"
+msgstr "ユーザーへの表示を有効にする"
+
+#: models.py:1596
+msgid "Unrated"
+msgstr "未評価"
+
+#: models.py:1609
+msgid "Knowledge base items"
+msgstr "ナレッジベース項目"
+
+#: models.py:1656
+msgid "Query Name"
+msgstr "クエリ名"
+
+#: models.py:1658
+msgid "User-provided name for this query"
+msgstr "ユーザー指定のクエリ名"
+
+#: models.py:1662
+msgid "Shared With Other Users?"
+msgstr "他のユーザーと共有しますか？"
+
+#: models.py:1665
+msgid "Should other users see this query?"
+msgstr "他のユーザーにこのクエリを表示しますか？"
+
+#: models.py:1669
+msgid "Search Query"
+msgstr "検索クエリ"
+
+#: models.py:1670
+msgid "Pickled query object. Be wary changing this."
+msgstr "ピクル化されたクエリオブジェクト。変更に注意してください。"
+
+#: models.py:1680
+msgid "Saved search"
+msgstr "保存済み検索"
+
+#: models.py:1681
+msgid "Saved searches"
+msgstr "保存済み検索"
+
+#: models.py:1726
+msgid "DEPRECATED! Settings Dictionary DEPRECATED!"
+msgstr "非推奨！設定辞書 非推奨！"
+
+#: models.py:1728
+msgid ""
+"DEPRECATED! This is a base64-encoded representation of a pickled Python "
+"dictionary. Do not change this field via the admin."
+msgstr ""
+
+#: models.py:1736
+msgid "Show Ticket List on Login?"
+msgstr "ログイン時にチケットリストを表示しますか？"
+
+#: models.py:1738
+msgid "Display the ticket list upon login? Otherwise, the dashboard is shown."
+msgstr "ログイン時にチケットリストを表示しますか？そうでない場合、ダッシュボードが表示されます。"
+
+#: models.py:1744
+msgid "E-mail me on ticket change?"
+msgstr "チケット変更時にメール通知しますか？"
+
+#: models.py:1746
+msgid ""
+"If you're the ticket owner and the ticket is changed via the web by somebody "
+"else,do you want to receive an e-mail?"
+msgstr ""
+
+#: models.py:1753
+msgid "E-mail me when assigned a ticket?"
+msgstr "チケット割り当て時にメール通知しますか？"
+
+#: models.py:1755
+msgid ""
+"If you are assigned a ticket via the web, do you want to receive an e-mail?"
+msgstr ""
+
+#: models.py:1761
+msgid "Number of tickets to show per page"
+msgstr "1ページあたりのチケット表示数"
+
+#: models.py:1762
+msgid "How many tickets do you want to see on the Ticket List page?"
+msgstr "チケットリストページにいくつのチケットを表示しますか？"
+
+#: models.py:1768
+msgid "Use my e-mail address when submitting tickets?"
+msgstr "チケット投稿時に自分のメールアドレスを使用しますか？"
+
+#: models.py:1770
+msgid ""
+"When you submit a ticket, do you want to automatically use your e-mail "
+"address as the submitter address? You can type a different e-mail address "
+"when entering the ticket if needed, this option only changes the default."
+msgstr ""
+
+#: models.py:1782
+msgid "User Setting"
+msgstr "ユーザー設定"
+
+#: models.py:1783
+msgid "User Settings"
+msgstr "ユーザー設定"
+
+#: models.py:1810
+msgid "Ignored e-mail address"
+msgstr "除外メールアドレス"
+
+#: models.py:1811
+msgid "Ignored e-mail addresses"
+msgstr "除外メールアドレス"
+
+#: models.py:1817
+msgid ""
+"Leave blank for this e-mail to be ignored on all queues, or select those "
+"queues you wish to ignore this e-mail for."
+msgstr ""
+
+#: models.py:1829
+msgid "Date on which this e-mail address was added"
+msgstr "このメールアドレスが追加された日付"
+
+#: models.py:1838
+msgid ""
+"Enter a full e-mail address, or portions with wildcards, eg *@domain.com or "
+"postmaster@*."
+msgstr ""
+
+#: models.py:1844
+msgid "Save Emails in Mailbox?"
+msgstr "メールボックスにメールを保存しますか？"
+
+#: models.py:1848
+msgid ""
+"Do you want to save emails from this address in the mailbox? If this is "
+"unticked, emails from this address will be deleted."
+msgstr ""
+
+#: models.py:1921
+msgid "User who wishes to receive updates for this ticket."
+msgstr "このチケットの更新を受け取りたいユーザー。"
+
+#: models.py:1929
+msgid "For non-user followers, enter their e-mail address"
+msgstr "非ユーザーフォロワーの場合、メールアドレスを入力してください"
+
+#: models.py:1933
+msgid "Can View Ticket?"
+msgstr "チケットを閲覧できますか？"
+
+#: models.py:1936
+msgid "Can this CC login to view the ticket details?"
+msgstr "このCCはログインしてチケット詳細を閲覧できますか？"
+
+#: models.py:1940
+msgid "Can Update Ticket?"
+msgstr "チケットを更新できますか？"
+
+#: models.py:1943
+msgid "Can this CC login and update the ticket?"
+msgstr "このCCはログインしてチケットを更新できますか？"
+
+#: models.py:1982
+msgid "User who is following this ticket."
+msgstr "このチケットをフォローしているユーザー。"
+
+#: models.py:1990
+msgid "Ticket being followed."
+msgstr "フォローされているチケット。"
+
+#: models.py:1996
+msgid "Date when the user started following this ticket."
+msgstr "ユーザーがこのチケットのフォローを開始した日付。"
+
+#: models.py:2001
+msgid "Ticket Follow"
+msgstr "チケットフォロー"
+
+#: models.py:2002
+msgid "Ticket Follows"
+msgstr "チケットフォロー"
+
+#: models.py:2006
 #, python-format
-msgid "(Resolved) Ticket %(ticket_id)s - %(ticket_title)s"
-msgstr "(解決済み) チケット %(ticket_id)s - %(ticket_title)s"
+msgid "%(user)s follows %(ticket)s"
+msgstr "%(user)sが%(ticket)sをフォロー"
 
-#: templates/helpdesk/emails/updated_follower_subject.txt
+#: models.py:2047
+msgid "Field Name"
+msgstr "フィールド名"
+
+#: models.py:2049
+msgid ""
+"As used in the database and behind the scenes. Must be unique and consist of "
+"only lowercase letters with no punctuation."
+msgstr ""
+
+#: models.py:2056
+msgid "Label"
+msgstr "ラベル"
+
+#: models.py:2058
+msgid "The display label for this field"
+msgstr "このフィールドの表示ラベル"
+
+#: models.py:2062
+msgid "Help Text"
+msgstr "ヘルプテキスト"
+
+#: models.py:2063
+msgid "Shown to the user when editing the ticket"
+msgstr "チケット編集時にユーザーに表示"
+
+#: models.py:2069
+msgid "Character (single line)"
+msgstr "文字（1行）"
+
+#: models.py:2070
+msgid "Text (multi-line)"
+msgstr "テキスト（複数行）"
+
+#: models.py:2071
+msgid "Integer"
+msgstr "整数"
+
+#: models.py:2072
+msgid "Decimal"
+msgstr "小数"
+
+#: models.py:2073
+msgid "List"
+msgstr "リスト"
+
+#: models.py:2074
+msgid "Boolean (checkbox yes/no)"
+msgstr "ブール値（チェックボックス はい/いいえ）"
+
+#: models.py:2076
+msgid "Time"
+msgstr "時間"
+
+#: models.py:2077
+msgid "Date & Time"
+msgstr "日時"
+
+#: models.py:2079
+msgid "URL"
+msgstr "URL"
+
+#: models.py:2080
+msgid "IP Address"
+msgstr "IPアドレス"
+
+#: models.py:2085
+msgid "Data Type"
+msgstr "データタイプ"
+
+#: models.py:2087
+msgid "Allows you to restrict the data entered into this field"
+msgstr "このフィールドに入力されるデータを制限できます"
+
+#: models.py:2092
+msgid "Maximum Length (characters)"
+msgstr "最大長（文字数）"
+
+#: models.py:2098
+msgid "Decimal Places"
+msgstr "小数点以下の桁数"
+
+#: models.py:2099
+msgid "Only used for decimal fields"
+msgstr "小数フィールドでのみ使用"
+
+#: models.py:2105
+msgid "Add empty first choice to List?"
+msgstr "リストに空の最初の選択肢を追加しますか？"
+
+#: models.py:2108
+msgid ""
+"Only for List: adds an empty first entry to the choices list, which enforces "
+"that the user makes an active choice."
+msgstr ""
+
+#: models.py:2114
+msgid "List Values"
+msgstr "リスト値"
+
+#: models.py:2115
+msgid "For list fields only. Enter one option per line."
+msgstr "リストフィールドのみ。1行に1つのオプションを入力してください。"
+
+#: models.py:2121
+msgid "Ordering"
+msgstr "順序"
+
+#: models.py:2123
+msgid "Lower numbers are displayed first; higher numbers are listed later"
+msgstr "小さい番号が先に表示され、大きい番号が後に表示されます"
+
+#: models.py:2138
+msgid "Required?"
+msgstr "必須？"
+
+#: models.py:2139
+msgid "Does the user have to enter a value for this field?"
+msgstr "ユーザーはこのフィールドに値を入力する必要がありますか？"
+
+#: models.py:2144
+msgid "Staff Only?"
+msgstr "スタッフのみ？"
+
+#: models.py:2146
+msgid ""
+"If this is ticked, then the public submission form will NOT show this field"
+msgstr ""
+
+#: models.py:2158
+msgid "Custom field"
+msgstr "カスタムフィールド"
+
+#: models.py:2159
+msgid "Custom fields"
+msgstr "カスタムフィールド"
+
+#: models.py:2228
+msgid "Not defined"
+msgstr "未定義"
+
+#: models.py:2232
+msgid "Ticket custom field value"
+msgstr "チケットカスタムフィールド値"
+
+#: models.py:2233
+msgid "Ticket custom field values"
+msgstr "チケットカスタムフィールド値"
+
+#: models.py:2245
+msgid "Ticket dependency"
+msgstr "チケット依存関係"
+
+#: models.py:2246
+msgid "Ticket dependencies"
+msgstr "チケット依存関係"
+
+#: models.py:2258
+msgid "Depends On Ticket"
+msgstr "依存先チケット"
+
+#: models.py:2279
+msgid "Task List"
+msgstr "タスクリスト"
+
+#: models.py:2283
+msgid "Checklist Template"
+msgstr "チェックリストテンプレート"
+
+#: models.py:2284
+msgid "Checklist Templates"
+msgstr "チェックリストテンプレート"
+
+#: models.py:2300 models.py:2323
+msgid "Checklist"
+msgstr "チェックリスト"
+
+#: models.py:2301
+msgid "Checklists"
+msgstr "チェックリスト"
+
+#: models.py:2328
+msgid "Completion Date"
+msgstr "完了日"
+
+#: models.py:2331
+msgid "Position"
+msgstr "位置"
+
+#: models.py:2337
+msgid "Checklist Task"
+msgstr "チェックリストタスク"
+
+#: models.py:2338
+msgid "Checklist Tasks"
+msgstr "チェックリストタスク"
+
+#: query.py:238
+msgid "No text"
+msgstr "テキストなし"
+
+#: query.py:245
+msgid "View ticket"
+msgstr "チケットを表示"
+
+#: query.py:249
+msgid "Messages"
+msgstr "メッセージ"
+
+#: validators.py:29
+msgid "Unsupported file extension: "
+msgstr "サポートされていないファイル拡張子："
+
+#: management/commands/escalate_tickets.py:104
+msgid "Ticket Escalated"
+msgstr "チケットエスカレーション"
+
+#: management/commands/escalate_tickets.py:106
 #, python-format
-msgid "(Updated) Ticket %(ticket_id)s - %(ticket_title)s"
-msgstr "(更新済み) チケット %(ticket_id)s - %(ticket_title)s"
+msgid "Ticket escalated after %(nb)s days"
+msgstr "%(nb)s日後にチケットがエスカレーション"
 
-#: templates/helpdesk/emails/assigned_follower.txt
-msgid "Hello,"
-msgstr "こんにちは、"
+#: management/commands/create_usersettings.py:24
+msgid ""
+"Check for user without django-helpdesk UserSettings and create settings if "
+"required. Uses settings.DEFAULT_USER_SETTINGS which can be overridden to "
+"suit your situation."
+msgstr ""
 
-#: templates/helpdesk/emails/resolved_follower.txt
-msgid "The following ticket, which you are following, has been resolved:"
-msgstr "フォローしている以下のチケットが解決されました："
+#: forms.py:145
+msgid "This ticket is merged into the selected ticket."
+msgstr "このチケットは選択されたチケットにマージされます。"
 
-#: templates/helpdesk/emails/resolved_follower.txt
-msgid "The original ticket description was:"
-msgstr "元のチケットの説明："
+#: forms.py:285
+msgid "Summary of the problem"
+msgstr "問題の概要"
 
-#: templates/helpdesk/emails/resolved_follower.txt
-msgid "This resolution has been e-mailed to the submitter, who will verify it before you can close this ticket."
-msgstr "この解決策は提出者にメールで送信されました。チケットをクローズする前に、提出者が確認します。"
+#: forms.py:290
+msgid "Description of your issue"
+msgstr "問題の詳細"
 
-#: templates/helpdesk/emails/updated_follower.txt
-msgid "Original description:"
-msgstr "元の説明："
+#: forms.py:292
+msgid "Please be as descriptive as possible and include all details"
+msgstr "できるだけ詳しく、すべての詳細を含めてください"
 
-#: templates/helpdesk/emails/updated_follower.txt
-msgid "The following comment was added:"
-msgstr "以下のコメントが追加されました："
+#: forms.py:301
+msgid "Please select a priority carefully. If unsure, leave it as '3'."
+msgstr "優先度を慎重に選択してください。不明な場合は'3'のままにしてください。"
 
-#: templates/helpdesk/emails/updated_follower.txt
-msgid "This information has not been e-mailed to the submitter."
-msgstr "この情報は提出者にメール送信されていません。"
+#: forms.py:321
+msgid "Attach File"
+msgstr "ファイルを添付"
 
-#: templates/helpdesk/emails/updated_follower.txt
-msgid "This information has been e-mailed to the submitter."
-msgstr "この情報は提出者にメール送信されました。"
+#: forms.py:323
+msgid ""
+"You can attach a file to this ticket. Only file types such as plain text "
+"(.txt), a document (.pdf, .docx, or .odt), or screenshot (.png or .jpg) may "
+"be uploaded."
+msgstr ""
 
-#: templates/helpdesk/emails/assigned_follower.html
-msgid "Ticket Assigned - Followed Ticket"
-msgstr "チケットが割り当てられました - フォロー中のチケット"
+#: forms.py:341
+msgid "Knowledge Base Item"
+msgstr "ナレッジベース項目"
 
-#: templates/helpdesk/emails/closed_follower.html
-msgid "Ticket Closed - Followed Ticket"
-msgstr "チケットがクローズされました - フォロー中のチケット"
+#: forms.py:444
+msgid "Submitter E-Mail Address"
+msgstr "投稿者メールアドレス"
 
-#: templates/helpdesk/emails/resolved_follower.html
-msgid "Ticket Resolved - Followed Ticket"
-msgstr "チケットが解決されました - フォロー中のチケット"
+#: forms.py:447
+msgid ""
+"This e-mail address will receive copies of all public updates to this ticket."
+msgstr ""
 
-#: templates/helpdesk/emails/resolved_follower.html
-msgid "The following ticket, which you are following, has been resolved."
-msgstr "フォローしている以下のチケットが解決されました。"
+#: forms.py:458
+msgid "Case owner"
+msgstr "ケース担当者"
 
-#: templates/helpdesk/emails/resolved_follower.html
-msgid "The resolution that was added was:"
-msgstr "追加された解決策："
+#: forms.py:460
+msgid ""
+"If you select an owner other than yourself, they'll be e-mailed details of "
+"this ticket immediately."
+msgstr ""
 
-#: templates/helpdesk/emails/updated_follower.html
-msgid "Ticket Updated - Followed Ticket"
-msgstr "チケットが更新されました - フォロー中のチケット"
+#: forms.py:505
+#, python-format
+msgid "Ticket Opened & Assigned to %(name)s"
+msgstr "チケットがオープンされ%(name)sに割り当てられました"
 
-#: templates/helpdesk/emails/assigned_follower.html
-#: templates/helpdesk/emails/closed_follower.html
-#: templates/helpdesk/emails/updated_follower.html
-msgid "Just for reference, the original ticket description was:"
-msgstr "参考までに、元のチケットの説明："
+#: forms.py:506
+msgid "<invalid user>"
+msgstr "<無効なユーザー>"
 
-#: templates/helpdesk/emails/closed_follower.html
-msgid "The resolution provided was:"
-msgstr "提供された解決策："
+#: forms.py:509
+msgid "Ticket Opened"
+msgstr "チケットがオープンされました"
 
-#: templates/helpdesk/emails/assigned_follower.txt
-#: templates/helpdesk/emails/closed_follower.txt
-#: templates/helpdesk/emails/resolved_follower.txt
-#: templates/helpdesk/emails/updated_follower.txt
-msgid "login required"
-msgstr "ログインが必要です"
+#: forms.py:535
+msgid "Your E-Mail Address"
+msgstr "あなたのメールアドレス"
 
-#: templates/helpdesk/emails/assigned_follower.txt
-#: templates/helpdesk/emails/updated_follower.txt
-msgid "Unknown"
-msgstr "不明"
+#: forms.py:536
+msgid "We will e-mail you when your ticket is updated."
+msgstr "チケットが更新された際、メールでお知らせします。"
+
+#: forms.py:607
+msgid "Ticket Opened Via Web"
+msgstr "ウェブ経由でチケットがオープンされました"
+
+#: forms.py:717
+msgid "Tickets to merge"
+msgstr "マージするチケット"
+
+#: forms.py:725
+msgid "Please choose at least 2 tickets."
+msgstr "2つ以上のチケットを選択してください。"
+
+#: forms.py:727
+msgid "Impossible to merge more than 4 tickets..."
+msgstr "4つ以上のチケットをマージすることはできません..."
+
+#: forms.py:732
+msgid "All selected tickets must share the same queue in order to be merged."
+msgstr "マージするには、選択されたすべてのチケットが同じキューに属している必要があります。"
+
+#: forms.py:767
+msgid "Template"
+msgstr "テンプレート"
+
+#: email.py:59
+msgid "email_html_body.html"
+msgstr "email_html_body.html"
+
+#: email.py:656
+#, python-format
+msgid "E-Mail Received from %(sender_email)s"
+msgstr "%(sender_email)sからメールを受信しました"
+
+#: email.py:667
+#, python-format
+msgid "Ticket Re-Opened by E-Mail Received from %(sender_email)s"
+msgstr "%(sender_email)sからのメールによりチケットが再オープンされました"
+
+#: email.py:784
+msgid "original_message.eml"
+msgstr "original_message.eml"
+
+#: email.py:968
+msgid "Comment from e-mail"
+msgstr "メールからのコメント"
+
+#: email.py:1078
+msgid "Unknown Sender"
+msgstr "不明な送信者"
+
+#: update_ticket.py:90
+#, python-format
+msgid ""
+"When you add somebody on Cc, you must provide either a User or a valid "
+"email. Email: %s"
+msgstr ""
+
+#: update_ticket.py:124
+msgid "Updated"
+msgstr "更新済み"
+
+#: update_ticket.py:306
+#, python-format
+msgid "Assigned to %(username)s"
+msgstr "%(username)sに割り当てられました"
+
+#: update_ticket.py:337 views/staff.py:912
+msgid "Owner"
+msgstr "担当者"
+
+#: update_ticket.py:391 update_ticket.py:392
+msgid "To do"
+msgstr "未処理"
+
+#: update_ticket.py:391 update_ticket.py:392
+msgid "Completed"
+msgstr "完了"
+
+#: settings.py:155
+msgid "Open"
+msgstr "オープン"
+
+#: settings.py:156
+msgid "Reopened"
+msgstr "再オープン"
+
+#: settings.py:157
+msgid "Resolved"
+msgstr "解決済み"
+
+#: settings.py:158
+msgid "Closed"
+msgstr "クローズ済み"
+
+#: settings.py:159
+msgid "Duplicate"
+msgstr "重複"
+
+#: settings.py:205
+msgid "1. Critical"
+msgstr "1. 致命的"
+
+#: settings.py:206
+msgid "2. High"
+msgstr "2. 高"
+
+#: settings.py:207
+msgid "3. Normal"
+msgstr "3. 通常"
+
+#: settings.py:208
+msgid "4. Low"
+msgstr "4. 低"
+
+#: settings.py:209
+msgid "5. Very Low"
+msgstr "5. 非常に低い"
+
+#: views/public.py:227
+msgid "Missing ticket ID or e-mail address. Please try again."
+msgstr "チケットIDまたはメールアドレスが見つかりません。もう一度お試しください。"
+
+#: views/public.py:245
+msgid "Invalid ticket ID or e-mail address. Please try again."
+msgstr "無効なチケットIDまたはメールアドレスです。もう一度お試しください。"
+
+#: views/public.py:255
+msgid "Submitter accepted resolution and closed ticket"
+msgstr "投稿者が解決を受け入れ、チケットをクローズしました"
+
+#: views/staff.py:164
+msgid "ut_page"
+msgstr "ut_page"
+
+#: views/staff.py:165
+msgid "utcr_page"
+msgstr "utcr_page"
+
+#: views/staff.py:166
+msgid "atrbcu_page"
+msgstr "atrbcu_page"
+
+#: views/staff.py:167
+msgid "una_page"
+msgstr "una_page"
+
+#: views/staff.py:168
+msgid "ft_page"
+msgstr "ft_page"
+
+#: views/staff.py:504
+msgid "Accepted resolution and closed ticket"
+msgstr "解決を受け入れ、チケットをクローズしました"
+
+#: views/staff.py:822
+#, python-format
+msgid "Assigned to %(username)s in bulk update"
+msgstr "一括更新で%(username)sに割り当てられました"
+
+#: views/staff.py:833
+msgid "Unassigned in bulk update"
+msgstr "一括更新で担当解除されました"
+
+#: views/staff.py:842
+msgid "KBItem set in bulk update"
+msgstr "一括更新でナレッジベース項目が設定されました"
+
+#: views/staff.py:851 views/staff.py:861
+msgid "Closed in bulk update"
+msgstr "一括更新でクローズされました"
+
+#: views/staff.py:908
+msgid "Created date"
+msgstr "作成日"
+
+#: views/staff.py:911
+msgid "Submitter email"
+msgstr "投稿者メール"
+
+#: views/staff.py:1027
+#, python-format
+msgid "[Merged from #%(id)d] %(title)s"
+msgstr "[#%(id)dからマージ] %(title)s"
+
+#: views/staff.py:1073
+msgid "Please choose a ticket in which the others will be merged into."
+msgstr "他のチケットをマージする先のチケットを選択してください。"
+
+#: views/staff.py:1255
+msgid ""
+"<p><strong>Note:</strong> Your keyword search is case sensitive because of "
+"your database. This means the search will <strong>not</strong> be accurate. "
+"By switching to a different database system you will gain better searching! "
+"For more information, read the <a href=\"http://docs.djangoproject.com/en/"
+"dev/ref/databases/#sqlite-string-matching\">Django Documentation on string "
+"matching in SQLite</a>."
+msgstr ""
+
+#: views/staff.py:1485
+msgid "Ticket taken off hold"
+msgstr "チケットの保留が解除されました"
+
+#: views/staff.py:1488
+msgid "Ticket placed on hold"
+msgstr "チケットが保留されました"
+
+#: views/staff.py:1740
+msgid "User by Priority"
+msgstr "優先度別ユーザー"
+
+#: views/staff.py:1746
+msgid "User by Queue"
+msgstr "キュー別ユーザー"
+
+#: views/staff.py:1753
+msgid "User by Status"
+msgstr "ステータス別ユーザー"
+
+#: views/staff.py:1759
+msgid "User by Month"
+msgstr "月別ユーザー"
+
+#: views/staff.py:1765
+msgid "Queue by Priority"
+msgstr "優先度別キュー"
+
+#: views/staff.py:1771
+msgid "Queue by Status"
+msgstr "ステータス別キュー"
+
+#: views/staff.py:1777
+msgid "Queue by Month"
+msgstr "月別キュー"
+
+#: views/staff.py:1783
+msgid "Days until ticket closed by Month"
+msgstr "月別チケットクローズまでの日数"
+
+#: views/staff.py:1985
+msgid "Impossible to add twice the same user"
+msgstr "同じユーザーを2回追加することはできません"
+
+#: views/staff.py:1988
+msgid "Impossible to add twice the same email address"
+msgstr "同じメールアドレスを2回追加することはできません"
+
+#: views/feeds.py:44
+#, python-format
+msgid "Helpdesk: Open Tickets in queue %(queue)s for %(username)s"
+msgstr "ヘルプデスク：%(username)sの%(queue)sキューのオープンチケット"
+
+#: views/feeds.py:49
+#, python-format
+msgid "Helpdesk: Open Tickets for %(username)s"
+msgstr "ヘルプデスク：%(username)sのオープンチケット"
+
+#: views/feeds.py:56
+#, python-format
+msgid "Open and Reopened Tickets in queue %(queue)s for %(username)s"
+msgstr "%(username)sの%(queue)sキューのオープン・再オープンチケット"
+
+#: views/feeds.py:62
+#, python-format
+msgid "Open and Reopened Tickets for %(username)s"
+msgstr "%(username)sのオープン・再オープンチケット"
+
+#: views/feeds.py:105
+msgid "Helpdesk: Unassigned Tickets"
+msgstr "ヘルプデスク：未担当チケット"
+
+#: views/feeds.py:106
+msgid "Unassigned Open and Reopened tickets"
+msgstr "未担当のオープン・再オープンチケット"
+
+#: views/feeds.py:126
+msgid "Helpdesk: Recent Followups"
+msgstr "ヘルプデスク：最近のフォローアップ"
+
+#: views/feeds.py:128
+msgid ""
+"Recent FollowUps, such as e-mail replies, comments, attachments and "
+"resolutions"
+msgstr ""
+
+#: views/feeds.py:147
+#, python-format
+msgid "Helpdesk: Open Tickets in queue %(queue)s"
+msgstr "ヘルプデスク：%(queue)sキューのオープンチケット"
+
+#: views/feeds.py:152
+#, python-format
+msgid "Open and Reopened Tickets in queue %(queue)s"
+msgstr "%(queue)sキューのオープン・再オープンチケット"
+
+#~ msgid "Tickets you are following"
+#~ msgstr "フォロー中のチケット"
+
+#~ msgid "You are not following any tickets yet."
+#~ msgstr "まだフォローしているチケットはありません。"
+
+#~ msgid "Ticket Assigned"
+#~ msgstr "チケットが割り当てられました"
+
+#~ msgid "Ticket Updated"
+#~ msgstr "チケットが更新されました"
+
+#~ msgid "Ticket Resolved"
+#~ msgstr "チケットが解決されました"
+
+#~ msgid "Ticket Closed"
+#~ msgstr "チケットがクローズされました"
+
+#~ msgid "All statuses"
+#~ msgstr "すべてのステータス"
+
+#~ msgid "Filter"
+#~ msgstr "フィルター"
+
+#~ msgid "Last Modified"
+#~ msgstr "最終更新日"
+
+#~ msgid "Click to unfollow this ticket and stop receiving notifications"
+#~ msgstr "クリックしてチケットのフォローを解除し、通知の受信を停止します"
+
+#~ msgid "Following"
+#~ msgstr "フォロー中"
+
+#~ msgid "Click to follow this ticket and receive status change notifications"
+#~ msgstr "クリックしてチケットをフォローし、ステータス変更通知を受け取ります"
+
+#~ msgid "Follow"
+#~ msgstr "フォロー"
+
+#, python-format
+#~ msgid "(Assigned) Ticket %(ticket_id)s - %(ticket_title)s"
+#~ msgstr "(割り当て済み) チケット %(ticket_id)s - %(ticket_title)s"
+
+#, python-format
+#~ msgid "(Closed) Ticket %(ticket_id)s - %(ticket_title)s"
+#~ msgstr "(クローズ済み) チケット %(ticket_id)s - %(ticket_title)s"
+
+#, python-format
+#~ msgid "(Resolved) Ticket %(ticket_id)s - %(ticket_title)s"
+#~ msgstr "(解決済み) チケット %(ticket_id)s - %(ticket_title)s"
+
+#, python-format
+#~ msgid "(Updated) Ticket %(ticket_id)s - %(ticket_title)s"
+#~ msgstr "(更新済み) チケット %(ticket_id)s - %(ticket_title)s"
+
+#~ msgid "Hello,"
+#~ msgstr "こんにちは、"
+
+#~ msgid "The following ticket, which you are following, has been resolved:"
+#~ msgstr "フォローしている以下のチケットが解決されました："
+
+#~ msgid "The original ticket description was:"
+#~ msgstr "元のチケットの説明："
+
+#~ msgid ""
+#~ "This resolution has been e-mailed to the submitter, who will verify it "
+#~ "before you can close this ticket."
+#~ msgstr ""
+#~ "この解決策は提出者にメールで送信されました。チケットをクローズする前に、提"
+#~ "出者が確認します。"
+
+#~ msgid "Original description:"
+#~ msgstr "元の説明："
+
+#~ msgid "The following comment was added:"
+#~ msgstr "以下のコメントが追加されました："
+
+#~ msgid "This information has not been e-mailed to the submitter."
+#~ msgstr "この情報は提出者にメール送信されていません。"
+
+#~ msgid "This information has been e-mailed to the submitter."
+#~ msgstr "この情報は提出者にメール送信されました。"
+
+#~ msgid "Ticket Assigned - Followed Ticket"
+#~ msgstr "チケットが割り当てられました - フォロー中のチケット"
+
+#~ msgid "Ticket Closed - Followed Ticket"
+#~ msgstr "チケットがクローズされました - フォロー中のチケット"
+
+#~ msgid "Ticket Resolved - Followed Ticket"
+#~ msgstr "チケットが解決されました - フォロー中のチケット"
+
+#~ msgid "The following ticket, which you are following, has been resolved."
+#~ msgstr "フォローしている以下のチケットが解決されました。"
+
+#~ msgid "The resolution that was added was:"
+#~ msgstr "追加された解決策："
+
+#~ msgid "Ticket Updated - Followed Ticket"
+#~ msgstr "チケットが更新されました - フォロー中のチケット"
+
+#~ msgid "Just for reference, the original ticket description was:"
+#~ msgstr "参考までに、元のチケットの説明："
+
+#~ msgid "The resolution provided was:"
+#~ msgstr "提供された解決策："
+
+#~ msgid "login required"
+#~ msgstr "ログインが必要です"
+
+#~ msgid "Unknown"
+#~ msgstr "不明"

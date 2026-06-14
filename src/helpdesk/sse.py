@@ -16,10 +16,11 @@ class UserSSEStream:
         self.queue = deque()
         self.heartbeat_interval = heartbeat_interval
         self._active = True
+        self._last_heartbeat = time.time()
 
     def __iter__(self):
-        yield "retry: 3000\n\n"
-        last_heartbeat = time.time()
+        yield "retry: 5000\n\n"
+        self._last_heartbeat = time.time()
 
         while self._active:
             try:
@@ -33,12 +34,12 @@ class UserSSEStream:
 
             if event is not None:
                 yield self._format_event(event["type"], event["data"])
-                last_heartbeat = time.time()
+                self._last_heartbeat = time.time()
             else:
                 now = time.time()
-                if now - last_heartbeat >= self.heartbeat_interval:
-                    yield ": heartbeat\n\n"
-                    last_heartbeat = now
+                if now - self._last_heartbeat >= self.heartbeat_interval:
+                    yield self._format_event("ping", {"ts": int(now * 1000)})
+                    self._last_heartbeat = now
                 time.sleep(0.5)
 
     def _format_event(self, event_type, data):
@@ -64,7 +65,6 @@ def _get_user_streams(user_id):
 
 
 def subscribe(user_id):
-    """Create a new SSE stream for a user and register it."""
     stream = UserSSEStream(user_id)
     with _lock:
         _listeners[user_id].append(stream)
@@ -73,7 +73,6 @@ def subscribe(user_id):
 
 
 def unsubscribe(stream):
-    """Remove an SSE stream from the listeners."""
     stream.close()
     with _lock:
         user_streams = _listeners.get(stream.user_id, [])
@@ -85,7 +84,6 @@ def unsubscribe(stream):
 
 
 def broadcast_to_user(user_id, event_type, data):
-    """Send an SSE event to all streams of a specific user."""
     streams = _get_user_streams(user_id)
     for stream in streams:
         stream.send(event_type, data)
@@ -94,7 +92,6 @@ def broadcast_to_user(user_id, event_type, data):
 
 
 def broadcast_to_followers(ticket, event_type, data=None):
-    """Send an SSE event to all followers of a ticket."""
     from helpdesk.models import UserTicketFollow
 
     if data is None:
