@@ -42,12 +42,46 @@ class Command(BaseCommand):
             help="Send email reminder but dont escalate tickets",
         )
 
+    def _get_escalation_deadline(self, ticket, escalation_days):
+        """
+        Calculate the effective escalation deadline for a ticket,
+        taking into account total paused time.
+        """
+        base_time = ticket.last_escalation or ticket.created
+        if ticket.total_paused_time:
+            effective_base = base_time + ticket.total_paused_time
+        else:
+            effective_base = base_time
+        return effective_base + timedelta(days=escalation_days)
+
+    def _ticket_needs_escalation(self, ticket, escalation_days):
+        """
+        Check if a ticket needs to be escalated, accounting for paused time.
+        Returns (needs_escalation, reason) tuple.
+        """
+        if ticket.on_hold:
+            return False, "ticket is on hold"
+
+        if (
+            Ticket.ESCALATION_EXCLUDE_STATUSES
+            and ticket.status in Ticket.ESCALATION_EXCLUDE_STATUSES
+        ):
+            return False, "ticket status excluded from escalation"
+
+        if ticket.priority <= 1:
+            return False, "priority already at maximum"
+
+        deadline = self._get_escalation_deadline(ticket, escalation_days)
+        if deadline > timezone.now():
+            return False, "escalation deadline not yet reached"
+
+        return True, None
+
     def handle(self, *args, **options):
         verbose = options["escalate_verbosely"]
         notify_only = options["notify_only"]
 
         queue_slugs = options["queues"]
-        # Only include queues with escalation configured
         queues = Queue.objects.filter(escalate_days__isnull=False).exclude(
             escalate_days=0
         )
@@ -85,26 +119,41 @@ class Command(BaseCommand):
                 | Q(last_escalation__isnull=True, created__lte=req_last_escl_date)
             )
 
-            for ticket in query.select_for_update():
+            for ticket in query.select_for_update(skip_locked=True):
                 with transaction.atomic():
                     ticket.refresh_from_db()
 
-                    if ticket.on_hold or (
-                        Ticket.ESCALATION_EXCLUDE_STATUSES
-                        and ticket.status in Ticket.ESCALATION_EXCLUDE_STATUSES
-                    ):
-                        continue
-
-                    if ticket.priority <= 1:
-                        continue
-
-                    if ticket.last_escalation and ticket.last_escalation > req_last_escl_date:
+                    needs_escalation, skip_reason = self._ticket_needs_escalation(
+                        ticket, days
+                    )
+                    if not needs_escalation:
+                        if verbose and skip_reason:
+                            self.stdout.write(
+                                f"  - Skipping {ticket.ticket}: {skip_reason}"
+                            )
                         continue
 
                     old_priority = ticket.priority
-                    ticket.last_escalation = timezone.now()
-                    ticket.priority -= 1
-                    ticket.save(update_fields=["last_escalation", "priority", "modified"])
+                    old_last_escalation = ticket.last_escalation
+                    new_last_escalation = timezone.now()
+                    new_priority = ticket.priority - 1
+
+                    recheck = Ticket.objects.filter(
+                        id=ticket.id, last_escalation=old_last_escalation
+                    ).update(
+                        last_escalation=new_last_escalation,
+                        priority=new_priority,
+                        modified=new_last_escalation,
+                    )
+                    if recheck == 0:
+                        if verbose:
+                            self.stdout.write(
+                                f"  - Skipping {ticket.ticket}: already escalated by another worker"
+                            )
+                        continue
+
+                    ticket.last_escalation = new_last_escalation
+                    ticket.priority = new_priority
 
                     context = safe_template_context(ticket)
 

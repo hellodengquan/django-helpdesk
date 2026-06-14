@@ -561,6 +561,27 @@ class Ticket(models.Model):
         help_text=_("If a ticket is on hold, it will not automatically be escalated."),
     )
 
+    hold_start_time = models.DateTimeField(
+        _("Hold Start Time"),
+        blank=True,
+        null=True,
+        editable=False,
+        help_text=_(
+            "The date and time when the ticket was placed on hold. "
+            "Used to calculate total paused time for SLA calculations."
+        ),
+    )
+
+    total_paused_time = models.DurationField(
+        _("Total Paused Time"),
+        blank=True,
+        default=datetime.timedelta,
+        help_text=_(
+            "Total duration the ticket has been on hold. "
+            "This is used to adjust SLA escalation calculations."
+        ),
+    )
+
     description = models.TextField(
         _("Description"),
         blank=True,
@@ -770,6 +791,55 @@ class Ticket(models.Model):
 
     get_allowed_status_flow = property(_get_allowed_status_flow)
 
+    def place_on_hold(self):
+        """Place the ticket on hold and record the start time."""
+        if not self.on_hold:
+            self.on_hold = True
+            self.hold_start_time = timezone.now()
+            self.save(update_fields=["on_hold", "hold_start_time", "modified"])
+
+    def take_off_hold(self):
+        """Take the ticket off hold and accumulate the paused time."""
+        if self.on_hold and self.hold_start_time:
+            paused_duration = timezone.now() - self.hold_start_time
+            if self.total_paused_time is None:
+                self.total_paused_time = datetime.timedelta()
+            self.total_paused_time += paused_duration
+            self.on_hold = False
+            self.hold_start_time = None
+            self.save(
+                update_fields=[
+                    "on_hold",
+                    "hold_start_time",
+                    "total_paused_time",
+                    "modified",
+                ]
+            )
+        elif self.on_hold:
+            self.on_hold = False
+            self.hold_start_time = None
+            self.save(update_fields=["on_hold", "hold_start_time", "modified"])
+
+    def get_effective_last_escalation(self):
+        """
+        Return the effective last escalation time adjusted for total paused time.
+        If the ticket is currently on hold, returns None (should not escalate).
+        """
+        if self.on_hold:
+            return None
+
+        if not self.last_escalation:
+            base_time = self.created
+        else:
+            base_time = self.last_escalation
+
+        if self.total_paused_time:
+            effective_time = base_time + self.total_paused_time
+        else:
+            effective_time = base_time
+
+        return effective_time
+
     def _get_ticket_url(self):
         """
         Returns a publicly-viewable URL for this ticket, used when giving
@@ -860,7 +930,6 @@ class Ticket(models.Model):
 
     def save(self, *args, **kwargs):
         if not self.id:
-            # This is a new ticket as no ID yet exists.
             self.created = timezone.now()
 
         if not self.priority:
@@ -870,6 +939,25 @@ class Ticket(models.Model):
 
         if len(self.title) > 200:
             self.title = self.title[:197] + "..."
+
+        if self.id:
+            try:
+                old_ticket = Ticket.objects.get(id=self.id)
+                if old_ticket.on_hold != self.on_hold:
+                    if self.on_hold and not old_ticket.on_hold:
+                        self.hold_start_time = timezone.now()
+                    elif not self.on_hold and old_ticket.on_hold and old_ticket.hold_start_time:
+                        paused_duration = timezone.now() - old_ticket.hold_start_time
+                        if self.total_paused_time is None:
+                            self.total_paused_time = datetime.timedelta()
+                        self.total_paused_time += paused_duration
+                        self.hold_start_time = None
+                    elif not self.on_hold and old_ticket.on_hold:
+                        self.hold_start_time = None
+            except ObjectDoesNotExist:
+                pass
+        elif self.on_hold:
+            self.hold_start_time = timezone.now()
 
         super(Ticket, self).save(*args, **kwargs)
 

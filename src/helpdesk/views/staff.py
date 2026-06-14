@@ -1447,13 +1447,11 @@ def hold_ticket(request, ticket_id, unhold=False):
     ticket_perm_check(request, ticket)
 
     if unhold:
-        ticket.on_hold = False
+        ticket.take_off_hold()
         followup_title = _("Ticket taken off hold")
     else:
-        ticket.on_hold = True
+        ticket.place_on_hold()
         followup_title = _("Ticket placed on hold")
-
-    ticket.save()
 
     followup = FollowUp.objects.create(
         ticket=ticket,
