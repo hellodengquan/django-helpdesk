@@ -863,3 +863,196 @@ class TicketPauseBoundaryTestCase(TestCase):
         expected_duration = timezone.now() - f1.date
         self.assertGreaterEqual(ticket.total_paused_time, expected_duration - timedelta(seconds=1))
         self.assertLess(ticket.total_paused_time, expected_duration + timedelta(seconds=1))
+
+
+class TicketHoldConcurrencyTestCase(TestCase):
+    fixtures = ["emailtemplate.json"]
+
+    def setUp(self):
+        self.queue = Queue.objects.create(
+            title="Concurrency Test Queue",
+            slug="concurrency_test",
+            escalate_days=2,
+        )
+        self.ticket_data = {
+            "queue": self.queue,
+            "title": "Concurrency Test Ticket",
+            "description": "Testing concurrency safety",
+        }
+
+    def test_concurrent_take_off_hold_no_lost_update(self):
+        """
+        Simulate two workers simultaneously calling take_off_hold.
+        The total_paused_time should be incremented only once (not lost or doubled).
+        """
+        import threading
+
+        with freeze_time("2024-01-01 10:00:00"):
+            ticket = Ticket.objects.create(**self.ticket_data)
+            ticket.place_on_hold()
+
+        with freeze_time("2024-01-04 10:00:00"):
+            expected_duration = timedelta(days=3)
+            errors = []
+
+            def worker():
+                try:
+                    ticket.refresh_from_db()
+                    ticket.take_off_hold()
+                except Exception as e:
+                    errors.append(str(e))
+
+            t1 = threading.Thread(target=worker)
+            t2 = threading.Thread(target=worker)
+
+            t1.start()
+            t2.start()
+            t1.join()
+            t2.join()
+
+            if errors:
+                self.fail(f"Worker errors: {errors}")
+
+            ticket.refresh_from_db()
+            self.assertFalse(ticket.on_hold)
+            self.assertIsNone(ticket.hold_start_time)
+
+            self.assertGreaterEqual(
+                ticket.total_paused_time,
+                expected_duration - timedelta(seconds=1),
+            )
+            self.assertLess(
+                ticket.total_paused_time,
+                expected_duration + timedelta(hours=1),
+            )
+
+    def test_concurrent_place_on_hold_idempotent(self):
+        """
+        Simulate two workers simultaneously calling place_on_hold.
+        Only one should succeed, and hold_start_time should be set once.
+        """
+        import threading
+
+        ticket = Ticket.objects.create(**self.ticket_data)
+        self.assertFalse(ticket.on_hold)
+
+        results = [None, None]
+        hold_times = [None, None]
+        errors = []
+
+        def worker(worker_id):
+            try:
+                ticket.refresh_from_db()
+                ticket.place_on_hold()
+                ticket.refresh_from_db()
+                results[worker_id] = ticket.on_hold
+                hold_times[worker_id] = ticket.hold_start_time
+            except Exception as e:
+                errors.append(str(e))
+                results[worker_id] = False
+
+        t1 = threading.Thread(target=worker, args=(0,))
+        t2 = threading.Thread(target=worker, args=(1,))
+
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        if errors:
+            self.fail(f"Worker errors: {errors}")
+
+        ticket.refresh_from_db()
+        self.assertTrue(ticket.on_hold)
+        self.assertIsNotNone(ticket.hold_start_time)
+        self.assertEqual(hold_times[0], hold_times[1])
+
+    def test_concurrent_hold_unhold_alternating(self):
+        """
+        Simulate alternating hold/unhold operations from concurrent workers.
+        Verify that total_paused_time accumulates correctly.
+        """
+        import threading
+        import time
+
+        with freeze_time("2024-01-01 10:00:00"):
+            ticket = Ticket.objects.create(**self.ticket_data)
+
+        errors = []
+
+        def hold_worker():
+            try:
+                for _ in range(5):
+                    ticket.refresh_from_db()
+                    ticket.place_on_hold()
+                    time.sleep(0.01)
+            except Exception as e:
+                errors.append(("hold", str(e)))
+
+        def unhold_worker():
+            try:
+                for _ in range(5):
+                    ticket.refresh_from_db()
+                    ticket.take_off_hold()
+                    time.sleep(0.01)
+            except Exception as e:
+                errors.append(("unhold", str(e)))
+
+        t1 = threading.Thread(target=hold_worker)
+        t2 = threading.Thread(target=unhold_worker)
+
+        t1.start()
+        time.sleep(0.005)
+        t2.start()
+        t1.join()
+        t2.join()
+
+        if errors:
+            self.fail(f"Worker errors: {errors}")
+
+        ticket.refresh_from_db()
+        self.assertIsNotNone(ticket.total_paused_time)
+        self.assertGreaterEqual(ticket.total_paused_time, timedelta(0))
+
+    def test_multiple_take_off_hold_idempotent(self):
+        """
+        Calling take_off_hold multiple times on the same ticket
+        should not change total_paused_time after the first call.
+        """
+        with freeze_time("2024-01-01 10:00:00"):
+            ticket = Ticket.objects.create(**self.ticket_data)
+            ticket.place_on_hold()
+
+        with freeze_time("2024-01-03 10:00:00"):
+            ticket.take_off_hold()
+            first_paused = ticket.total_paused_time
+
+            ticket.take_off_hold()
+            second_paused = ticket.total_paused_time
+
+            ticket.take_off_hold()
+            third_paused = ticket.total_paused_time
+
+        self.assertEqual(first_paused, second_paused)
+        self.assertEqual(second_paused, third_paused)
+
+    def test_multiple_place_on_hold_idempotent(self):
+        """
+        Calling place_on_hold multiple times on the same ticket
+        should not change hold_start_time after the first call.
+        """
+        with freeze_time("2024-01-01 10:00:00"):
+            ticket = Ticket.objects.create(**self.ticket_data)
+            ticket.place_on_hold()
+            first_start = ticket.hold_start_time
+
+        with freeze_time("2024-01-02 10:00:00"):
+            ticket.place_on_hold()
+            second_start = ticket.hold_start_time
+
+        with freeze_time("2024-01-03 10:00:00"):
+            ticket.place_on_hold()
+            third_start = ticket.hold_start_time
+
+        self.assertEqual(first_start, second_start)
+        self.assertEqual(second_start, third_start)

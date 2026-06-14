@@ -16,7 +16,8 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
-from django.db import models
+from django.db import models, transaction
+from django.db.models import F
 from django.utils import timezone
 from django.utils.safestring import mark_safe
 from django.utils.translation import gettext, gettext_lazy as _
@@ -792,33 +793,72 @@ class Ticket(models.Model):
     get_allowed_status_flow = property(_get_allowed_status_flow)
 
     def place_on_hold(self):
-        """Place the ticket on hold and record the start time."""
-        if not self.on_hold:
-            self.on_hold = True
-            self.hold_start_time = timezone.now()
-            self.save(update_fields=["on_hold", "hold_start_time", "modified"])
+        """
+        Place the ticket on hold and record the start time.
+
+        Uses row-level locking (SELECT FOR UPDATE) within a transaction to
+        prevent race conditions when multiple workers try to place the same
+        ticket on hold simultaneously.
+        """
+        with transaction.atomic():
+            locked = Ticket.objects.select_for_update().filter(id=self.id).first()
+            if not locked:
+                return
+
+            if locked.on_hold:
+                self.refresh_from_db()
+                return
+
+            now = timezone.now()
+            Ticket.objects.filter(id=self.id).update(
+                on_hold=True,
+                hold_start_time=now,
+                modified=now,
+            )
+            self.refresh_from_db()
 
     def take_off_hold(self):
-        """Take the ticket off hold and accumulate the paused time."""
-        if not self.on_hold:
-            return
+        """
+        Take the ticket off hold and accumulate the paused time.
 
-        hold_start = self.hold_start_time or self._find_last_hold_start_time() or self.created
+        Uses row-level locking (SELECT FOR UPDATE) within a transaction and
+        F() expressions for atomic increment of total_paused_time to prevent
+        lost-update race conditions when multiple workers process the same
+        ticket simultaneously.
+        """
+        with transaction.atomic():
+            locked = Ticket.objects.select_for_update().filter(id=self.id).first()
+            if not locked:
+                return
 
-        paused_duration = timezone.now() - hold_start
-        if self.total_paused_time is None:
-            self.total_paused_time = datetime.timedelta()
-        self.total_paused_time += paused_duration
-        self.on_hold = False
-        self.hold_start_time = None
-        self.save(
-            update_fields=[
-                "on_hold",
-                "hold_start_time",
-                "total_paused_time",
-                "modified",
-            ]
-        )
+            if not locked.on_hold:
+                self.refresh_from_db()
+                return
+
+            hold_start = (
+                locked.hold_start_time
+                or locked._find_last_hold_start_time()
+                or locked.created
+            )
+
+            paused_duration = timezone.now() - hold_start
+            now = timezone.now()
+
+            if locked.total_paused_time is None:
+                Ticket.objects.filter(id=self.id).update(
+                    total_paused_time=paused_duration,
+                    on_hold=False,
+                    hold_start_time=None,
+                    modified=now,
+                )
+            else:
+                Ticket.objects.filter(id=self.id).update(
+                    total_paused_time=F("total_paused_time") + paused_duration,
+                    on_hold=False,
+                    hold_start_time=None,
+                    modified=now,
+                )
+            self.refresh_from_db()
 
     def _find_last_hold_start_time(self):
         """
