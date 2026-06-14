@@ -285,6 +285,16 @@ Options that change ticket properties
                                         HELPDESK_TICKET_REOPENED_STATUS,
                                         HELPDESK_TICKET_FORKED_STATUS)
 
+- **HELPDESK_TICKET_ESCALATION_EXCLUDE_STATUSES** Define the list of statuses to exclude from automatic ticket escalation.
+
+  **Default:** ``()`` (empty tuple - no statuses excluded)
+
+  Tickets with these statuses will not be escalated or receive escalation email notifications. This is useful for statuses like "Waiting on Customer" where you don't want to escalate the ticket while waiting for external input.
+
+  Example::
+
+    HELPDESK_TICKET_ESCALATION_EXCLUDE_STATUSES = (HELPDESK_TICKET_WAITING_CUSTOMER_STATUS,)
+
 - **HELPDESK_TICKET_STATUS_CHOICES_FLOW** Customize the allowed state changes depending on the current state.
 
   The **default** is below::

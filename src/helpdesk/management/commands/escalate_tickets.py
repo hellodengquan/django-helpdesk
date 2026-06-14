@@ -10,6 +10,7 @@ scripts/escalate_tickets.py - Easy way to escalate tickets based on their age,
 
 from datetime import date, timedelta
 from django.core.management.base import BaseCommand
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from django.utils.translation import gettext as _
@@ -70,45 +71,67 @@ class Command(BaseCommand):
 
             req_last_escl_date = timezone.now() - timedelta(days=days)
 
-            for ticket in (
+            query = (
                 queue.ticket_set.filter(status__in=Ticket.OPEN_STATUSES)
                 .exclude(priority=1)
-                .filter(Q(on_hold__isnull=True) | Q(on_hold=False))
-                .filter(
-                    Q(last_escalation__lte=req_last_escl_date)
-                    | Q(last_escalation__isnull=True, created__lte=req_last_escl_date)
-                )
-            ):
-                ticket.last_escalation = timezone.now()
-                ticket.priority -= 1
-                ticket.save()
+                .exclude(on_hold=True)
+            )
 
-                context = safe_template_context(ticket)
+            if Ticket.ESCALATION_EXCLUDE_STATUSES:
+                query = query.exclude(status__in=Ticket.ESCALATION_EXCLUDE_STATUSES)
 
-                ticket.send(
-                    {
-                        "submitter": ("escalated_submitter", context),
-                        "ticket_cc": ("escalated_cc", context),
-                        "assigned_to": ("escalated_owner", context),
-                    },
-                    fail_silently=True,
-                )
+            query = query.filter(
+                Q(last_escalation__lte=req_last_escl_date)
+                | Q(last_escalation__isnull=True, created__lte=req_last_escl_date)
+            )
 
-                if verbose:
-                    self.stdout.write(
-                        f"  - Esclating {ticket.ticket} from {ticket.priority + 1}>{ticket.priority}"
+            for ticket in query.select_for_update():
+                with transaction.atomic():
+                    ticket.refresh_from_db()
+
+                    if ticket.on_hold or (
+                        Ticket.ESCALATION_EXCLUDE_STATUSES
+                        and ticket.status in Ticket.ESCALATION_EXCLUDE_STATUSES
+                    ):
+                        continue
+
+                    if ticket.priority <= 1:
+                        continue
+
+                    if ticket.last_escalation and ticket.last_escalation > req_last_escl_date:
+                        continue
+
+                    old_priority = ticket.priority
+                    ticket.last_escalation = timezone.now()
+                    ticket.priority -= 1
+                    ticket.save(update_fields=["last_escalation", "priority", "modified"])
+
+                    context = safe_template_context(ticket)
+
+                    ticket.send(
+                        {
+                            "submitter": ("escalated_submitter", context),
+                            "ticket_cc": ("escalated_cc", context),
+                            "assigned_to": ("escalated_owner", context),
+                        },
+                        fail_silently=True,
                     )
 
-                if not notify_only:
-                    followup = ticket.followup_set.create(
-                        title=_("Ticket Escalated"),
-                        public=True,
-                        comment=_("Ticket escalated after %(nb)s days")
-                        % {"nb": queue.escalate_days},
-                    )
+                    if verbose:
+                        self.stdout.write(
+                            f"  - Escalating {ticket.ticket} from {old_priority}>{ticket.priority}"
+                        )
 
-                    followup.ticketchange_set.create(
-                        field=_("Priority"),
-                        old_value=ticket.priority + 1,
-                        new_value=ticket.priority,
-                    )
+                    if not notify_only:
+                        followup = ticket.followup_set.create(
+                            title=_("Ticket Escalated"),
+                            public=True,
+                            comment=_("Ticket escalated after %(nb)s days")
+                            % {"nb": queue.escalate_days},
+                        )
+
+                        followup.ticketchange_set.create(
+                            field=_("Priority"),
+                            old_value=old_priority,
+                            new_value=ticket.priority,
+                        )
