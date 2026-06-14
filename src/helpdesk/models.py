@@ -803,7 +803,7 @@ class Ticket(models.Model):
         if not self.on_hold:
             return
 
-        hold_start = self.hold_start_time or self.modified or self.created
+        hold_start = self.hold_start_time or self._find_last_hold_start_time() or self.created
 
         paused_duration = timezone.now() - hold_start
         if self.total_paused_time is None:
@@ -819,6 +819,34 @@ class Ticket(models.Model):
                 "modified",
             ]
         )
+
+    def _find_last_hold_start_time(self):
+        """
+        Find the timestamp when the ticket was last placed on hold by
+        examining FollowUp history.
+
+        Strategy:
+        1. Look for TicketChange records with field="On Hold" and new_value="True"
+        2. For each, check if there's a subsequent unhold (new_value="False")
+        3. Return the date of the last hold that has no subsequent unhold
+        4. If no history found, return None (caller should use created as fallback)
+        """
+        hold_changes = self.ticketchange_set.filter(
+            field=_("On Hold"),
+            new_value="True",
+        ).order_by("-followup__date")
+
+        for hold_change in hold_changes:
+            hold_date = hold_change.followup.date
+            subsequent_unhold = self.ticketchange_set.filter(
+                field=_("On Hold"),
+                new_value="False",
+                followup__date__gt=hold_date,
+            ).exists()
+            if not subsequent_unhold:
+                return hold_date
+
+        return None
 
     def get_effective_last_escalation(self):
         """
@@ -953,7 +981,7 @@ class Ticket(models.Model):
                     elif not self.on_hold and old_ticket.on_hold:
                         hold_start = (
                             old_ticket.hold_start_time
-                            or old_ticket.modified
+                            or old_ticket._find_last_hold_start_time()
                             or old_ticket.created
                         )
                         paused_duration = timezone.now() - hold_start

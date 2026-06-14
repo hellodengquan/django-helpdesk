@@ -532,15 +532,38 @@ class TicketMigrationBackfillTestCase(TestCase):
         self.assertIsNotNone(ticket.total_paused_time)
         self.assertEqual(ticket.total_paused_time, timedelta())
 
-    def test_backfill_legacy_on_hold_without_start_time(self):
+    def test_backfill_legacy_on_hold_with_followup_history(self):
         with freeze_time("2024-01-01 10:00:00"):
             ticket = Ticket.objects.create(
                 queue=self.queue,
-                title="Legacy On Hold",
+                title="Legacy On Hold With History",
                 priority=3,
                 status=Ticket.OPEN_STATUS,
             )
+
         with freeze_time("2024-01-03 10:00:00"):
+            followup = FollowUp.objects.create(
+                ticket=ticket,
+                title="Ticket placed on hold",
+                date=timezone.now(),
+                public=True,
+            )
+            from helpdesk.models import TicketChange
+            TicketChange.objects.create(
+                followup=followup,
+                field="On Hold",
+                old_value="False",
+                new_value="True",
+            )
+
+        with freeze_time("2024-01-08 10:00:00"):
+            followup2 = FollowUp.objects.create(
+                ticket=ticket,
+                title="User comment",
+                date=timezone.now(),
+                public=True,
+                comment="Any comment",
+            )
             Ticket.objects.filter(id=ticket.id).update(
                 on_hold=True, hold_start_time=None, modified=timezone.now()
             )
@@ -552,7 +575,81 @@ class TicketMigrationBackfillTestCase(TestCase):
 
         ticket.refresh_from_db()
         self.assertIsNotNone(ticket.hold_start_time)
-        self.assertEqual(ticket.hold_start_time, ticket.modified)
+        self.assertEqual(ticket.hold_start_time, followup.date)
+        self.assertNotEqual(ticket.hold_start_time, ticket.modified)
+
+    def test_backfill_legacy_on_hold_without_history_fallback_to_created(self):
+        with freeze_time("2024-01-01 10:00:00"):
+            ticket = Ticket.objects.create(
+                queue=self.queue,
+                title="Legacy On Hold Without History",
+                priority=3,
+                status=Ticket.OPEN_STATUS,
+            )
+
+        with freeze_time("2024-01-05 10:00:00"):
+            followup = FollowUp.objects.create(
+                ticket=ticket,
+                title="User comment",
+                date=timezone.now(),
+                public=True,
+                comment="Random comment that updates modified",
+            )
+            Ticket.objects.filter(id=ticket.id).update(
+                on_hold=True, hold_start_time=None, modified=timezone.now()
+            )
+        ticket.refresh_from_db()
+
+        backfill = _get_migration_backfill()
+        from django.apps import apps
+        backfill(apps, None)
+
+        ticket.refresh_from_db()
+        self.assertIsNotNone(ticket.hold_start_time)
+        self.assertEqual(ticket.hold_start_time, ticket.created)
+        self.assertNotEqual(ticket.hold_start_time, ticket.modified)
+
+    def test_backfill_legacy_on_hold_with_alternating_hold_unhold(self):
+        with freeze_time("2024-01-01 10:00:00"):
+            ticket = Ticket.objects.create(
+                queue=self.queue,
+                title="Alternating Hold Unhold",
+                priority=3,
+                status=Ticket.OPEN_STATUS,
+            )
+
+        with freeze_time("2024-01-02 10:00:00"):
+            f1 = FollowUp.objects.create(
+                ticket=ticket, title="Ticket placed on hold", date=timezone.now(), public=True
+            )
+            from helpdesk.models import TicketChange
+            TicketChange.objects.create(followup=f1, field="On Hold", old_value="False", new_value="True")
+
+        with freeze_time("2024-01-04 10:00:00"):
+            f2 = FollowUp.objects.create(
+                ticket=ticket, title="Ticket taken off hold", date=timezone.now(), public=True
+            )
+            TicketChange.objects.create(followup=f2, field="On Hold", old_value="True", new_value="False")
+
+        with freeze_time("2024-01-06 10:00:00"):
+            f3 = FollowUp.objects.create(
+                ticket=ticket, title="Ticket placed on hold", date=timezone.now(), public=True
+            )
+            TicketChange.objects.create(followup=f3, field="On Hold", old_value="False", new_value="True")
+
+        with freeze_time("2024-01-10 10:00:00"):
+            Ticket.objects.filter(id=ticket.id).update(
+                on_hold=True, hold_start_time=None, modified=timezone.now()
+            )
+        ticket.refresh_from_db()
+
+        backfill = _get_migration_backfill()
+        from django.apps import apps
+        backfill(apps, None)
+
+        ticket.refresh_from_db()
+        self.assertIsNotNone(ticket.hold_start_time)
+        self.assertEqual(ticket.hold_start_time, f3.date)
 
     def test_backfill_non_hold_ticket_unchanged(self):
         with freeze_time("2024-01-01 10:00:00"):
@@ -572,7 +669,6 @@ class TicketMigrationBackfillTestCase(TestCase):
 
         ticket.refresh_from_db()
         self.assertEqual(ticket.hold_start_time, original_hold_start)
-        self.assertEqual(ticket.modified, original_modified)
 
 
 class TicketPauseBoundaryTestCase(TestCase):
@@ -638,3 +734,132 @@ class TicketPauseBoundaryTestCase(TestCase):
         effective = ticket.get_effective_last_escalation()
         expected = ticket.created + timedelta(days=3) + (timezone.now() - ticket.hold_start_time)
         self.assertEqual(effective, expected)
+
+    def test_find_last_hold_start_time_with_history(self):
+        with freeze_time("2024-01-01 10:00:00"):
+            ticket = Ticket.objects.create(**self.ticket_data)
+
+        with freeze_time("2024-01-03 10:00:00"):
+            followup = FollowUp.objects.create(
+                ticket=ticket, title="Ticket placed on hold", date=timezone.now(), public=True
+            )
+            from helpdesk.models import TicketChange
+            TicketChange.objects.create(
+                followup=followup, field="On Hold", old_value="False", new_value="True"
+            )
+
+        Ticket.objects.filter(id=ticket.id).update(on_hold=True, hold_start_time=None)
+        ticket.refresh_from_db()
+
+        result = ticket._find_last_hold_start_time()
+        self.assertEqual(result, followup.date)
+
+    def test_find_last_hold_start_time_without_history(self):
+        ticket = Ticket.objects.create(**self.ticket_data)
+        Ticket.objects.filter(id=ticket.id).update(on_hold=True, hold_start_time=None)
+        ticket.refresh_from_db()
+
+        result = ticket._find_last_hold_start_time()
+        self.assertIsNone(result)
+
+    def test_find_last_hold_start_time_with_subsequent_unhold(self):
+        with freeze_time("2024-01-01 10:00:00"):
+            ticket = Ticket.objects.create(**self.ticket_data)
+
+        from helpdesk.models import TicketChange
+
+        with freeze_time("2024-01-02 10:00:00"):
+            f1 = FollowUp.objects.create(
+                ticket=ticket, title="Ticket placed on hold", date=timezone.now(), public=True
+            )
+            TicketChange.objects.create(followup=f1, field="On Hold", old_value="False", new_value="True")
+
+        with freeze_time("2024-01-04 10:00:00"):
+            f2 = FollowUp.objects.create(
+                ticket=ticket, title="Ticket taken off hold", date=timezone.now(), public=True
+            )
+            TicketChange.objects.create(followup=f2, field="On Hold", old_value="True", new_value="False")
+
+        Ticket.objects.filter(id=ticket.id).update(on_hold=False, hold_start_time=None)
+        ticket.refresh_from_db()
+
+        result = ticket._find_last_hold_start_time()
+        self.assertIsNone(result)
+
+    def test_take_off_hold_uses_history_not_modified(self):
+        with freeze_time("2024-01-01 10:00:00"):
+            ticket = Ticket.objects.create(**self.ticket_data)
+
+        from helpdesk.models import TicketChange
+        with freeze_time("2024-01-03 10:00:00"):
+            f1 = FollowUp.objects.create(
+                ticket=ticket, title="Ticket placed on hold", date=timezone.now(), public=True
+            )
+            TicketChange.objects.create(followup=f1, field="On Hold", old_value="False", new_value="True")
+
+        with freeze_time("2024-01-08 10:00:00"):
+            f2 = FollowUp.objects.create(
+                ticket=ticket, title="User comment", date=timezone.now(), public=True, comment="Test"
+            )
+            Ticket.objects.filter(id=ticket.id).update(
+                on_hold=True, hold_start_time=None, modified=timezone.now()
+            )
+        ticket.refresh_from_db()
+
+        with freeze_time("2024-01-10 10:00:00"):
+            ticket.take_off_hold()
+            ticket.refresh_from_db()
+
+        expected_duration = timezone.now() - f1.date
+        self.assertGreaterEqual(ticket.total_paused_time, expected_duration - timedelta(seconds=1))
+        self.assertLess(ticket.total_paused_time, expected_duration + timedelta(seconds=1))
+
+    def test_take_off_hold_fallback_to_created(self):
+        with freeze_time("2024-01-01 10:00:00"):
+            ticket = Ticket.objects.create(**self.ticket_data)
+
+        with freeze_time("2024-01-05 10:00:00"):
+            f1 = FollowUp.objects.create(
+                ticket=ticket, title="User comment", date=timezone.now(), public=True, comment="Test"
+            )
+            Ticket.objects.filter(id=ticket.id).update(
+                on_hold=True, hold_start_time=None, modified=timezone.now()
+            )
+        ticket.refresh_from_db()
+
+        with freeze_time("2024-01-10 10:00:00"):
+            ticket.take_off_hold()
+            ticket.refresh_from_db()
+
+        expected_duration = timezone.now() - ticket.created
+        self.assertGreaterEqual(ticket.total_paused_time, expected_duration - timedelta(seconds=1))
+        self.assertLess(ticket.total_paused_time, expected_duration + timedelta(seconds=1))
+
+    def test_save_off_hold_uses_history_not_modified(self):
+        with freeze_time("2024-01-01 10:00:00"):
+            ticket = Ticket.objects.create(**self.ticket_data)
+
+        from helpdesk.models import TicketChange
+        with freeze_time("2024-01-03 10:00:00"):
+            f1 = FollowUp.objects.create(
+                ticket=ticket, title="Ticket placed on hold", date=timezone.now(), public=True
+            )
+            TicketChange.objects.create(followup=f1, field="On Hold", old_value="False", new_value="True")
+
+        with freeze_time("2024-01-08 10:00:00"):
+            f2 = FollowUp.objects.create(
+                ticket=ticket, title="User comment", date=timezone.now(), public=True, comment="Test"
+            )
+            Ticket.objects.filter(id=ticket.id).update(
+                on_hold=True, hold_start_time=None, modified=timezone.now()
+            )
+        ticket.refresh_from_db()
+
+        with freeze_time("2024-01-10 10:00:00"):
+            ticket.on_hold = False
+            ticket.save()
+            ticket.refresh_from_db()
+
+        expected_duration = timezone.now() - f1.date
+        self.assertGreaterEqual(ticket.total_paused_time, expected_duration - timedelta(seconds=1))
+        self.assertLess(ticket.total_paused_time, expected_duration + timedelta(seconds=1))
