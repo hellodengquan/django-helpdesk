@@ -1,0 +1,120 @@
+{% extends "helpdesk/base.html" %}
+{% load i18n %}
+
+{% block helpdesk_title %}{% trans "Duplicate Scan Complete" %}{% endblock %}
+
+{% block helpdesk_breadcrumb %}
+<li class="breadcrumb-item">
+    <a href="{% url 'helpdesk:list' %}">{% trans "Tickets" %}</a>
+</li>
+<li class="breadcrumb-item">
+    <a href="{% url 'helpdesk:duplicate_suggestions' %}">{% trans "Duplicate Suggestions" %}</a>
+</li>
+<li class="breadcrumb-item">
+    <a href="{% url 'helpdesk:scan_all_duplicates' %}">{% trans "Scan" %}</a>
+</li>
+<li class="breadcrumb-item active">{% trans "Results" %}</li>
+{% endblock %}
+
+{% block helpdesk_body %}
+<div class="row">
+    <div class="col-lg-8 offset-lg-2">
+        <div class="card {% if total_found > 0 %}border-warning{% else %}border-success{% endif %}">
+            <div class="card-header {% if total_found > 0 %}bg-warning text-white{% else %}bg-success text-white{% endif %}">
+                <h3>
+                    <i class="fas {% if total_found > 0 %}fa-exclamation-triangle{% else %}fa-check-circle{% endif %}"></i>
+                    {% trans "Duplicate Scan Complete" %}
+                </h3>
+            </div>
+            <div class="card-body text-center py-5">
+                <div class="row mb-4">
+                    <div class="col-md-6">
+                        <div class="fa-stack fa-3x mb-2">
+                            <i class="fas fa-circle fa-stack-2x text-info"></i>
+                            <i class="fas fa-ticket-alt fa-stack-1x text-white"></i>
+                        </div>
+                        <h4 class="display-4 font-weight-bold">{{ total_scanned }}</h4>
+                        <p class="text-muted">{% trans "Tickets Scanned" %}</p>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="fa-stack fa-3x mb-2">
+                            <i class="fas fa-circle fa-stack-2x {% if total_found > 0 %}text-warning{% else %}text-success{% endif %}"></i>
+                            <i class="fas fa-copy fa-stack-1x text-white"></i>
+                        </div>
+                        <h4 class="display-4 font-weight-bold {% if total_found > 0 %}text-warning{% else %}text-success{% endif %}">{{ total_found }}</h4>
+                        <p class="text-muted">{% trans "Duplicate Pairs Found" %}</p>
+                    </div>
+                </div>
+
+                <p class="lead mb-4">
+                    {% blocktrans with days=days %}
+                    Scan completed for tickets created in the last {{ days }} days.
+                    {% endblocktrans %}
+                    {% if total_found > 0 %}
+                        {% blocktrans %}
+                        <strong>{{ total_found }}</strong> potential duplicate pairs were detected and saved for your review.
+                        {% endblocktrans %}
+                    {% else %}
+                        {% blocktrans %}
+                        No potential duplicates were detected. Great job keeping your ticket system clean!
+                        {% endblocktrans %}
+                    {% endif %}
+                </p>
+
+                <div class="row justify-content-center">
+                    <div class="col-md-5 mb-2">
+                        <a href="{% url 'helpdesk:duplicate_suggestions' %}"
+                           class="btn btn-primary btn-lg btn-block">
+                            <i class="fas fa-list"></i> {% trans "Review Pending Suggestions" %}
+                        </a>
+                    </div>
+                    <div class="col-md-5 mb-2">
+                        <a href="{% url 'helpdesk:scan_all_duplicates' %}"
+                           class="btn btn-secondary btn-lg btn-block">
+                            <i class="fas fa-redo"></i> {% trans "Run Another Scan" %}
+                        </a>
+                    </div>
+                </div>
+
+                {% if total_found > 0 %}
+                <div class="mt-4">
+                    <a href="{% url 'helpdesk:duplicate_suggestions' %}?status=pending"
+                       class="btn btn-warning btn-lg">
+                        <i class="fas fa-exclamation-triangle"></i>
+                        {% blocktrans with count=total_found %}Review {{ count }} New Pairs Now{% endblocktrans %}
+                    </a>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+
+        <div class="card mt-4">
+            <div class="card-header">
+                <h5><i class="fas fa-lightbulb"></i> {% trans "Tips for Managing Duplicates" %}</h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <h6>{% trans "Before Merging" %}</h6>
+                        <ul>
+                            <li><small>{% trans "Open both tickets in new tabs to compare details" %}</small></li>
+                            <li><small>{% trans "Check if descriptions reveal unique contexts even with similar titles" %}</small></li>
+                            <li><small>{% trans "Verify submitter emails match (duplicates from different users may be coincidental)" %}</small></li>
+                            <li><small>{% trans "Review any attachments on both tickets" %}</small></li>
+                        </ul>
+                    </div>
+                    <div class="col-md-6">
+                        <h6>{% trans "After Merging" %}</h6>
+                        <ul>
+                            <li><small>{% trans "The main ticket retains all follow-ups with source labels" %}</small></li>
+                            <li><small>{% trans "Merged tickets are marked as 'Duplicate' status" %}</small></li>
+                            <li><small>{% trans "All CC'd users are moved to the main ticket" %}</small></li>
+                            <li><small>{% trans "You can always view merged tickets from the main ticket" %}</small></li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -66,6 +66,7 @@ from helpdesk.models import (
     ChecklistTask,
     ChecklistTemplate,
     CustomField,
+    DuplicateCandidate,
     FollowUp,
     FollowUpAttachment,
     IgnoreEmail,
@@ -2218,5 +2219,213 @@ def delete_checklist_template(request, checklist_template_id):
         "helpdesk/checklist_template_confirm_delete.html",
         {
             "checklist_template": checklist_template,
+        },
+    )
+
+
+def _save_duplicate_candidates(ticket, duplicates, detected_by_user=None):
+    for dup_ticket, title_sim, desc_sim, overall_score in duplicates:
+        source_id = min(ticket.id, dup_ticket.id)
+        target_id = max(ticket.id, dup_ticket.id)
+        source_ticket = ticket if ticket.id == source_id else dup_ticket
+        target_ticket = ticket if ticket.id == target_id else dup_ticket
+        DuplicateCandidate.objects.get_or_create(
+            source_ticket=source_ticket,
+            target_ticket=target_ticket,
+            defaults={
+                "title_similarity": title_sim,
+                "description_similarity": desc_sim,
+                "overall_score": overall_score,
+                "detected_by": DuplicateCandidate.DETECTED_MANUAL if detected_by_user else DuplicateCandidate.DETECTED_AUTO,
+                "detected_by_user": detected_by_user,
+                "status": DuplicateCandidate.STATUS_PENDING,
+            },
+        )
+
+
+@helpdesk_staff_member_required
+def duplicate_suggestions(request):
+    huser = HelpdeskUser(request.user)
+    accessible_queue_ids = huser.get_queues().values_list("id", flat=True)
+
+    status_filter = request.GET.get("status", DuplicateCandidate.STATUS_PENDING)
+    page = request.GET.get("page", 1)
+    per_page = getattr(settings, "HELPDESK_DUPLICATES_PER_PAGE", 25)
+
+    candidates = DuplicateCandidate.objects.select_related(
+        "source_ticket", "source_ticket__queue",
+        "target_ticket", "target_ticket__queue",
+        "detected_by_user", "reviewed_by",
+    ).filter(
+        Q(source_ticket__queue_id__in=accessible_queue_ids)
+        | Q(target_ticket__queue_id__in=accessible_queue_ids)
+    )
+
+    if status_filter in dict(DuplicateCandidate.STATUS_CHOICES):
+        candidates = candidates.filter(status=status_filter)
+
+    paginator = Paginator(candidates, per_page)
+    try:
+        candidate_page = paginator.page(page)
+    except PageNotAnInteger:
+        candidate_page = paginator.page(1)
+    except EmptyPage:
+        candidate_page = paginator.page(paginator.num_pages)
+
+    return render(
+        request,
+        "helpdesk/duplicate_suggestions.html",
+        {
+            "candidates": candidate_page,
+            "status_filter": status_filter,
+            "status_choices": DuplicateCandidate.STATUS_CHOICES,
+        },
+    )
+
+
+@helpdesk_staff_member_required
+def ticket_duplicate_suggestions(request, ticket_id):
+    ticket = get_object_or_404(Ticket, id=ticket_id)
+    ticket_perm_check(request, ticket)
+
+    if request.method == "POST":
+        action = request.POST.get("action")
+        candidate_id = request.POST.get("candidate_id")
+
+        if action and candidate_id:
+            try:
+                candidate = DuplicateCandidate.objects.get(id=candidate_id)
+            except DuplicateCandidate.DoesNotExist:
+                pass
+            else:
+                if action == "merge":
+                    return redirect(
+                        "%s?tickets=%s&tickets=%s" % (
+                            reverse("helpdesk:merge_tickets"),
+                            candidate.source_ticket_id,
+                            candidate.target_ticket_id,
+                        )
+                    )
+                elif action == "dismiss":
+                    candidate.mark_dismissed(request.user)
+                elif action == "pending":
+                    candidate.status = DuplicateCandidate.STATUS_PENDING
+                    candidate.reviewed_by = request.user
+                    candidate.reviewed_at = timezone.now()
+                    candidate.save(update_fields=["status", "reviewed_by", "reviewed_at"])
+
+            return redirect(
+                reverse("helpdesk:ticket_duplicate_suggestions", args=[ticket_id])
+            )
+
+    duplicates = ticket.find_duplicates()
+    if duplicates:
+        _save_duplicate_candidates(ticket, duplicates)
+
+    existing_candidates = DuplicateCandidate.objects.filter(
+        Q(source_ticket=ticket) | Q(target_ticket=ticket)
+    ).select_related(
+        "source_ticket", "source_ticket__queue",
+        "target_ticket", "target_ticket__queue",
+        "reviewed_by",
+    ).order_by("-overall_score", "-created")
+
+    return render(
+        request,
+        "helpdesk/ticket_duplicate_suggestions.html",
+        {
+            "ticket": ticket,
+            "duplicates": duplicates,
+            "existing_candidates": existing_candidates,
+        },
+    )
+
+
+@helpdesk_staff_member_required
+def duplicate_candidate_action(request, candidate_id):
+    candidate = get_object_or_404(DuplicateCandidate, id=candidate_id)
+
+    huser = HelpdeskUser(request.user)
+    accessible_queue_ids = huser.get_queues().values_list("id", flat=True)
+    if (candidate.source_ticket.queue_id not in accessible_queue_ids
+            and candidate.target_ticket.queue_id not in accessible_queue_ids):
+        raise PermissionDenied()
+
+    if request.method == "POST":
+        action = request.POST.get("action")
+        next_url = request.POST.get("next", reverse("helpdesk:duplicate_suggestions"))
+
+        if action == "merge":
+            candidate.mark_merged(request.user)
+            return redirect(
+                "%s?tickets=%s&tickets=%s" % (
+                    reverse("helpdesk:merge_tickets"),
+                    candidate.source_ticket_id,
+                    candidate.target_ticket_id,
+                )
+            )
+        elif action == "dismiss":
+            candidate.mark_dismissed(request.user)
+        elif action == "pending":
+            candidate.status = DuplicateCandidate.STATUS_PENDING
+            candidate.reviewed_by = request.user
+            candidate.reviewed_at = timezone.now()
+            candidate.save(update_fields=["status", "reviewed_by", "reviewed_at"])
+        elif action == "scan":
+            for t in [candidate.source_ticket, candidate.target_ticket]:
+                dups = t.find_duplicates()
+                if dups:
+                    _save_duplicate_candidates(t, dups, detected_by_user=request.user)
+
+        return redirect(next_url)
+
+    return redirect(reverse("helpdesk:duplicate_suggestions"))
+
+
+@helpdesk_staff_member_required
+def scan_all_duplicates(request):
+    if not request.user.is_superuser:
+        raise PermissionDenied()
+
+    if request.method == "POST":
+        from datetime import timedelta
+        from django.utils import timezone
+
+        huser = HelpdeskUser(request.user)
+        accessible_queue_ids = huser.get_queues().values_list("id", flat=True)
+
+        days = int(request.POST.get("days", helpdesk_settings.HELPDESK_DUPLICATE_TIME_WINDOW_DAYS))
+        time_cutoff = timezone.now() - timedelta(days=days)
+
+        tickets = Ticket.objects.filter(
+            queue_id__in=accessible_queue_ids,
+            created__gte=time_cutoff,
+            merged_to__isnull=True,
+        ).exclude(status=Ticket.DUPLICATE_STATUS).select_related("queue")
+
+        total_scanned = 0
+        total_found = 0
+        for ticket in tickets:
+            duplicates = ticket.find_duplicates()
+            if duplicates:
+                _save_duplicate_candidates(ticket, duplicates, detected_by_user=request.user)
+                total_found += len(duplicates)
+            total_scanned += 1
+
+        return render(
+            request,
+            "helpdesk/duplicate_scan_result.html",
+            {
+                "total_scanned": total_scanned,
+                "total_found": total_found,
+                "days": days,
+            },
+        )
+
+    return render(
+        request,
+        "helpdesk/duplicate_scan.html",
+        {
+            "default_days": helpdesk_settings.HELPDESK_DUPLICATE_TIME_WINDOW_DAYS,
         },
     )

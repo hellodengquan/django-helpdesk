@@ -1,0 +1,120 @@
+{% extends "helpdesk/base.html" %}
+{% load i18n %}
+
+{% block helpdesk_title %}{% trans "Scan for Duplicate Tickets" %}{% endblock %}
+
+{% block helpdesk_breadcrumb %}
+<li class="breadcrumb-item">
+    <a href="{% url 'helpdesk:list' %}">{% trans "Tickets" %}</a>
+</li>
+<li class="breadcrumb-item">
+    <a href="{% url 'helpdesk:duplicate_suggestions' %}">{% trans "Duplicate Suggestions" %}</a>
+</li>
+<li class="breadcrumb-item active">{% trans "Scan" %}</li>
+{% endblock %}
+
+{% block helpdesk_body %}
+<div class="row">
+    <div class="col-lg-8 offset-lg-2">
+        <div class="card">
+            <div class="card-header">
+                <h3><i class="fas fa-search"></i> {% trans "Scan for Duplicate Tickets" %}</h3>
+            </div>
+            <div class="card-body">
+                <p class="text-muted mb-4">
+                    {% blocktrans %}
+                    This tool will scan all tickets in your accessible queues within the specified time window
+                    and detect potential duplicates based on title similarity, submitter email, and description similarity.
+                    Depending on the number of tickets, this may take some time.
+                    {% endblocktrans %}
+                </p>
+
+                <div class="card card-body bg-light mb-4">
+                    <h6>{% trans "Current Detection Settings" %}</h6>
+                    <ul class="mb-0">
+                        <li><small>{% trans "Title similarity threshold:" %} <strong>{{ helpdesk_settings.HELPDESK_DUPLICATE_TITLE_SIMILARITY_THRESHOLD }}</strong></small></li>
+                        <li><small>{% trans "Description similarity threshold:" %} <strong>{{ helpdesk_settings.HELPDESK_DUPLICATE_DESCRIPTION_SIMILARITY_THRESHOLD }}</strong></small></li>
+                        <li><small>{% trans "Default time window:" %} <strong>{{ default_days }} {% trans "days" %}</strong></small></li>
+                        <li><small>{% trans "Match submitter email:" %} <strong>{{ helpdesk_settings.HELPDESK_DUPLICATE_MATCH_SUBMITTER_EMAIL|yesno:_("Yes,No") }}</strong></small></li>
+                        <li><small>{% trans "Same queue only:" %} <strong>{{ helpdesk_settings.HELPDESK_DUPLICATE_SAME_QUEUE_ONLY|yesno:_("Yes,No") }}</strong></small></li>
+                    </ul>
+                </div>
+
+                <form method="post">
+                    {% csrf_token %}
+                    <div class="form-group">
+                        <label for="days">{% trans "Scan tickets created in the last (days):" %}</label>
+                        <input type="number"
+                               name="days"
+                               id="days"
+                               value="{{ default_days }}"
+                               min="1"
+                               max="3650"
+                               class="form-control form-control-lg">
+                        <small class="form-text text-muted">
+                            {% trans "Enter the number of days to look back. Larger values will take longer to process." %}
+                        </small>
+                    </div>
+                    <div class="text-center mt-4">
+                        <a href="{% url 'helpdesk:duplicate_suggestions' %}" class="btn btn-secondary btn-lg mr-2">
+                            <i class="fas fa-times"></i> {% trans "Cancel" %}
+                        </a>
+                        <button type="submit" class="btn btn-primary btn-lg">
+                            <i class="fas fa-search"></i> {% trans "Start Scan" %}
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <div class="card mt-4">
+            <div class="card-header">
+                <h5><i class="fas fa-info-circle"></i> {% trans "How Duplicate Detection Works" %}</h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-4 text-center mb-3">
+                        <div class="fa-stack fa-2x mb-2">
+                            <i class="fas fa-circle fa-stack-2x text-primary"></i>
+                            <i class="fas fa-heading fa-stack-1x text-white"></i>
+                        </div>
+                        <h6>{% trans "Title Analysis" %}</h6>
+                        <p class="text-muted small">
+                            {% blocktrans with threshold=helpdesk_settings.HELPDESK_DUPLICATE_TITLE_SIMILARITY_THRESHOLD %}
+                            Titles are normalized (removing Re:/Fwd: prefixes) and compared using
+                            sequence matching. Scores above {{ threshold }} are flagged.
+                            {% endblocktrans %}
+                        </p>
+                    </div>
+                    <div class="col-md-4 text-center mb-3">
+                        <div class="fa-stack fa-2x mb-2">
+                            <i class="fas fa-circle fa-stack-2x text-success"></i>
+                            <i class="fas fa-envelope fa-stack-1x text-white"></i>
+                        </div>
+                        <h6>{% trans "Submitter Matching" %}</h6>
+                        <p class="text-muted small">
+                            {% blocktrans %}
+                            When enabled, only tickets from the same submitter email are
+                            considered as potential duplicates, reducing false positives.
+                            {% endblocktrans %}
+                        </p>
+                    </div>
+                    <div class="col-md-4 text-center mb-3">
+                        <div class="fa-stack fa-2x mb-2">
+                            <i class="fas fa-circle fa-stack-2x text-info"></i>
+                            <i class="fas fa-calendar fa-stack-1x text-white"></i>
+                        </div>
+                        <h6>{% trans "Time Window" %}</h6>
+                        <p class="text-muted small">
+                            {% blocktrans %}
+                            Only tickets created within the configured time window are
+                            compared, ensuring relevancy and improving performance.
+                            {% endblocktrans %}
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

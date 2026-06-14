@@ -1,0 +1,196 @@
+{% extends "helpdesk/base.html" %}
+{% load i18n humanize %}
+
+{% block helpdesk_title %}{% trans "Duplicate Ticket Suggestions" %}{% endblock %}
+
+{% block helpdesk_breadcrumb %}
+<li class="breadcrumb-item">
+    <a href="{% url 'helpdesk:list' %}">{% trans "Tickets" %}</a>
+</li>
+<li class="breadcrumb-item active">{% trans "Duplicate Suggestions" %}</li>
+{% endblock %}
+
+{% block helpdesk_body %}
+<div class="row mb-3">
+    <div class="col-md-8">
+        <h2>{% trans "Duplicate Ticket Suggestions" %}</h2>
+    </div>
+    <div class="col-md-4 text-right">
+        <a href="{% url 'helpdesk:scan_all_duplicates' %}" class="btn btn-info">
+            <i class="fas fa-search"></i> {% trans "Scan All Tickets" %}
+        </a>
+        <a href="{% url 'helpdesk:merge_tickets' %}" class="btn btn-primary">
+            <i class="fas fa-code-branch"></i> {% trans "Manual Merge" %}
+        </a>
+    </div>
+</div>
+
+<div class="card mb-4">
+    <div class="card-header">
+        <form method="get" class="form-inline">
+            <div class="form-group mr-2">
+                <label for="status" class="mr-2">{% trans "Filter by status:" %}</label>
+                <select name="status" id="status" class="form-control" onchange="this.form.submit()">
+                    {% for value, label in status_choices %}
+                    <option value="{{ value }}" {% if status_filter == value %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <a href="{% url 'helpdesk:duplicate_suggestions' %}" class="btn btn-link">{% trans "Show All Pending" %}</a>
+        </form>
+    </div>
+</div>
+
+{% if candidates %}
+<div class="card">
+    <div class="card-body">
+        <div class="table-responsive">
+            <table class="table table-striped table-hover">
+                <thead class="thead-dark">
+                    <tr>
+                        <th>{% trans "Score" %}</th>
+                        <th>{% trans "Ticket A" %}</th>
+                        <th>{% trans "Ticket B" %}</th>
+                        <th>{% trans "Title Sim." %}</th>
+                        <th>{% trans "Desc Sim." %}</th>
+                        <th>{% trans "Detected" %}</th>
+                        <th>{% trans "Status" %}</th>
+                        <th>{% trans "Actions" %}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for candidate in candidates %}
+                    <tr>
+                        <td>
+                            <div class="progress" style="width: 80px;">
+                                {% with score=candidate.overall_score|floatformat:0 %}
+                                {% widthratio candidate.overall_score 1 100 as width %}
+                                <div class="progress-bar {% if candidate.overall_score >= 0.9 %}bg-danger{% elif candidate.overall_score >= 0.8 %}bg-warning{% else %}bg-info{% endif %}"
+                                     role="progressbar" style="width: {% widthratio candidate.overall_score 1 100 %}%;">
+                                    {% widthratio candidate.overall_score 1 100 %}%
+                                </div>
+                                {% endwith %}
+                            </div>
+                        </td>
+                        <td>
+                            <div>
+                                <a href="{{ candidate.source_ticket.get_absolute_url }}">
+                                    <strong>{{ candidate.source_ticket.ticket_for_url }}</strong>
+                                </a>
+                                <small class="text-muted d-block">{{ candidate.source_ticket.queue.title }}</small>
+                            </div>
+                            <small>{{ candidate.source_ticket.title|truncatechars:50 }}</small>
+                            {% if candidate.source_ticket.submitter_email %}
+                            <br><small class="text-muted">{{ candidate.source_ticket.submitter_email }}</small>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <div>
+                                <a href="{{ candidate.target_ticket.get_absolute_url }}">
+                                    <strong>{{ candidate.target_ticket.ticket_for_url }}</strong>
+                                </a>
+                                <small class="text-muted d-block">{{ candidate.target_ticket.queue.title }}</small>
+                            </div>
+                            <small>{{ candidate.target_ticket.title|truncatechars:50 }}</small>
+                            {% if candidate.target_ticket.submitter_email %}
+                            <br><small class="text-muted">{{ candidate.target_ticket.submitter_email }}</small>
+                            {% endif %}
+                        </td>
+                        <td>{{ candidate.title_similarity|floatformat:1% }}</td>
+                        <td>{{ candidate.description_similarity|floatformat:1% }}</td>
+                        <td>
+                            <small>{{ candidate.created|naturaltime }}</small>
+                            <br>
+                            <span class="badge {% if candidate.detected_by == 'auto' %}badge-info{% else %}badge-secondary{% endif %}">
+                                {{ candidate.get_detected_by_display }}
+                            </span>
+                            {% if candidate.detected_by_user %}
+                            <br><small class="text-muted">by {{ candidate.detected_by_user }}</small>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <span class="badge {% if candidate.status == 'pending' %}badge-warning{% elif candidate.status == 'merged' %}badge-success{% else %}badge-secondary{% endif %}">
+                                {{ candidate.get_status_display }}
+                            </span>
+                            {% if candidate.reviewed_by %}
+                            <br><small class="text-muted">{{ candidate.reviewed_by }} @ {{ candidate.reviewed_at|naturaltime }}</small>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <form method="post" action="{% url 'helpdesk:duplicate_candidate_action' candidate.id %}" class="d-inline">
+                                {% csrf_token %}
+                                <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                {% if candidate.status != 'merged' %}
+                                <button type="submit" name="action" value="merge" class="btn btn-success btn-sm">
+                                    <i class="fas fa-code-branch"></i> {% trans "Merge" %}
+                                </button>
+                                {% endif %}
+                                {% if candidate.status != 'dismissed' %}
+                                <button type="submit" name="action" value="dismiss" class="btn btn-secondary btn-sm">
+                                    <i class="fas fa-times"></i> {% trans "Dismiss" %}
+                                </button>
+                                {% endif %}
+                                {% if candidate.status != 'pending' %}
+                                <button type="submit" name="action" value="pending" class="btn btn-warning btn-sm">
+                                    <i class="fas fa-undo"></i> {% trans "Reopen" %}
+                                </button>
+                                {% endif %}
+                                <button type="submit" name="action" value="scan" class="btn btn-info btn-sm">
+                                    <i class="fas fa-sync"></i>
+                                </button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        {% if candidates.has_other_pages %}
+        <nav class="mt-4">
+            <ul class="pagination justify-content-center">
+                {% if candidates.has_previous %}
+                <li class="page-item">
+                    <a class="page-link" href="?status={{ status_filter }}&page={{ candidates.previous_page_number }}">
+                        {% trans "Previous" %}
+                    </a>
+                </li>
+                {% endif %}
+                {% for num in candidates.paginator.page_range %}
+                {% if candidates.number == num %}
+                <li class="page-item active">
+                    <span class="page-link">{{ num }}</span>
+                </li>
+                {% elif num > candidates.number|add:'-3' and num < candidates.number|add:'3' %}
+                <li class="page-item">
+                    <a class="page-link" href="?status={{ status_filter }}&page={{ num }}">{{ num }}</a>
+                </li>
+                {% endif %}
+                {% endfor %}
+                {% if candidates.has_next %}
+                <li class="page-item">
+                    <a class="page-link" href="?status={{ status_filter }}&page={{ candidates.next_page_number }}">
+                        {% trans "Next" %}
+                    </a>
+                </li>
+                {% endif %}
+            </ul>
+        </nav>
+        {% endif %}
+    </div>
+</div>
+{% else %}
+<div class="card card-body bg-light">
+    <p class="text-center mb-0">
+        <i class="fas fa-check-circle fa-2x text-success"></i>
+    </p>
+    <h3 class="text-center">{% trans "No duplicate suggestions found." %}</h3>
+    <p class="text-center text-muted mb-0">
+        {% blocktrans %}
+        There are currently no duplicate ticket suggestions matching your criteria.
+        You can run a full scan to detect potential duplicates, or manually merge tickets.
+        {% endblocktrans %}
+    </p>
+</div>
+{% endif %}
+{% endblock %}

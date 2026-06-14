@@ -1,0 +1,291 @@
+{% extends "helpdesk/base.html" %}
+{% load i18n humanize %}
+
+{% block helpdesk_title %}{% trans "Duplicate Suggestions" %} - {{ ticket.ticket_for_url }}{% endblock %}
+
+{% block helpdesk_breadcrumb %}
+<li class="breadcrumb-item">
+    <a href="{% url 'helpdesk:list' %}">{% trans "Tickets" %}</a>
+</li>
+<li class="breadcrumb-item">
+    <a href="{{ ticket.get_absolute_url }}">{{ ticket.ticket_for_url }}</a>
+</li>
+<li class="breadcrumb-item active">{% trans "Duplicate Suggestions" %}</li>
+{% endblock %}
+
+{% block helpdesk_body %}
+<div class="row mb-4">
+    <div class="col-md-8">
+        <h2>
+            {% trans "Potential Duplicates for" %}
+            <a href="{{ ticket.get_absolute_url }}">{{ ticket.ticket_for_url }}</a>
+        </h2>
+    </div>
+    <div class="col-md-4 text-right">
+        <a href="{{ ticket.get_absolute_url }}" class="btn btn-secondary">
+            <i class="fas fa-arrow-left"></i> {% trans "Back to Ticket" %}
+        </a>
+        <a href="{% url 'helpdesk:duplicate_suggestions' %}" class="btn btn-info">
+            <i class="fas fa-list"></i> {% trans "All Suggestions" %}
+        </a>
+    </div>
+</div>
+
+<div class="card mb-4">
+    <div class="card-header">
+        <h5>{% trans "Current Ticket" %}</h5>
+    </div>
+    <div class="card-body">
+        <div class="row">
+            <div class="col-md-2">
+                <strong>{{ ticket.ticket_for_url }}</strong>
+                <br><small class="text-muted">{{ ticket.queue.title }}</small>
+                <br>
+                <span class="badge {% if ticket.get_priority_css_class %}badge-{{ ticket.get_priority_css_class }}{% else %}badge-secondary{% endif %}">
+                    {{ ticket.get_priority_display }}
+                </span>
+                <span class="badge {% if ticket.status == ticket.OPEN_STATUS or ticket.status == ticket.REOPENED_STATUS %}badge-success{% elif ticket.status == ticket.RESOLVED_STATUS %}badge-info{% elif ticket.status == ticket.CLOSED_STATUS %}badge-secondary{% elif ticket.status == ticket.DUPLICATE_STATUS %}badge-warning{% else %}badge-light{% endif %}">
+                    {{ ticket.get_status_display }}
+                </span>
+            </div>
+            <div class="col-md-10">
+                <h5>{{ ticket.title }}</h5>
+                <p class="text-muted small mb-1">
+                    <i class="fas fa-user"></i> {{ ticket.submitter_email|default:_("Unknown") }}
+                    &nbsp;|&nbsp;
+                    <i class="fas fa-clock"></i> {{ ticket.created|naturaltime }}
+                    {% if ticket.assigned_to %}
+                    &nbsp;|&nbsp;
+                    <i class="fas fa-user-tie"></i> {{ ticket.get_assigned_to }}
+                    {% endif %}
+                </p>
+                {% if ticket.description %}
+                <p class="mb-0">{{ ticket.description|truncatechars:200 }}</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+{% if existing_candidates %}
+<div class="card mb-4">
+    <div class="card-header">
+        <h5>{% trans "Previous Suggestions" %}</h5>
+    </div>
+    <div class="card-body">
+        <div class="table-responsive">
+            <table class="table table-striped table-hover">
+                <thead class="thead-light">
+                    <tr>
+                        <th>{% trans "Match" %}</th>
+                        <th>{% trans "Score" %}</th>
+                        <th>{% trans "Detected" %}</th>
+                        <th>{% trans "Status" %}</th>
+                        <th>{% trans "Actions" %}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for candidate in existing_candidates %}
+                    {% with other=candidate.target_ticket if candidate.source_ticket.id == ticket.id else candidate.source_ticket %}
+                    <tr>
+                        <td>
+                            <a href="{{ other.get_absolute_url }}">
+                                <strong>{{ other.ticket_for_url }}</strong>
+                            </a>
+                            <small class="text-muted d-block">{{ other.queue.title }}</small>
+                            <small>{{ other.title|truncatechars:60 }}</small>
+                            {% if other.submitter_email %}
+                            <br><small class="text-muted">{{ other.submitter_email }}</small>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <div class="progress" style="width: 100px;">
+                                <div class="progress-bar {% if candidate.overall_score >= 0.9 %}bg-danger{% elif candidate.overall_score >= 0.8 %}bg-warning{% else %}bg-info{% endif %}"
+                                     role="progressbar" style="width: {% widthratio candidate.overall_score 1 100 %}%;">
+                                    {% widthratio candidate.overall_score 1 100 %}%
+                                </div>
+                            </div>
+                            <small class="text-muted">
+                                T:{{ candidate.title_similarity|floatformat:0% }} / D:{{ candidate.description_similarity|floatformat:0% }}
+                            </small>
+                        </td>
+                        <td>
+                            <small>{{ candidate.created|naturaltime }}</small>
+                            <br>
+                            <span class="badge {% if candidate.detected_by == 'auto' %}badge-info{% else %}badge-secondary{% endif %}">
+                                {{ candidate.get_detected_by_display }}
+                            </span>
+                        </td>
+                        <td>
+                            <span class="badge {% if candidate.status == 'pending' %}badge-warning{% elif candidate.status == 'merged' %}badge-success{% else %}badge-secondary{% endif %}">
+                                {{ candidate.get_status_display }}
+                            </span>
+                            {% if candidate.reviewed_by %}
+                            <br><small class="text-muted">{{ candidate.reviewed_by }}</small>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <form method="post" class="d-inline">
+                                {% csrf_token %}
+                                <input type="hidden" name="candidate_id" value="{{ candidate.id }}">
+                                {% if candidate.status != 'merged' %}
+                                <button type="submit" name="action" value="merge" class="btn btn-success btn-sm">
+                                    <i class="fas fa-code-branch"></i> {% trans "Merge" %}
+                                </button>
+                                {% endif %}
+                                {% if candidate.status == 'pending' %}
+                                <button type="submit" name="action" value="dismiss" class="btn btn-secondary btn-sm">
+                                    <i class="fas fa-times"></i> {% trans "Dismiss" %}
+                                </button>
+                                {% elif candidate.status == 'dismissed' %}
+                                <button type="submit" name="action" value="pending" class="btn btn-warning btn-sm">
+                                    <i class="fas fa-undo"></i> {% trans "Reconsider" %}
+                                </button>
+                                {% endif %}
+                            </form>
+                        </td>
+                    </tr>
+                    {% endwith %}
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% if duplicates %}
+<div class="card border-warning">
+    <div class="card-header bg-warning text-white">
+        <h5><i class="fas fa-exclamation-triangle"></i> {% trans "Newly Detected Potential Duplicates" %}</h5>
+    </div>
+    <div class="card-body">
+        <p class="text-muted">
+            {% blocktrans with count=duplicates|length %}
+            The system has detected {{ count }} potential duplicates based on title similarity, submitter email, and creation time.
+            Please review each carefully before merging.
+            {% endblocktrans %}
+        </p>
+        <div class="table-responsive">
+            <table class="table table-striped table-hover">
+                <thead class="thead-light">
+                    <tr>
+                        <th>{% trans "Ticket" %}</th>
+                        <th>{% trans "Title Match" %}</th>
+                        <th>{% trans "Description Match" %}</th>
+                        <th>{% trans "Overall Score" %}</th>
+                        <th>{% trans "Submitter" %}</th>
+                        <th>{% trans "Age" %}</th>
+                        <th>{% trans "Status" %}</th>
+                        <th>{% trans "Action" %}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for dup_ticket, title_sim, desc_sim, overall in duplicates %}
+                    <tr {% if overall >= 0.9 %}class="table-danger"{% elif overall >= 0.8 %}class="table-warning"{% endif %}>
+                        <td>
+                            <a href="{{ dup_ticket.get_absolute_url }}">
+                                <strong>{{ dup_ticket.ticket_for_url }}</strong>
+                            </a>
+                            <small class="text-muted d-block">{{ dup_ticket.queue.title }}</small>
+                            <small>{{ dup_ticket.title|truncatechars:60 }}</small>
+                        </td>
+                        <td>
+                            <div class="progress" style="width: 100px;">
+                                <div class="progress-bar bg-primary" role="progressbar" style="width: {% widthratio title_sim 1 100 %}%;">
+                                    {% widthratio title_sim 1 100 %}%
+                                </div>
+                            </div>
+                        </td>
+                        <td>
+                            {% if desc_sim > 0 %}
+                            <div class="progress" style="width: 100px;">
+                                <div class="progress-bar bg-secondary" role="progressbar" style="width: {% widthratio desc_sim 1 100 %}%;">
+                                    {% widthratio desc_sim 1 100 %}%
+                                </div>
+                            </div>
+                            {% else %}
+                            <small class="text-muted">{% trans "N/A" %}</small>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <strong {% if overall >= 0.9 %}class="text-danger"{% elif overall >= 0.8 %}class="text-warning"{% endif %}>
+                                {% widthratio overall 1 100 %}%
+                            </strong>
+                        </td>
+                        <td>
+                            <small>
+                                {% if dup_ticket.submitter_email %}
+                                {{ dup_ticket.submitter_email }}
+                                {% if dup_ticket.submitter_email == ticket.submitter_email %}
+                                <span class="badge badge-success">{% trans "Same" %}</span>
+                                {% endif %}
+                                {% else %}
+                                {% trans "Unknown" %}
+                                {% endif %}
+                            </small>
+                        </td>
+                        <td><small>{{ dup_ticket.created|naturaltime }}</small></td>
+                        <td>
+                            <span class="badge {% if dup_ticket.status == dup_ticket.OPEN_STATUS or dup_ticket.status == dup_ticket.REOPENED_STATUS %}badge-success{% elif dup_ticket.status == dup_ticket.RESOLVED_STATUS %}badge-info{% elif dup_ticket.status == dup_ticket.CLOSED_STATUS %}badge-secondary{% else %}badge-light{% endif %}">
+                                {{ dup_ticket.get_status_display }}
+                            </span>
+                        </td>
+                        <td>
+                            <a href="{% url 'helpdesk:merge_tickets' %}?tickets={{ ticket.id }}&tickets={{ dup_ticket.id }}"
+                               class="btn btn-success btn-sm">
+                                <i class="fas fa-code-branch"></i> {% trans "Merge Now" %}
+                            </a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% else %}
+<div class="card card-body bg-light">
+    <p class="text-center mb-0">
+        <i class="fas fa-check-circle fa-2x text-success"></i>
+    </p>
+    <h3 class="text-center">{% trans "No duplicates detected" %}</h3>
+    <p class="text-center text-muted mb-0">
+        {% blocktrans %}
+        Good news! No potential duplicate tickets were found for this ticket based on
+        the current detection settings (title similarity threshold, time window, etc.).
+        {% endblocktrans %}
+    </p>
+</div>
+{% endif %}
+
+{% if ticket.merged_source_tickets %}
+<div class="card mt-4">
+    <div class="card-header">
+        <h5><i class="fas fa-code-branch"></i> {% trans "Merged Source Tickets" %}</h5>
+    </div>
+    <div class="card-body">
+        <p class="text-muted small mb-3">
+            {% trans "The following tickets have been merged into this one. Their follow-ups and participants have been incorporated." %}
+        </p>
+        <ul class="list-group">
+            {% for merged in ticket.merged_source_tickets %}
+            <li class="list-group-item d-flex justify-content-between align-items-center">
+                <div>
+                    <a href="{{ merged.get_absolute_url }}">
+                        <strong>{{ merged.ticket_for_url }}</strong>
+                    </a>
+                    <small class="text-muted ml-2">{{ merged.queue.title }}</small>
+                    <br><small>{{ merged.title }}</small>
+                </div>
+                <div>
+                    <span class="badge badge-warning">{{ merged.get_status_display }}</span>
+                    <small class="text-muted ml-2">{{ merged.created|naturaltime }}</small>
+                </div>
+            </li>
+            {% endfor %}
+        </ul>
+    </div>
+</div>
+{% endif %}
+{% endblock %}

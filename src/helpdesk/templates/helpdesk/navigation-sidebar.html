@@ -54,6 +54,14 @@
             </a>
         </li>
         {% endif %}
+        {% if helpdesk_settings.HELPDESK_DUPLICATE_DETECTION_ENABLED %}
+        <li class="nav-item{% if 'duplicates' in request.path %} active{% endif %}">
+          <a class="nav-link" href="{% url 'helpdesk:duplicate_suggestions' %}">
+            <i class="fas fa-fw fa-copy"></i>
+            <span>{% trans "Duplicate Tickets" %}</span>
+          </a>
+        </li>
+        {% endif %}
         <li class="nav-item{% if 'reports' in request.path %} active{% endif %}">
           <a class="nav-link" href="{% url 'helpdesk:report_index' %}">
             <i class="fas fa-fw fa-chart-area"></i>

@@ -291,3 +291,113 @@ def get_assignable_users(filter_staff: bool) -> QuerySet:
         users = users.filter(is_staff=True)
 
     return users.order_by(User.USERNAME_FIELD)
+
+
+def calculate_similarity(str1, str2):
+    """
+    Calculate similarity ratio between two strings using difflib SequenceMatcher.
+    Returns a float between 0.0 (no similarity) and 1.0 (identical).
+    """
+    from difflib import SequenceMatcher
+
+    if not str1 or not str2:
+        return 0.0
+    return SequenceMatcher(None, str1.lower(), str2.lower()).ratio()
+
+
+def normalize_title(title):
+    """
+    Normalize ticket title for better duplicate matching.
+    - Strip leading/trailing whitespace
+    - Remove common prefixes like 'Re:', 'Fwd:', 'AW:', 'WG:', etc.
+    - Collapse multiple whitespace characters
+    - Convert to lowercase
+    """
+    import re
+
+    if not title:
+        return ""
+    normalized = title.strip().lower()
+    prefix_pattern = r"^\s*(?:re|fwd|fw|aw|wg|sv|vs|odp|答复|转发|回复)[\[\]:：\s]*"
+    while re.match(prefix_pattern, normalized, re.IGNORECASE):
+        normalized = re.sub(prefix_pattern, "", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
+def find_duplicate_tickets(ticket, title_threshold=None, description_threshold=None,
+                          time_window_days=None, match_submitter=None,
+                          same_queue_only=None):
+    """
+    Find potential duplicate tickets for a given ticket.
+
+    Criteria:
+    - Title similarity >= title_threshold (default from settings)
+    - Description similarity >= description_threshold (default from settings, optional)
+    - Created within time_window_days (default from settings)
+    - Same submitter email (if match_submitter is True)
+    - Same queue (if same_queue_only is True)
+    - Exclude tickets already merged or marked as duplicate
+
+    Returns a list of tuples: (duplicate_ticket, title_similarity, description_similarity)
+    """
+    from django.utils import timezone
+    from datetime import timedelta
+    from helpdesk.models import Ticket
+
+    if not helpdesk_settings.HELPDESK_DUPLICATE_DETECTION_ENABLED:
+        return []
+
+    if title_threshold is None:
+        title_threshold = helpdesk_settings.HELPDESK_DUPLICATE_TITLE_SIMILARITY_THRESHOLD
+    if description_threshold is None:
+        description_threshold = helpdesk_settings.HELPDESK_DUPLICATE_DESCRIPTION_SIMILARITY_THRESHOLD
+    if time_window_days is None:
+        time_window_days = helpdesk_settings.HELPDESK_DUPLICATE_TIME_WINDOW_DAYS
+    if match_submitter is None:
+        match_submitter = helpdesk_settings.HELPDESK_DUPLICATE_MATCH_SUBMITTER_EMAIL
+    if same_queue_only is None:
+        same_queue_only = helpdesk_settings.HELPDESK_DUPLICATE_SAME_QUEUE_ONLY
+
+    normalized_title = normalize_title(ticket.title)
+    if not normalized_title:
+        return []
+
+    queryset = Ticket.objects.exclude(
+        id=ticket.id
+    ).exclude(
+        merged_to__isnull=False
+    ).exclude(
+        status=Ticket.DUPLICATE_STATUS
+    )
+
+    if same_queue_only and ticket.queue_id:
+        queryset = queryset.filter(queue_id=ticket.queue_id)
+
+    if match_submitter and ticket.submitter_email:
+        queryset = queryset.filter(submitter_email=ticket.submitter_email)
+
+    if time_window_days and ticket.created:
+        time_cutoff = ticket.created - timedelta(days=time_window_days)
+        queryset = queryset.filter(created__gte=time_cutoff)
+
+    results = []
+    for candidate in queryset.select_related("queue", "assigned_to"):
+        candidate_normalized = normalize_title(candidate.title)
+        if not candidate_normalized:
+            continue
+        title_sim = calculate_similarity(normalized_title, candidate_normalized)
+        if title_sim < title_threshold:
+            continue
+
+        desc_sim = 0.0
+        if ticket.description and candidate.description:
+            desc_sim = calculate_similarity(ticket.description, candidate.description)
+            if desc_sim < description_threshold:
+                continue
+
+        overall_score = (title_sim * 0.7) + (desc_sim * 0.3)
+        results.append((candidate, title_sim, desc_sim, overall_score))
+
+    results.sort(key=lambda x: x[3], reverse=True)
+    return results

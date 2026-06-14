@@ -36,6 +36,42 @@
             </h3>
         </div>
     {% else %}
+        {% if ticket.merged_source_tickets %}
+        <div class="card border-info mb-3">
+            <div class="card-header bg-info text-white">
+                <i class="fas fa-code-branch"></i>
+                <strong>{% trans "Merged Source Tickets" %}</strong>
+                <span class="badge bg-light text-info">{{ ticket.merged_source_tickets|length }}</span>
+            </div>
+            <div class="card-body p-0">
+                <div class="list-group list-group-flush">
+                    {% for merged in ticket.merged_source_tickets %}
+                    <a href="{{ merged.get_absolute_url }}" class="list-group-item list-group-item-action flex-column align-items-start">
+                        <div class="d-flex w-100 justify-content-between">
+                            <h6 class="mb-1">
+                                <strong>{{ merged.ticket_for_url }}</strong>
+                                <small class="text-muted ml-2">{{ merged.queue.title }}</small>
+                            </h6>
+                            <small>
+                                <span class="badge badge-warning">{{ merged.get_status_display }}</span>
+                                {{ merged.created|date:"SHORT_DATE_FORMAT" }}
+                            </small>
+                        </div>
+                        <p class="mb-1">{{ merged.title }}</p>
+                        {% if merged.submitter_email %}
+                        <small class="text-muted">
+                            <i class="fas fa-user"></i> {{ merged.submitter_email }}
+                            {% if merged.assigned_to %}
+                            &nbsp;|&nbsp; <i class="fas fa-user-tie"></i> {{ merged.get_assigned_to }}
+                            {% endif %}
+                        </small>
+                        {% endif %}
+                    </a>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+        {% endif %}
         {% if ticket.followup_set.all %}
         {% load ticket_to_link %}
             <div class="card mb-3">

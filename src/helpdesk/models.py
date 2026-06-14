@@ -949,6 +949,125 @@ class Ticket(models.Model):
                     cfv.value = convert_value(value)
                     cfv.save()
 
+    def find_duplicates(self, **kwargs):
+        from .lib import find_duplicate_tickets
+        return find_duplicate_tickets(self, **kwargs)
+
+    @property
+    def merged_source_tickets(self):
+        return self.merged_tickets.select_related("queue", "assigned_to").all()
+
+
+class DuplicateCandidate(models.Model):
+    DETECTED_AUTO = "auto"
+    DETECTED_MANUAL = "manual"
+    DETECTED_SOURCE_CHOICES = (
+        (DETECTED_AUTO, _("Auto-detected")),
+        (DETECTED_MANUAL, _("Manually marked")),
+    )
+
+    STATUS_PENDING = "pending"
+    STATUS_MERGED = "merged"
+    STATUS_DISMISSED = "dismissed"
+    STATUS_CHOICES = (
+        (STATUS_PENDING, _("Pending Review")),
+        (STATUS_MERGED, _("Merged")),
+        (STATUS_DISMISSED, _("Dismissed")),
+    )
+
+    source_ticket = models.ForeignKey(
+        Ticket,
+        on_delete=models.CASCADE,
+        related_name="duplicate_candidate_sources",
+        verbose_name=_("Source ticket (possible duplicate)"),
+    )
+    target_ticket = models.ForeignKey(
+        Ticket,
+        on_delete=models.CASCADE,
+        related_name="duplicate_candidate_targets",
+        verbose_name=_("Target ticket (original)"),
+    )
+    title_similarity = models.FloatField(
+        _("Title similarity"),
+        default=0.0,
+        help_text=_("Similarity score between titles (0.0-1.0)"),
+    )
+    description_similarity = models.FloatField(
+        _("Description similarity"),
+        default=0.0,
+        help_text=_("Similarity score between descriptions (0.0-1.0)"),
+    )
+    overall_score = models.FloatField(
+        _("Overall score"),
+        default=0.0,
+        db_index=True,
+        help_text=_("Weighted overall similarity score"),
+    )
+    detected_by = models.CharField(
+        _("Detected by"),
+        max_length=10,
+        choices=DETECTED_SOURCE_CHOICES,
+        default=DETECTED_AUTO,
+    )
+    detected_by_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="duplicate_detector",
+        verbose_name=_("Detected by user"),
+    )
+    status = models.CharField(
+        _("Status"),
+        max_length=10,
+        choices=STATUS_CHOICES,
+        default=STATUS_PENDING,
+        db_index=True,
+    )
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="duplicate_reviewer",
+        verbose_name=_("Reviewed by user"),
+    )
+    reviewed_at = models.DateTimeField(
+        _("Reviewed at"),
+        blank=True,
+        null=True,
+    )
+    created = models.DateTimeField(
+        _("Created"),
+        default=timezone.now,
+        editable=False,
+    )
+
+    class Meta:
+        unique_together = ("source_ticket", "target_ticket")
+        ordering = ("-overall_score", "-created")
+        verbose_name = _("Duplicate candidate")
+        verbose_name_plural = _("Duplicate candidates")
+
+    def __str__(self):
+        return _("#%(source)s → #%(target)s (%(score).0f%%)") % {
+            "source": self.source_ticket_id,
+            "target": self.target_ticket_id,
+            "score": self.overall_score * 100,
+        }
+
+    def mark_merged(self, user=None):
+        self.status = self.STATUS_MERGED
+        self.reviewed_by = user
+        self.reviewed_at = timezone.now()
+        self.save(update_fields=["status", "reviewed_by", "reviewed_at"])
+
+    def mark_dismissed(self, user=None):
+        self.status = self.STATUS_DISMISSED
+        self.reviewed_by = user
+        self.reviewed_at = timezone.now()
+        self.save(update_fields=["status", "reviewed_by", "reviewed_at"])
+
 
 class FollowUpManager(models.Manager):
     def private_followups(self):

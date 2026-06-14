@@ -16,7 +16,10 @@
                             {% blocktrans with ticket.queue as queue %}Queue: {{ queue }}{% endblocktrans %}
                             <span class='ticket_toolbar float-end'>
                                 <div class="btn-group" style="gap: 8px;">
-                                    <a href="{% url 'helpdesk:edit' ticket.id %}" class="btn btn-warning btn-sm ticket-edit">
+                                    <a href="{% url 'helpdesk:ticket_duplicate_suggestions' ticket.id %}" class="btn btn-info btn-sm ticket-duplicates" data-bs-toggle="tooltip" title="{% trans 'Check for duplicate tickets' %}">
+                                        <i class="fas fa-copy"></i> {% trans "Duplicates" %}
+                                    </a>
+                                    | <a href="{% url 'helpdesk:edit' ticket.id %}" class="btn btn-warning btn-sm ticket-edit">
                                         <i class="fas fa-pencil-alt"></i> {% trans "Edit" %}
                                     </a>
                                     | <a href="{% url 'helpdesk:delete' ticket.id %}" class="btn btn-danger btn-sm ticket-delete">

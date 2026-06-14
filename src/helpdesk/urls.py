@@ -59,6 +59,10 @@ if helpdesk_settings.HELPDESK_UI_ENABLED:
         path("tickets/", staff.ticket_list, name="list"),
         path("tickets/update/", staff.mass_update, name="mass_update"),
         path("tickets/merge", staff.merge_tickets, name="merge_tickets"),
+        path("tickets/duplicates/", staff.duplicate_suggestions, name="duplicate_suggestions"),
+        path("tickets/duplicates/scan/", staff.scan_all_duplicates, name="scan_all_duplicates"),
+        path("tickets/duplicates/<int:candidate_id>/action/", staff.duplicate_candidate_action, name="duplicate_candidate_action"),
+        path("tickets/<int:ticket_id>/duplicates/", staff.ticket_duplicate_suggestions, name="ticket_duplicate_suggestions"),
         path("tickets/<int:ticket_id>/", staff.view_ticket, name="view"),
         path(
             "tickets/<int:ticket_id>/followup_edit/<int:followup_id>/",
