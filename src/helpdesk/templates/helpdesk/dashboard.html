@@ -37,4 +37,120 @@
     {% trans "utcr_page" as page_var %}
     {% include 'helpdesk/include/tickets.html' with ticket_list=user_tickets_closed_resolved ticket_list_empty_message="" page_var=page_var sort_param='utcr_sort' current_sort=user_tickets_closed_sort %}
 {% endif %}
+
+<div class="toast-container position-fixed top-0 end-0 p-3" id="sse-toast-container" style="z-index: 9999;"></div>
+
+{% block helpdesk_js %}
+<script>
+(function() {
+    var sseUrl = "{% url 'helpdesk:sse_stream' %}";
+    var eventSource;
+    var reconnectDelay = 3000;
+
+    function showToast(title, message, type, url) {
+        var container = document.getElementById('sse-toast-container');
+        if (!container) return;
+
+        var toast = document.createElement('div');
+        toast.className = 'toast show align-items-center text-bg-' + (type || 'info') + ' border-0';
+        toast.setAttribute('role', 'alert');
+        toast.setAttribute('aria-live', 'assertive');
+        toast.style.minWidth = '300px';
+
+        var body = document.createElement('div');
+        body.className = 'toast-body';
+        body.innerHTML = '<strong>' + title + '</strong><br>' + message;
+
+        if (url) {
+            toast.style.cursor = 'pointer';
+            toast.addEventListener('click', function() {
+                window.location.href = url;
+            });
+        }
+
+        toast.appendChild(body);
+        container.appendChild(toast);
+
+        setTimeout(function() {
+            toast.classList.remove('show');
+            setTimeout(function() {
+                if (toast.parentNode) {
+                    toast.parentNode.removeChild(toast);
+                }
+            }, 500);
+        }, 8000);
+    }
+
+    function connectSSE() {
+        if (typeof EventSource === 'undefined') {
+            console.log('SSE not supported');
+            return;
+        }
+
+        try {
+            eventSource = new EventSource(sseUrl);
+
+            eventSource.onopen = function() {
+                console.log('SSE connection established');
+            };
+
+            eventSource.addEventListener('assigned', function(e) {
+                var data = JSON.parse(e.data);
+                showToast(
+                    '{% trans "Ticket Assigned" %}',
+                    data.ticket_title,
+                    'primary',
+                    data.url
+                );
+            });
+
+            eventSource.addEventListener('updated', function(e) {
+                var data = JSON.parse(e.data);
+                showToast(
+                    '{% trans "Ticket Updated" %}',
+                    data.ticket_title,
+                    'info',
+                    data.url
+                );
+            });
+
+            eventSource.addEventListener('resolved', function(e) {
+                var data = JSON.parse(e.data);
+                showToast(
+                    '{% trans "Ticket Resolved" %}',
+                    data.ticket_title,
+                    'success',
+                    data.url
+                );
+            });
+
+            eventSource.addEventListener('closed', function(e) {
+                var data = JSON.parse(e.data);
+                showToast(
+                    '{% trans "Ticket Closed" %}',
+                    data.ticket_title,
+                    'secondary',
+                    data.url
+                );
+            });
+
+            eventSource.onerror = function() {
+                console.log('SSE connection error, reconnecting...');
+                if (eventSource.readyState === EventSource.CLOSED) {
+                    setTimeout(connectSSE, reconnectDelay);
+                }
+            };
+        } catch (e) {
+            console.error('SSE error:', e);
+        }
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', connectSSE);
+    } else {
+        connectSSE();
+    }
+})();
+</script>
+{% endblock %}
 {% endblock %}

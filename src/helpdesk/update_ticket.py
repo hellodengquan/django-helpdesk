@@ -211,6 +211,14 @@ def process_email_notifications_for_ticket_update(
         )
         messages_sent_to.add(follower_user.email)
 
+    try:
+        from helpdesk.sse import broadcast_to_followers
+
+        event_type = template_prefix.rstrip("_")
+        broadcast_to_followers(ticket, event_type)
+    except Exception:
+        pass
+
 
 def get_email_template_prefix(reassigned, follow_up: FollowUp) -> str:
     if reassigned:

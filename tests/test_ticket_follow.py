@@ -382,3 +382,109 @@ class TicketViewFollowButtonTestCase(TestCase):
         ticket = self._make_ticket()
         resp = self.client.get(reverse("helpdesk:view", args=[ticket.id]))
         self.assertContains(resp, "csrfmiddlewaretoken")
+
+
+class MultiTenantFollowTestCase(TestCase):
+    fixtures = ["emailtemplate.json"]
+
+    def setUp(self):
+        self.queue_a = Queue.objects.create(
+            title="Queue A", slug="qa", allow_public_submission=False,
+        )
+        self.queue_b = Queue.objects.create(
+            title="Queue B", slug="qb", allow_public_submission=False,
+        )
+        self.client = Client()
+        helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION = True
+
+    def tearDown(self):
+        helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION = False
+
+    def _make_staff(self, username="staff"):
+        User = get_user_model()
+        u = User.objects.create(
+            username=username, is_staff=True, email=f"{username}@ex.com",
+        )
+        u.set_password("pw")
+        u.save()
+        return u
+
+    def _grant_queue_perm(self, user, queue):
+        from django.contrib.auth.models import Permission
+        perm = Permission.objects.get(codename=queue.permission_name.split(".")[-1])
+        user.user_permissions.add(perm)
+
+    def _make_ticket(self, queue, **kw):
+        defaults = {"title": "T", "description": "d"}
+        defaults.update(kw)
+        return Ticket.objects.create(queue=queue, **defaults)
+
+    def test_follow_unaccessible_queue_ticket_denied(self):
+        user = self._make_staff("staff_a")
+        self._grant_queue_perm(user, self.queue_a)
+        self.client.login(username="staff_a", password="pw")
+        ticket_b = self._make_ticket(self.queue_b, title="QB Ticket")
+        url = reverse("helpdesk:follow_ticket", kwargs={"ticket_id": ticket_b.id})
+        resp = self.client.post(url)
+        self.assertEqual(resp.status_code, 403)
+        self.assertFalse(UserTicketFollow.objects.filter(user=user).exists())
+
+    def test_follow_accessible_queue_ticket_allowed(self):
+        user = self._make_staff("staff_a")
+        self._grant_queue_perm(user, self.queue_a)
+        self.client.login(username="staff_a", password="pw")
+        ticket_a = self._make_ticket(self.queue_a, title="QA Ticket")
+        url = reverse("helpdesk:follow_ticket", kwargs={"ticket_id": ticket_a.id})
+        resp = self.client.post(url)
+        self.assertEqual(resp.status_code, 302)
+        self.assertTrue(UserTicketFollow.is_following(user, ticket_a))
+
+    def test_dashboard_only_shows_accessible_followed_tickets(self):
+        user = self._make_staff("staff_a")
+        self._grant_queue_perm(user, self.queue_a)
+        ticket_a = self._make_ticket(self.queue_a, title="QA Followed")
+        ticket_b = self._make_ticket(self.queue_b, title="QB Followed")
+        UserTicketFollow.objects.create(user=user, ticket=ticket_a)
+        UserTicketFollow.objects.create(user=user, ticket=ticket_b)
+        self.client.login(username="staff_a", password="pw")
+        resp = self.client.get(reverse("helpdesk:dashboard"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "QA Followed")
+        self.assertNotContains(resp, "QB Followed")
+
+    def test_multi_queue_collaborator_sees_all_queues_tickets(self):
+        user = self._make_staff("collab")
+        self._grant_queue_perm(user, self.queue_a)
+        self._grant_queue_perm(user, self.queue_b)
+        ticket_a = self._make_ticket(self.queue_a, title="QA Multi")
+        ticket_b = self._make_ticket(self.queue_b, title="QB Multi")
+        UserTicketFollow.objects.create(user=user, ticket=ticket_a)
+        UserTicketFollow.objects.create(user=user, ticket=ticket_b)
+        self.client.login(username="collab", password="pw")
+        resp = self.client.get(reverse("helpdesk:dashboard"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "QA Multi")
+        self.assertContains(resp, "QB Multi")
+
+    def test_follow_count_respects_queue_permissions(self):
+        user = self._make_staff("staff_a")
+        self._grant_queue_perm(user, self.queue_a)
+        for i in range(5):
+            t = self._make_ticket(self.queue_a, title=f"QA-{i}")
+            UserTicketFollow.objects.create(user=user, ticket=t)
+        for i in range(5):
+            t = self._make_ticket(self.queue_b, title=f"QB-{i}")
+            UserTicketFollow.objects.create(user=user, ticket=t)
+        self.client.login(username="staff_a", password="pw")
+        resp = self.client.get(reverse("helpdesk:dashboard"))
+        self.assertEqual(resp.status_code, 200)
+        followed = resp.context["followed_tickets"]
+        self.assertEqual(followed.paginator.count, 5)
+
+    def test_cannot_view_ticket_from_other_queue(self):
+        user = self._make_staff("staff_a")
+        self._grant_queue_perm(user, self.queue_a)
+        self.client.login(username="staff_a", password="pw")
+        ticket_b = self._make_ticket(self.queue_b, title="QB Secret")
+        resp = self.client.get(reverse("helpdesk:view", args=[ticket_b.id]))
+        self.assertEqual(resp.status_code, 403)

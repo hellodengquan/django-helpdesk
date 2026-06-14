@@ -230,6 +230,7 @@ def dashboard(request):
         Ticket.objects.select_related("queue")
         .filter(
             followers__user=request.user,
+            queue__in=user_queues,
         )
         .exclude(
             assigned_to=request.user,
@@ -1530,6 +1531,34 @@ def toggle_follow_ticket(request, ticket_id):
 
 
 toggle_follow_ticket = staff_member_required(toggle_follow_ticket)
+
+
+@helpdesk_staff_member_required
+def sse_stream(request):
+    """SSE endpoint for real-time ticket updates for the current user."""
+    from django.http import StreamingHttpResponse
+    from helpdesk.sse import subscribe, unsubscribe
+
+    user_id = request.user.id
+    stream = subscribe(user_id)
+
+    def event_stream():
+        try:
+            for event in stream:
+                yield event
+        finally:
+            unsubscribe(stream)
+
+    response = StreamingHttpResponse(
+        event_stream(),
+        content_type="text/event-stream",
+    )
+    response["Cache-Control"] = "no-cache"
+    response["X-Accel-Buffering"] = "no"
+    return response
+
+
+sse_stream = staff_member_required(sse_stream)
 
 
 @helpdesk_staff_member_required

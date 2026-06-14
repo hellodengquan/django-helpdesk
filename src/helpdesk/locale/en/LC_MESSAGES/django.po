@@ -3117,9 +3117,159 @@ msgstr ""
 msgid "Queue by Month"
 msgstr ""
 
-#: .\views\staff.py:1954
+#: .\views\staff.py:1957
 msgid "Impossible to add twice the same user"
-msgstr ""
+msgstr "Impossible to add twice the same user"
+
+#: templates/helpdesk/include/ticket_follow_list.html
+msgid "Tickets you are following"
+msgstr "Tickets you are following"
+
+#: templates/helpdesk/include/ticket_follow_list.html
+msgid "You are not following any tickets yet."
+msgstr "You are not following any tickets yet."
+
+#: templates/helpdesk/dashboard.html
+msgid "Ticket Assigned"
+msgstr "Ticket Assigned"
+
+#: templates/helpdesk/dashboard.html
+msgid "Ticket Updated"
+msgstr "Ticket Updated"
+
+#: templates/helpdesk/dashboard.html
+msgid "Ticket Resolved"
+msgstr "Ticket Resolved"
+
+#: templates/helpdesk/dashboard.html
+msgid "Ticket Closed"
+msgstr "Ticket Closed"
+
+#: templates/helpdesk/include/ticket_follow_list.html
+msgid "All statuses"
+msgstr "All statuses"
+
+#: templates/helpdesk/include/ticket_follow_list.html
+msgid "Filter"
+msgstr "Filter"
+
+#: templates/helpdesk/include/ticket_follow_list.html
+msgid "Last Modified"
+msgstr "Last Modified"
+
+#: templates/helpdesk/ticket_desc_table.html
+msgid "Click to unfollow this ticket and stop receiving notifications"
+msgstr "Click to unfollow this ticket and stop receiving notifications"
+
+#: templates/helpdesk/ticket_desc_table.html
+msgid "Following"
+msgstr "Following"
+
+#: templates/helpdesk/ticket_desc_table.html
+msgid "Click to follow this ticket and receive status change notifications"
+msgstr "Click to follow this ticket and receive status change notifications"
+
+#: templates/helpdesk/ticket_desc_table.html
+msgid "Follow"
+msgstr "Follow"
+
+#: templates/helpdesk/emails/assigned_follower_subject.txt
+#, python-format
+msgid "(Assigned) Ticket %(ticket_id)s - %(ticket_title)s"
+msgstr "(Assigned) Ticket %(ticket_id)s - %(ticket_title)s"
+
+#: templates/helpdesk/emails/closed_follower_subject.txt
+#, python-format
+msgid "(Closed) Ticket %(ticket_id)s - %(ticket_title)s"
+msgstr "(Closed) Ticket %(ticket_id)s - %(ticket_title)s"
+
+#: templates/helpdesk/emails/resolved_follower_subject.txt
+#, python-format
+msgid "(Resolved) Ticket %(ticket_id)s - %(ticket_title)s"
+msgstr "(Resolved) Ticket %(ticket_id)s - %(ticket_title)s"
+
+#: templates/helpdesk/emails/updated_follower_subject.txt
+#, python-format
+msgid "(Updated) Ticket %(ticket_id)s - %(ticket_title)s"
+msgstr "(Updated) Ticket %(ticket_id)s - %(ticket_title)s"
+
+#: templates/helpdesk/emails/assigned_follower.txt
+msgid "Hello,"
+msgstr "Hello,"
+
+#: templates/helpdesk/emails/resolved_follower.txt
+msgid "The following ticket, which you are following, has been resolved:"
+msgstr "The following ticket, which you are following, has been resolved:"
+
+#: templates/helpdesk/emails/resolved_follower.txt
+msgid "The original ticket description was:"
+msgstr "The original ticket description was:"
+
+#: templates/helpdesk/emails/resolved_follower.txt
+msgid "This resolution has been e-mailed to the submitter, who will verify it before you can close this ticket."
+msgstr "This resolution has been e-mailed to the submitter, who will verify it before you can close this ticket."
+
+#: templates/helpdesk/emails/updated_follower.txt
+msgid "Original description:"
+msgstr "Original description:"
+
+#: templates/helpdesk/emails/updated_follower.txt
+msgid "The following comment was added:"
+msgstr "The following comment was added:"
+
+#: templates/helpdesk/emails/updated_follower.txt
+msgid "This information has not been e-mailed to the submitter."
+msgstr "This information has not been e-mailed to the submitter."
+
+#: templates/helpdesk/emails/updated_follower.txt
+msgid "This information has been e-mailed to the submitter."
+msgstr "This information has been e-mailed to the submitter."
+
+#: templates/helpdesk/emails/assigned_follower.html
+msgid "Ticket Assigned - Followed Ticket"
+msgstr "Ticket Assigned - Followed Ticket"
+
+#: templates/helpdesk/emails/closed_follower.html
+msgid "Ticket Closed - Followed Ticket"
+msgstr "Ticket Closed - Followed Ticket"
+
+#: templates/helpdesk/emails/resolved_follower.html
+msgid "Ticket Resolved - Followed Ticket"
+msgstr "Ticket Resolved - Followed Ticket"
+
+#: templates/helpdesk/emails/resolved_follower.html
+msgid "The following ticket, which you are following, has been resolved."
+msgstr "The following ticket, which you are following, has been resolved."
+
+#: templates/helpdesk/emails/resolved_follower.html
+msgid "The resolution that was added was:"
+msgstr "The resolution that was added was:"
+
+#: templates/helpdesk/emails/updated_follower.html
+msgid "Ticket Updated - Followed Ticket"
+msgstr "Ticket Updated - Followed Ticket"
+
+#: templates/helpdesk/emails/assigned_follower.html
+#: templates/helpdesk/emails/closed_follower.html
+#: templates/helpdesk/emails/updated_follower.html
+msgid "Just for reference, the original ticket description was:"
+msgstr "Just for reference, the original ticket description was:"
+
+#: templates/helpdesk/emails/closed_follower.html
+msgid "The resolution provided was:"
+msgstr "The resolution provided was:"
+
+#: templates/helpdesk/emails/assigned_follower.txt
+#: templates/helpdesk/emails/closed_follower.txt
+#: templates/helpdesk/emails/resolved_follower.txt
+#: templates/helpdesk/emails/updated_follower.txt
+msgid "login required"
+msgstr "login required"
+
+#: templates/helpdesk/emails/assigned_follower.txt
+#: templates/helpdesk/emails/updated_follower.txt
+msgid "Unknown"
+msgstr "Unknown"
 
 #: .\views\staff.py:1957
 msgid "Impossible to add twice the same email address"

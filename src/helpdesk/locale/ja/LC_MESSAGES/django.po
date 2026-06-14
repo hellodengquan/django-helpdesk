@@ -1,0 +1,167 @@
+# Japanese (Japan) translations for PACKAGE.
+# Copyright (C) 2024 THE PACKAGE'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the PACKAGE package.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: PACKAGE VERSION\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2024-06-14 00:00+0000\n"
+"PO-Revision-Date: 2024-06-14 00:00+0000\n"
+"Last-Translator: Automatically generated\n"
+"Language-Team: none\n"
+"Language: ja\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+#: templates/helpdesk/include/ticket_follow_list.html
+msgid "Tickets you are following"
+msgstr "フォロー中のチケット"
+
+#: templates/helpdesk/include/ticket_follow_list.html
+msgid "You are not following any tickets yet."
+msgstr "まだフォローしているチケットはありません。"
+
+#: templates/helpdesk/dashboard.html
+msgid "Ticket Assigned"
+msgstr "チケットが割り当てられました"
+
+#: templates/helpdesk/dashboard.html
+msgid "Ticket Updated"
+msgstr "チケットが更新されました"
+
+#: templates/helpdesk/dashboard.html
+msgid "Ticket Resolved"
+msgstr "チケットが解決されました"
+
+#: templates/helpdesk/dashboard.html
+msgid "Ticket Closed"
+msgstr "チケットがクローズされました"
+
+#: templates/helpdesk/include/ticket_follow_list.html
+msgid "All statuses"
+msgstr "すべてのステータス"
+
+#: templates/helpdesk/include/ticket_follow_list.html
+msgid "Filter"
+msgstr "フィルター"
+
+#: templates/helpdesk/include/ticket_follow_list.html
+msgid "Last Modified"
+msgstr "最終更新日"
+
+#: templates/helpdesk/ticket_desc_table.html
+msgid "Click to unfollow this ticket and stop receiving notifications"
+msgstr "クリックしてチケットのフォローを解除し、通知の受信を停止します"
+
+#: templates/helpdesk/ticket_desc_table.html
+msgid "Following"
+msgstr "フォロー中"
+
+#: templates/helpdesk/ticket_desc_table.html
+msgid "Click to follow this ticket and receive status change notifications"
+msgstr "クリックしてチケットをフォローし、ステータス変更通知を受け取ります"
+
+#: templates/helpdesk/ticket_desc_table.html
+msgid "Follow"
+msgstr "フォロー"
+
+#: templates/helpdesk/emails/assigned_follower_subject.txt
+#, python-format
+msgid "(Assigned) Ticket %(ticket_id)s - %(ticket_title)s"
+msgstr "(割り当て済み) チケット %(ticket_id)s - %(ticket_title)s"
+
+#: templates/helpdesk/emails/closed_follower_subject.txt
+#, python-format
+msgid "(Closed) Ticket %(ticket_id)s - %(ticket_title)s"
+msgstr "(クローズ済み) チケット %(ticket_id)s - %(ticket_title)s"
+
+#: templates/helpdesk/emails/resolved_follower_subject.txt
+#, python-format
+msgid "(Resolved) Ticket %(ticket_id)s - %(ticket_title)s"
+msgstr "(解決済み) チケット %(ticket_id)s - %(ticket_title)s"
+
+#: templates/helpdesk/emails/updated_follower_subject.txt
+#, python-format
+msgid "(Updated) Ticket %(ticket_id)s - %(ticket_title)s"
+msgstr "(更新済み) チケット %(ticket_id)s - %(ticket_title)s"
+
+#: templates/helpdesk/emails/assigned_follower.txt
+msgid "Hello,"
+msgstr "こんにちは、"
+
+#: templates/helpdesk/emails/resolved_follower.txt
+msgid "The following ticket, which you are following, has been resolved:"
+msgstr "フォローしている以下のチケットが解決されました："
+
+#: templates/helpdesk/emails/resolved_follower.txt
+msgid "The original ticket description was:"
+msgstr "元のチケットの説明："
+
+#: templates/helpdesk/emails/resolved_follower.txt
+msgid "This resolution has been e-mailed to the submitter, who will verify it before you can close this ticket."
+msgstr "この解決策は提出者にメールで送信されました。チケットをクローズする前に、提出者が確認します。"
+
+#: templates/helpdesk/emails/updated_follower.txt
+msgid "Original description:"
+msgstr "元の説明："
+
+#: templates/helpdesk/emails/updated_follower.txt
+msgid "The following comment was added:"
+msgstr "以下のコメントが追加されました："
+
+#: templates/helpdesk/emails/updated_follower.txt
+msgid "This information has not been e-mailed to the submitter."
+msgstr "この情報は提出者にメール送信されていません。"
+
+#: templates/helpdesk/emails/updated_follower.txt
+msgid "This information has been e-mailed to the submitter."
+msgstr "この情報は提出者にメール送信されました。"
+
+#: templates/helpdesk/emails/assigned_follower.html
+msgid "Ticket Assigned - Followed Ticket"
+msgstr "チケットが割り当てられました - フォロー中のチケット"
+
+#: templates/helpdesk/emails/closed_follower.html
+msgid "Ticket Closed - Followed Ticket"
+msgstr "チケットがクローズされました - フォロー中のチケット"
+
+#: templates/helpdesk/emails/resolved_follower.html
+msgid "Ticket Resolved - Followed Ticket"
+msgstr "チケットが解決されました - フォロー中のチケット"
+
+#: templates/helpdesk/emails/resolved_follower.html
+msgid "The following ticket, which you are following, has been resolved."
+msgstr "フォローしている以下のチケットが解決されました。"
+
+#: templates/helpdesk/emails/resolved_follower.html
+msgid "The resolution that was added was:"
+msgstr "追加された解決策："
+
+#: templates/helpdesk/emails/updated_follower.html
+msgid "Ticket Updated - Followed Ticket"
+msgstr "チケットが更新されました - フォロー中のチケット"
+
+#: templates/helpdesk/emails/assigned_follower.html
+#: templates/helpdesk/emails/closed_follower.html
+#: templates/helpdesk/emails/updated_follower.html
+msgid "Just for reference, the original ticket description was:"
+msgstr "参考までに、元のチケットの説明："
+
+#: templates/helpdesk/emails/closed_follower.html
+msgid "The resolution provided was:"
+msgstr "提供された解決策："
+
+#: templates/helpdesk/emails/assigned_follower.txt
+#: templates/helpdesk/emails/closed_follower.txt
+#: templates/helpdesk/emails/resolved_follower.txt
+#: templates/helpdesk/emails/updated_follower.txt
+msgid "login required"
+msgstr "ログインが必要です"
+
+#: templates/helpdesk/emails/assigned_follower.txt
+#: templates/helpdesk/emails/updated_follower.txt
+msgid "Unknown"
+msgstr "不明"
