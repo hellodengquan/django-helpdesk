@@ -1,6 +1,6 @@
 from collections import defaultdict
 from copy import deepcopy
-from datetime import timedelta
+from datetime import timedelta, timezone as py_tz
 from django.contrib.auth import get_user_model
 from django.db.models import Q
 from django.test import TestCase, RequestFactory, override_settings
@@ -1355,3 +1355,729 @@ class ArchiveActiveBoundaryTests(TestCase):
         ids_after = set(builder.get_queryset().values_list("id", flat=True))
         self.assertEqual(ids_before, ids_after)
         self.assertEqual(builder.count(), len(ids_after))
+
+
+class MassUpdateQueryImpactTests(TestCase):
+    def setUp(self):
+        self.queue = Queue.objects.create(
+            title="MassUpdateQ", slug="mu_queue"
+        )
+        self.staff_user = get_staff_user()
+        self.other_user = User.objects.create_user(
+            username="other", password="pass", is_staff=True
+        )
+        self.huser = HelpdeskUser(self.staff_user)
+        self.factory = RequestFactory()
+        self.now = timezone.now()
+
+        cat = KBCategory.objects.create(
+            title="KB Cat", slug="kb_cat", description="d", queue=self.queue
+        )
+        self.kb1 = KBItem.objects.create(
+            category=cat, title="KB1", question="q", answer="a"
+        )
+
+        self.tickets = []
+        statuses = [
+            Ticket.OPEN_STATUS,
+            Ticket.OPEN_STATUS,
+            Ticket.OPEN_STATUS,
+            Ticket.REOPENED_STATUS,
+            Ticket.RESOLVED_STATUS,
+        ]
+        for i in range(5):
+            t = Ticket.objects.create(
+                title=f"Mass Update Ticket {i}",
+                queue=self.queue,
+                status=statuses[i],
+                priority=3,
+                assigned_to=self.staff_user if i < 3 else None,
+                created=self.now - timedelta(days=i),
+            )
+            self.tickets.append(t)
+        self.all_ids = [t.id for t in self.tickets]
+
+    def _builder(self, query_params=None):
+        return TicketQueryBuilder(self.huser, query_params=query_params)
+
+    def _mass_update(self, action, ticket_ids=None, **extra):
+        self.client.force_login(self.staff_user)
+        post = {"ticket_id": ticket_ids or self.all_ids, "action": action}
+        post.update(extra)
+        return self.client.post(reverse("helpdesk:mass_update"), post)
+
+    def test_mass_assign_changes_assigned_to_count_consistency(self):
+        """批量分配后 assigned_to 查询计数四入口一致。"""
+        params_before = {
+            "filtering": {"assigned_to__id__in": [self.other_user.pk]},
+            "sorting": "id",
+        }
+        builder_before = self._builder(query_params=params_before)
+        self.assertEqual(builder_before.count(), 0)
+
+        self._mass_update(f"assign_{self.other_user.pk}")
+
+        builder_after = self._builder(query_params=params_before)
+        qs_count = builder_after.count()
+        self.assertEqual(qs_count, 5)
+
+        dt = builder_after.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        self.assertEqual(dt["recordsTotal"], qs_count)
+        self.assertEqual(dt["recordsFiltered"], qs_count)
+        export_rows = list(builder_after.iter_export_rows())
+        self.assertEqual(len(export_rows) - 1, qs_count)
+
+    def test_mass_assign_queryset_id_set_matches_export(self):
+        """批量分配后查询集 ID 集合 == 导出 ID 集合。"""
+        self._mass_update(f"assign_{self.other_user.pk}")
+        params = {
+            "filtering": {"assigned_to__id__in": [self.other_user.pk]},
+            "sorting": "id",
+        }
+        builder = self._builder(query_params=params)
+        qs_ids = set(builder.get_queryset().values_list("id", flat=True))
+        export_rows = list(builder.iter_export_rows())
+        header = export_rows[0]
+        id_idx = header.index("id")
+        export_ids = set(int(r[id_idx]) for r in export_rows[1:])
+        self.assertEqual(qs_ids, export_ids)
+
+    def test_mass_unassign_consistency(self):
+        """批量取消分配后 assigned_to=None 查询四入口一致。"""
+        self._mass_update("unassign")
+        params = {
+            "filtering_null": {"assigned_to__id__isnull": True},
+            "sorting": "id",
+        }
+        builder = self._builder(query_params=params)
+        qs_count = builder.count()
+        self.assertEqual(qs_count, 5)
+        dt = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        self.assertEqual(dt["recordsTotal"], qs_count)
+        export_rows = list(builder.iter_export_rows())
+        self.assertEqual(len(export_rows) - 1, qs_count)
+
+    def test_mass_close_removes_from_default_list(self):
+        """批量关闭后工单从默认列表过滤消失。"""
+        default_params = get_default_list_query_params()
+        builder_before = self._builder(query_params=default_params)
+        count_before = builder_before.count()
+        self.assertEqual(count_before, 4)
+
+        self._mass_update("close")
+
+        builder_after = self._builder(query_params=default_params)
+        count_after = builder_after.count()
+        self.assertEqual(count_after, 0)
+
+        dt = builder_after.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        self.assertEqual(dt["recordsTotal"], 0)
+        self.assertEqual(dt["recordsFiltered"], 0)
+        export_rows = list(builder_after.iter_export_rows())
+        self.assertEqual(len(export_rows) - 1, 0)
+
+    def test_mass_close_visible_in_archive_query(self):
+        """批量关闭工单在归档状态查询中四入口一致。"""
+        self._mass_update("close")
+        params = {
+            "filtering": {"status__in": [Ticket.CLOSED_STATUS]},
+            "sorting": "id",
+        }
+        builder = self._builder(query_params=params)
+        qs_count = builder.count()
+        self.assertEqual(qs_count, 5)
+        dt = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        self.assertEqual(dt["recordsTotal"], qs_count)
+        export_rows = list(builder.iter_export_rows())
+        self.assertEqual(len(export_rows) - 1, qs_count)
+
+    def test_mass_take_assigns_to_current_user(self):
+        """批量 take 后 assigned_to 为当前用户，查询一致。"""
+        for t in self.tickets:
+            t.assigned_to = None
+            t.save()
+        self._mass_update("take")
+        params = {
+            "filtering": {"assigned_to__id__in": [self.staff_user.pk]},
+            "sorting": "id",
+        }
+        builder = self._builder(query_params=params)
+        self.assertEqual(builder.count(), 5)
+        dt = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        self.assertEqual(dt["recordsTotal"], 5)
+
+    def test_mass_set_kbitem_consistency(self):
+        """批量设置 KBItem 后按 kbitem 过滤一致。"""
+        self._mass_update(f"kbitem_{self.kb1.pk}")
+        params = {
+            "filtering": {"kbitem__in": [self.kb1.pk]},
+            "sorting": "id",
+        }
+        builder = self._builder(query_params=params)
+        qs_count = builder.count()
+        self.assertEqual(qs_count, 5)
+        dt = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        self.assertEqual(dt["recordsTotal"], qs_count)
+        export_rows = list(builder.iter_export_rows())
+        self.assertEqual(len(export_rows) - 1, qs_count)
+
+    def test_mass_delete_removes_tickets_from_queryset(self):
+        """批量删除工单后查询结果不再包含，四入口一致。"""
+        to_delete = [self.tickets[0].id, self.tickets[1].id]
+        self._mass_update("delete", ticket_ids=to_delete)
+        params = {
+            "filtering": {"status__in": [Ticket.OPEN_STATUS]},
+            "sorting": "id",
+        }
+        builder = self._builder(query_params=params)
+        qs_ids = set(builder.get_queryset().values_list("id", flat=True))
+        for did in to_delete:
+            self.assertNotIn(did, qs_ids)
+        dt = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        self.assertEqual(dt["recordsTotal"], builder.count())
+        export_rows = list(builder.iter_export_rows())
+        self.assertEqual(len(export_rows) - 1, builder.count())
+
+    def test_partial_mass_update_consistency(self):
+        """只更新部分工单，查询和导出对更新/未更新工单一致性。"""
+        to_update = [self.tickets[0].id, self.tickets[2].id]
+        self._mass_update(f"assign_{self.other_user.pk}", ticket_ids=to_update)
+
+        params = {
+            "filtering": {"assigned_to__id__in": [self.other_user.pk]},
+            "sorting": "id",
+        }
+        builder = self._builder(query_params=params)
+        qs_ids = set(builder.get_queryset().values_list("id", flat=True))
+        self.assertEqual(qs_ids, set(to_update))
+
+        dt = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        self.assertEqual(dt["recordsTotal"], len(to_update))
+        export_rows = list(builder.iter_export_rows())
+        header = export_rows[0]
+        id_idx = header.index("id")
+        export_ids = set(int(r[id_idx]) for r in export_rows[1:])
+        self.assertEqual(export_ids, set(to_update))
+
+    def test_mass_close_pagination_boundary(self):
+        """批量关闭后活跃工单只剩 0 条，分页 batch 空结果一致。"""
+        self._mass_update("close")
+        default_params = get_default_list_query_params()
+        builder = self._builder(query_params=default_params)
+        for start in (0, 25, 50):
+            dt = builder.get_datatables_context(
+                draw=["0"], length=["25"], start=[str(start)]
+            )
+            self.assertEqual(dt["recordsTotal"], 0)
+            self.assertEqual(dt["recordsFiltered"], 0)
+            self.assertEqual(len(dt["data"]), 0)
+
+
+class CustomFieldSearchSortTests(TestCase):
+    def setUp(self):
+        self.queue = Queue.objects.create(
+            title="CFQueue", slug="cf_queue", allow_public_submission=True
+        )
+        self.staff_user = get_staff_user()
+        self.huser = HelpdeskUser(self.staff_user)
+
+        self.cf_varchar = CustomField.objects.create(
+            name="company_name",
+            label="Company Name",
+            data_type="varchar",
+            max_length=100,
+        )
+        self.cf_text = CustomField.objects.create(
+            name="issue_detail",
+            label="Issue Detail",
+            data_type="text",
+        )
+        self.cf_int = CustomField.objects.create(
+            name="customer_id",
+            label="Customer ID",
+            data_type="integer",
+        )
+        self.cf_list = CustomField.objects.create(
+            name="severity",
+            label="Severity",
+            data_type="list",
+            list_values="Low\nMedium\nHigh\nCritical",
+        )
+
+        companies = ["Acme Corp", "Beta Inc", "Acme Labs", "Delta Corp", "公司中文"]
+        details = ["Login failure SSO", "密码重置失败", "Network outage 服务器",
+                   "Database 连接超时 timeout", "SSO 单点登录"]
+        cids = [1001, 2002, 1001, 3003, 4004]
+        severities = ["Low", "High", "Medium", "Critical", "High"]
+
+        self.tickets = []
+        for i in range(5):
+            t = Ticket.objects.create(
+                title=f"CF Ticket {i}",
+                queue=self.queue,
+                status=Ticket.OPEN_STATUS,
+                priority=3,
+            )
+            TicketCustomFieldValue.objects.create(
+                ticket=t, field=self.cf_varchar, value=companies[i]
+            )
+            TicketCustomFieldValue.objects.create(
+                ticket=t, field=self.cf_text, value=details[i]
+            )
+            TicketCustomFieldValue.objects.create(
+                ticket=t, field=self.cf_int, value=str(cids[i])
+            )
+            TicketCustomFieldValue.objects.create(
+                ticket=t, field=self.cf_list, value=severities[i]
+            )
+            self.tickets.append(t)
+
+    def _builder(self, query_params=None):
+        return TicketQueryBuilder(self.huser, query_params=query_params)
+
+    def test_search_varchar_custom_field_value(self):
+        """搜索字符串 CF 值，结果命中并四入口一致。"""
+        params = {"search_string": "Acme", "sorting": "id"}
+        builder = self._builder(query_params=params)
+        ids = set(builder.get_queryset().values_list("id", flat=True))
+        self.assertEqual(ids, {self.tickets[0].id, self.tickets[2].id})
+        self.assertEqual(builder.count(), 2)
+        dt = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        self.assertEqual(dt["recordsTotal"], builder.count())
+        self.assertEqual(dt["recordsFiltered"], builder.count())
+        export_rows = list(builder.iter_export_rows())
+        self.assertEqual(len(export_rows) - 1, builder.count())
+
+    def test_search_text_custom_field_value(self):
+        """搜索 text CF 值，中英文混合关键词命中。"""
+        params = {"search_string": "SSO", "sorting": "id"}
+        builder = self._builder(query_params=params)
+        ids = set(builder.get_queryset().values_list("id", flat=True))
+        self.assertEqual(ids, {self.tickets[0].id, self.tickets[4].id})
+
+    def test_search_chinese_custom_field_varchar(self):
+        """搜索中文 varchar CF 值命中。"""
+        params = {"search_string": "公司", "sorting": "id"}
+        builder = self._builder(query_params=params)
+        ids = set(builder.get_queryset().values_list("id", flat=True))
+        self.assertEqual(ids, {self.tickets[4].id})
+
+    def test_search_integer_custom_field_value(self):
+        """搜索 integer CF 值命中，count 和导出一致。"""
+        params = {"search_string": "1001", "sorting": "id"}
+        builder = self._builder(query_params=params)
+        ids = set(builder.get_queryset().values_list("id", flat=True))
+        self.assertEqual(ids, {self.tickets[0].id, self.tickets[2].id})
+        self.assertEqual(builder.count(), 2)
+        export_rows = list(builder.iter_export_rows())
+        self.assertEqual(len(export_rows) - 1, 2)
+
+    def test_search_list_custom_field_value(self):
+        """搜索 list CF 的枚举值命中。"""
+        params = {"search_string": "Critical", "sorting": "id"}
+        builder = self._builder(query_params=params)
+        ids = set(builder.get_queryset().values_list("id", flat=True))
+        self.assertEqual(ids, {self.tickets[3].id})
+
+    def test_or_search_combines_cf_and_native_fields(self):
+        """OR 语法同时命中 CF 与原生字段。"""
+        self.tickets[0].title = "SSO Login Issue"
+        self.tickets[0].save()
+        params = {
+            "search_string": "Acme OR CF Ticket 3",
+            "sorting": "id",
+        }
+        builder = self._builder(query_params=params)
+        ids = set(builder.get_queryset().values_list("id", flat=True))
+        self.assertIn(self.tickets[0].id, ids)
+        self.assertIn(self.tickets[2].id, ids)
+        self.assertIn(self.tickets[3].id, ids)
+        dt = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        self.assertEqual(dt["recordsTotal"], builder.count())
+
+    def test_export_includes_custom_field_columns(self):
+        """导出列头包含所有自定义字段名。"""
+        builder = self._builder(query_params={"sorting": "id"})
+        export_rows = list(builder.iter_export_rows())
+        header = export_rows[0]
+        self.assertIn("company_name", header)
+        self.assertIn("issue_detail", header)
+        self.assertIn("customer_id", header)
+        self.assertIn("severity", header)
+
+    def test_export_custom_field_values_match_records(self):
+        """导出的 CF 值与数据库实际值一致。"""
+        builder = self._builder(query_params={"sorting": "id"})
+        export_rows = list(builder.iter_export_rows(include_custom_fields=True))
+        header = export_rows[0]
+        id_idx = header.index("id")
+        company_idx = header.index("company_name")
+        cid_idx = header.index("customer_id")
+        sev_idx = header.index("severity")
+
+        expected = {}
+        for t in self.tickets:
+            cf_vals = {
+                cfv.field_id: cfv.value
+                for cfv in TicketCustomFieldValue.objects.filter(ticket=t)
+            }
+            expected[t.id] = {
+                "company": cf_vals[self.cf_varchar.id],
+                "cid": cf_vals[self.cf_int.id],
+                "sev": cf_vals[self.cf_list.id],
+            }
+
+        for row in export_rows[1:]:
+            tid = int(row[id_idx])
+            self.assertEqual(row[company_idx], expected[tid]["company"])
+            self.assertEqual(row[cid_idx], expected[tid]["cid"])
+            self.assertEqual(row[sev_idx], expected[tid]["sev"])
+
+    def test_sorting_consistency_with_custom_filters(self):
+        """使用自定义字段值过滤后，按 created 排序与导出顺序一致。"""
+        params = {
+            "search_string": "High",
+            "sorting": "created",
+            "sortreverse": False,
+        }
+        builder = self._builder(query_params=params)
+        qs_ids = list(builder.get_queryset().values_list("id", flat=True))
+        export_rows = list(builder.iter_export_rows())
+        header = export_rows[0]
+        id_idx = header.index("id")
+        export_ids = [int(r[id_idx]) for r in export_rows[1:]]
+        self.assertEqual(qs_ids, export_ids)
+
+    def test_search_matches_cf_and_native_case_insensitive(self):
+        """大小写不敏感搜索同时命中原生 title 和 CF 值。"""
+        self.tickets[0].title = "SSO Login Issue"
+        self.tickets[0].save()
+        params = {"search_string": "sso", "sorting": "id"}
+        builder = self._builder(query_params=params)
+        ids = set(builder.get_queryset().values_list("id", flat=True))
+        self.assertIn(self.tickets[0].id, ids)
+        self.assertIn(self.tickets[4].id, ids)
+        self.assertEqual(builder.count(), 2)
+        dt = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        self.assertEqual(dt["recordsTotal"], builder.count())
+        export_rows = list(builder.iter_export_rows())
+        self.assertEqual(len(export_rows) - 1, builder.count())
+
+    def test_no_custom_field_export_when_flag_disabled(self):
+        """include_custom_fields=False 时不导出 CF 列。"""
+        builder = self._builder(query_params={})
+        rows = list(builder.iter_export_rows(include_custom_fields=False))
+        header = rows[0]
+        self.assertNotIn("company_name", header)
+        self.assertNotIn("customer_id", header)
+        self.assertEqual(len(header), 13)
+
+
+class TimezoneConsistencyTests(TestCase):
+    def setUp(self):
+        self.queue = Queue.objects.create(
+            title="TZQueue", slug="tz_queue"
+        )
+        self.staff_user = get_staff_user()
+        self.huser = HelpdeskUser(self.staff_user)
+        self.factory = RequestFactory()
+
+    def _builder(self, query_params=None):
+        return TicketQueryBuilder(self.huser, query_params=query_params)
+
+    def _dt(self, **kwargs):
+        return timezone.datetime(2025, 7, 1, **kwargs)
+
+    def _naive(self, **kwargs):
+        return self._dt(**kwargs)
+
+    def test_created_timezone_normalization_count_consistency(self):
+        """不同时间点 created 排序后分页对账 count 四入口一致。"""
+        now_objs = [
+            self._naive(hour=10, minute=0),
+            self._naive(hour=22, minute=0),
+            self._naive(hour=5, minute=0),
+            self._naive(hour=16, minute=0),
+            self._naive(hour=0, minute=0),
+        ]
+        tids = []
+        for i, created in enumerate(now_objs):
+            status = Ticket.OPEN_STATUS if i < 3 else Ticket.CLOSED_STATUS
+            t = Ticket.objects.create(
+                title=f"CreatedTZ {i}",
+                queue=self.queue,
+                status=status,
+                created=created,
+            )
+            tids.append(t.id)
+        params = {
+            "filtering": {
+                "status__in": [Ticket.OPEN_STATUS],
+            },
+            "sorting": "created",
+            "sortreverse": True,
+        }
+        builder = self._builder(query_params=params)
+        qs_ids = list(builder.get_queryset().values_list("id", flat=True))
+        self.assertEqual(len(qs_ids), 3)
+        self.assertEqual(qs_ids, sorted(
+            tids[:3],
+            key=lambda tid: Ticket.objects.get(pk=tid).created,
+            reverse=True,
+        ))
+        self.assertEqual(builder.count(), 3)
+        dt = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        self.assertEqual(dt["recordsFiltered"], 3)
+        export_rows = list(builder.iter_export_rows())
+        self.assertEqual(len(export_rows) - 1, 3)
+        header = export_rows[0]
+        id_idx = header.index("id")
+        export_ids = [int(r[id_idx]) for r in export_rows[1:]]
+        self.assertEqual(qs_ids, export_ids)
+
+    def test_timezone_normalization_sorting_qs_matches_export(self):
+        """不同时间点工单按 created 排序，查询集和导出顺序一致。"""
+        Ticket.objects.create(
+            title="T1 00:00",
+            queue=self.queue,
+            status=Ticket.OPEN_STATUS,
+            created=self._naive(hour=0, minute=0),
+        )
+        Ticket.objects.create(
+            title="T2 08:00",
+            queue=self.queue,
+            status=Ticket.OPEN_STATUS,
+            created=self._naive(hour=8, minute=0),
+        )
+        Ticket.objects.create(
+            title="T3 20:00",
+            queue=self.queue,
+            status=Ticket.OPEN_STATUS,
+            created=self._naive(hour=20, minute=0),
+        )
+        params = {"sorting": "created", "sortreverse": False}
+        builder = self._builder(query_params=params)
+        qs_ids = list(builder.get_queryset().values_list("id", flat=True))
+        export_rows = list(builder.iter_export_rows())
+        header = export_rows[0]
+        id_idx = header.index("id")
+        export_ids = [int(r[id_idx]) for r in export_rows[1:]]
+        self.assertEqual(qs_ids, export_ids)
+        dt = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"],
+            **{"order[0][column]": ["5"], "order[0][dir]": ["asc"]},
+        )
+        dt_ids = [d["id"] for d in dt["data"]]
+        self.assertEqual(qs_ids, dt_ids)
+
+    def test_due_date_filter_consistency(self):
+        """due_date 范围过滤四入口一致。"""
+        d1 = timezone.datetime(2025, 7, 15, 12, 0)
+        d2 = timezone.datetime(2025, 7, 20, 12, 0)
+        d3 = timezone.datetime(2025, 8, 1, 12, 0)
+        t1 = Ticket.objects.create(
+            title="TZ Due 1", queue=self.queue, status=Ticket.OPEN_STATUS, due_date=d1
+        )
+        t2 = Ticket.objects.create(
+            title="TZ Due 2", queue=self.queue, status=Ticket.OPEN_STATUS, due_date=d2
+        )
+        t3 = Ticket.objects.create(
+            title="TZ Due 3", queue=self.queue, status=Ticket.OPEN_STATUS, due_date=d3
+        )
+        params = {
+            "filtering": {"due_date__gte": "2025-07-10", "due_date__lte": "2025-07-25"},
+            "sorting": "due_date",
+        }
+        builder = self._builder(query_params=params)
+        ids = set(builder.get_queryset().values_list("id", flat=True))
+        self.assertIn(t1.id, ids)
+        self.assertIn(t2.id, ids)
+        self.assertNotIn(t3.id, ids)
+        self.assertEqual(builder.count(), 2)
+        dt_ctx = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        self.assertEqual(dt_ctx["recordsTotal"], builder.count())
+        export_rows = list(builder.iter_export_rows())
+        self.assertEqual(len(export_rows) - 1, builder.count())
+
+    def test_sorting_modified_vs_created_timezone(self):
+        """modified 与 created 来自不同时间点排序一致。"""
+        created_t1 = self._naive(hour=10)
+        modified_t1 = self._naive(hour=20)
+        created_t2 = self._naive(hour=2)
+        modified_t2 = self._naive(hour=18)
+        t1 = Ticket.objects.create(
+            title="TZ T1", queue=self.queue, status=Ticket.OPEN_STATUS,
+            created=created_t1, modified=modified_t1,
+        )
+        t2 = Ticket.objects.create(
+            title="TZ T2", queue=self.queue, status=Ticket.OPEN_STATUS,
+            created=created_t2, modified=modified_t2,
+        )
+        params = {"sorting": "modified", "sortreverse": False}
+        builder = self._builder(query_params=params)
+        qs_ids = list(builder.get_queryset().values_list("id", flat=True))
+        export_rows = list(builder.iter_export_rows())
+        header = export_rows[0]
+        id_idx = header.index("id")
+        export_ids = [int(r[id_idx]) for r in export_rows[1:]]
+        self.assertEqual(qs_ids, export_ids)
+
+    def test_request_date_params_without_timezone_consistency(self):
+        """通过 Request 传 date_from/date_to 字符串，结果与手动 Q 一致。"""
+        Ticket.objects.create(
+            title="D1",
+            queue=self.queue,
+            status=Ticket.OPEN_STATUS,
+            created=self._naive(hour=5),
+        )
+        Ticket.objects.create(
+            title="D2",
+            queue=self.queue,
+            status=Ticket.OPEN_STATUS,
+            created=self._naive(hour=15),
+        )
+        request = self.factory.get(
+            "/tickets/", {"date_from": "2025-07-01", "date_to": "2025-07-01"}
+        )
+        req_params = build_query_params_from_request(request)
+        req_builder = TicketQueryBuilder(self.huser, query_params=req_params)
+        manual_builder = TicketQueryBuilder(
+            self.huser,
+            query_params={
+                "filtering": {
+                    "created__gte": "2025-07-01",
+                    "created__lte": "2025-07-01",
+                },
+                "sorting": "created",
+            },
+        )
+        self.assertEqual(req_builder.count(), manual_builder.count())
+        self.assertEqual(
+            set(req_builder.get_queryset().values_list("id", flat=True)),
+            set(manual_builder.get_queryset().values_list("id", flat=True)),
+        )
+
+    def test_last_followup_annotation_with_mixed_timezones(self):
+        """不同时间点 followup 的 annotation 结果与查询一致。"""
+        t = Ticket.objects.create(
+            title="TZ FollowUp",
+            queue=self.queue,
+            status=Ticket.OPEN_STATUS,
+        )
+        FollowUp.objects.create(
+            ticket=t,
+            date=self._naive(hour=20),
+            title="FU 1",
+            comment="c1",
+        )
+        FollowUp.objects.create(
+            ticket=t,
+            date=self._naive(hour=8),
+            title="FU 2",
+            comment="c2",
+        )
+        params = {"sorting": "id"}
+        builder = self._builder(query_params=params)
+        qs_count = builder.count()
+        self.assertEqual(qs_count, 1)
+        dt = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        self.assertEqual(dt["recordsTotal"], qs_count)
+        self.assertEqual(len(dt["data"]), 1)
+        export_rows = list(builder.iter_export_rows())
+        self.assertEqual(len(export_rows) - 1, qs_count)
+
+    def test_pagination_with_mixed_timezones(self):
+        """跨时间点工单分页 batch 顺序一致。"""
+        tzs = [
+            (self._naive(hour=10), 1),
+            (self._naive(hour=0), 2),
+            (self._naive(hour=3), 3),
+            (self._naive(hour=22), 4),
+            (self._naive(hour=12), 5),
+        ]
+        for created, i in tzs:
+            Ticket.objects.create(
+                title=f"TZ Paginated {i}",
+                queue=self.queue,
+                status=Ticket.OPEN_STATUS,
+                created=created,
+            )
+        params = {"sorting": "created", "sortreverse": True}
+        builder = self._builder(query_params=params)
+        full_ids = list(
+            builder.get_queryset().order_by("-created").values_list("id", flat=True)
+        )
+        batch_size = 2
+        collected = []
+        for start in range(0, len(full_ids), batch_size):
+            dt = builder.get_datatables_context(
+                draw=["0"],
+                length=[str(batch_size)],
+                start=[str(start)],
+                **{"order[0][column]": ["5"], "order[0][dir]": ["desc"]},
+            )
+            collected.extend([d["id"] for d in dt["data"]])
+        self.assertEqual(collected, full_ids)
+
+    @override_settings(USE_TZ=True, TIME_ZONE="UTC")
+    def test_timezone_setting_change_preserves_qs_equality(self):
+        """在 USE_TZ=True 环境下，查询层与导出结果仍然一致。"""
+        tz_utc = timezone.utc
+        d1 = timezone.datetime(2025, 7, 1, 10, 0, tzinfo=tz_utc)
+        d2 = timezone.datetime(2025, 7, 1, 18, 0, tzinfo=tz_utc)
+        try:
+            t1 = Ticket.objects.create(
+                title="T1 UTC",
+                queue=self.queue,
+                status=Ticket.OPEN_STATUS,
+                created=d1,
+            )
+            t2 = Ticket.objects.create(
+                title="T2 UTC later",
+                queue=self.queue,
+                status=Ticket.OPEN_STATUS,
+                created=d2,
+            )
+        except (ValueError, TypeError):
+            self.skipTest("SQLite backend incompatible with USE_TZ=True in this env")
+        params = {"sorting": "created"}
+        builder = self._builder(query_params=params)
+        qs_ids = list(builder.get_queryset().values_list("id", flat=True))
+        export_rows = list(builder.iter_export_rows())
+        header = export_rows[0]
+        id_idx = header.index("id")
+        export_ids = [int(r[id_idx]) for r in export_rows[1:]]
+        self.assertEqual(qs_ids, export_ids)
+        dt = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        self.assertEqual(dt["recordsTotal"], builder.count())
+        self.assertEqual(len(dt["data"]), builder.count())
