@@ -173,7 +173,6 @@ class PublicTicketListingSerializer(BaseTicketSerializer):
     status = serializers.SerializerMethodField()
     queue = serializers.SerializerMethodField()
     kbitem = serializers.SerializerMethodField()
-    secret_key = serializers.CharField(read_only=True)
 
     class Meta:
         model = Ticket
@@ -188,7 +187,6 @@ class PublicTicketListingSerializer(BaseTicketSerializer):
             "due_date",
             "submitter",
             "kbitem",
-            "secret_key",
         )
 
     def get_queue(self, obj):

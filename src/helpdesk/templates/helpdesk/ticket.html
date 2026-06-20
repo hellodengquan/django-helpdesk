@@ -492,6 +492,7 @@ $( function() {
       return html;
   }
 
+  var previewXhr = null;
   function loadPreview() {
       var customerContent = $('#customerPreviewContent');
       var staffContent = $('#staffPreviewContent');
@@ -499,26 +500,40 @@ $( function() {
       customerContent.html(loadingHtml);
       staffContent.html(loadingHtml);
 
+      if (previewXhr) {
+          previewXhr.abort();
+      }
+
       var formData = getFormDataForPreview();
       var postData = {
           'comment': formData.comment,
-          'public': formData.public,
-          'csrfmiddlewaretoken': $('input[name="csrfmiddlewaretoken"]').val()
+          'public': formData.public
       };
       if (formData.new_status) {
           postData['new_status'] = formData.new_status;
       }
 
-      $.ajax({
+      $.ajaxSetup({
+          beforeSend: function(xhr, settings) {
+              if (!this.crossDomain) {
+                  var csrftoken = $('input[name="csrfmiddlewaretoken"]').val() || getCookie('csrftoken');
+                  xhr.setRequestHeader('X-CSRFToken', csrftoken);
+              }
+          }
+      });
+
+      previewXhr = $.ajax({
           url: "{% url 'helpdesk:preview_followup' ticket.id %}",
           type: 'POST',
           data: postData,
           dataType: 'json',
+          contentType: 'application/x-www-form-urlencoded; charset=UTF-8',
           success: function(response) {
               customerContent.html(renderCustomerPreview(response));
               staffContent.html(renderStaffPreview(response));
           },
           error: function(xhr, status, error) {
+              if (status === 'abort') return;
               var errorHtml = '<div class="alert alert-danger" role="alert"><i class="fas fa-exclamation-circle"></i>&nbsp;';
               errorHtml += '<strong>{% trans "Error" %}:</strong> ';
               try {
@@ -530,13 +545,53 @@ $( function() {
               errorHtml += '</div>';
               customerContent.html(errorHtml);
               staffContent.html(errorHtml);
+          },
+          complete: function() {
+              previewXhr = null;
           }
       });
   }
 
+  function getCookie(name) {
+      var cookieValue = null;
+      if (document.cookie && document.cookie !== '') {
+          var cookies = document.cookie.split(';');
+          for (var i = 0; i < cookies.length; i++) {
+              var cookie = cookies[i].trim();
+              if (cookie.substring(0, name.length + 1) === (name + '=')) {
+                  cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+                  break;
+              }
+          }
+      }
+      return cookieValue;
+  }
+
+  function debounce(func, wait) {
+      var timeout;
+      return function() {
+          var context = this, args = arguments;
+          clearTimeout(timeout);
+          timeout = setTimeout(function() {
+              timeout = null;
+              func.apply(context, args);
+          }, wait);
+      };
+  }
+
+  var debouncedLoadPreview = debounce(function() {
+      if ($('#previewDraftModal').hasClass('show')) {
+          loadPreview();
+      }
+  }, 500);
+
   $('#previewDraftModal').on('show.bs.modal', function (e) {
       loadPreview();
   });
+
+  $('#commentBox').on('input', debouncedLoadPreview);
+  $('input[name="public"]').on('change', debouncedLoadPreview);
+  $('input[name="new_status"]').on('change', debouncedLoadPreview);
 
   $('#previewTabs button').on('shown.bs.tab', function (e) {
   });

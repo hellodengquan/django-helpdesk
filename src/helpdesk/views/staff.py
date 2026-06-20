@@ -28,7 +28,7 @@ from django.urls import reverse, reverse_lazy
 from django.utils import timezone
 from django.utils.html import escape
 from django.utils.translation import gettext as _
-from django.views.decorators.csrf import requires_csrf_token
+from django.views.decorators.csrf import requires_csrf_token, ensure_csrf_cookie
 from django.views.generic.edit import FormView, UpdateView
 from helpdesk import settings as helpdesk_settings
 from helpdesk.decorators import (
@@ -441,6 +441,7 @@ followup_delete = staff_member_required(followup_delete)
 
 
 @helpdesk_staff_member_required
+@ensure_csrf_cookie
 def view_ticket(request, ticket_id):
     ticket = get_object_or_404(Ticket, id=ticket_id)
     ticket_perm_check(request, ticket)
@@ -2223,6 +2224,7 @@ def delete_checklist_template(request, checklist_template_id):
 
 
 @helpdesk_staff_member_required
+@requires_csrf_token
 def preview_followup(request, ticket_id):
     ticket = get_object_or_404(Ticket, id=ticket_id)
     ticket_perm_check(request, ticket)
