@@ -1,5 +1,6 @@
 from django.contrib.auth import get_user_model
 from helpdesk.models import FollowUp, FollowUpAttachment, Ticket
+from helpdesk.query import TicketQueryBuilder, build_query_params_from_request
 from helpdesk.serializers import (
     FollowUpAttachmentSerializer,
     FollowUpSerializer,
@@ -7,6 +8,7 @@ from helpdesk.serializers import (
     UserSerializer,
     PublicTicketListingSerializer,
 )
+from helpdesk.user import HelpdeskUser
 from rest_framework import viewsets
 from rest_framework.mixins import CreateModelMixin
 from rest_framework.permissions import IsAdminUser, IsAuthenticated
@@ -45,9 +47,15 @@ class TicketViewSet(viewsets.ModelViewSet):
     """
     A viewset that provides the standard actions to handle Ticket
 
-    You can filter the tickets by status using the `status` query parameter. For example:
+    You can filter the tickets using the same query parameters as the list view:
+    - `queue`, `assigned_to`, `status`, `priority`, `kbitem` (can be multiple, use `-1` for NULL)
+    - `date_from`, `date_to` (created date range)
+    - `q` (free-text search)
+    - `sort`, `sortreverse` (sorting)
+    - `saved_query` (a previously saved search ID)
 
-    `/api/tickets/?status=Open,Resolved` will return all the tickets that are Open or Resolved.
+    For example: `/api/tickets/?status=1&status=2&priority=1` will return
+    all Open/Reopened tickets with priority 1 (Highest).
     """
 
     queryset = Ticket.objects.all()
@@ -56,20 +64,10 @@ class TicketViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAdminUser]
 
     def get_queryset(self):
-        tickets = Ticket.objects.all()
-
-        # filter by status
-        status = self.request.query_params.get("status", None)
-        if status:
-            statuses = status.split(",") if status else []
-            status_choices = helpdesk_settings.TICKET_STATUS_CHOICES
-            number_statuses = []
-            for status in statuses:
-                for choice in status_choices:
-                    if str(choice[0]) == status:
-                        number_statuses.append(choice[0])
-            if number_statuses:
-                tickets = tickets.filter(status__in=number_statuses)
+        huser = HelpdeskUser(self.request.user)
+        query_params = build_query_params_from_request(self.request)
+        builder = TicketQueryBuilder(huser, query_params=query_params)
+        tickets = builder.get_queryset()
 
         for ticket in tickets:
             ticket.set_custom_field_values()

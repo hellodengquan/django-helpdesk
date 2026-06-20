@@ -79,7 +79,14 @@ from helpdesk.models import (
     TicketDependency,
     UserSettings,
 )
-from helpdesk.query import get_query_class, query_from_base64, query_to_base64
+from helpdesk.query import (
+    get_query_class,
+    query_from_base64,
+    query_to_base64,
+    build_query_params_from_request,
+    get_default_list_query_params,
+    TicketQueryBuilder,
+)
 from helpdesk.user import HelpdeskUser
 from helpdesk.update_ticket import (
     update_ticket,
@@ -1097,116 +1104,29 @@ def ticket_list(request):
 
     huser = HelpdeskUser(request.user)
 
-    # Query_params will hold a dictionary of parameters relating to
-    # a query, to be saved if needed:
-    query_params = {
-        "filtering": {},
-        "filtering_null": {},
-        "sorting": None,
-        "sortreverse": False,
-        "search_string": "",
-    }
-    default_query_params = {
-        "filtering": {
-            "status__in": [1, 2],
-        },
-        "sorting": "created",
-        "search_string": "",
-        "sortreverse": False,
-    }
-
     #: check for a redirect, see function doc for details
     redirect = check_redirect_on_user_query(request, huser)
     if redirect:
         return redirect
+
+    default_query_params = get_default_list_query_params()
+    base_query_params = build_query_params_from_request(request)
+
     try:
-        saved_query, query_params = load_saved_query(request, query_params)
+        saved_query, query_params = load_saved_query(request, base_query_params)
     except QueryLoadError:
         return HttpResponseRedirect(reverse("helpdesk:list"))
 
-    if saved_query:
-        pass
-    elif not {
-        "queue",
-        "assigned_to",
-        "status",
-        "priority",
-        "q",
-        "sort",
-        "sortreverse",
-        "kbitem",
-    }.intersection(request.GET):
-        # Fall-back if no querying is being done
-        query_params = deepcopy(default_query_params)
-    else:
-        filter_in_params = [
-            ("queue", "queue__id__in"),
-            ("assigned_to", "assigned_to__id__in"),
-            ("status", "status__in"),
-            ("priority", "priority__in"),
-            ("kbitem", "kbitem__in"),
-        ]
-        filter_null_params = dict(
-            [
-                ("queue", "queue__id__isnull"),
-                ("assigned_to", "assigned_to__id__isnull"),
-                ("status", "status__isnull"),
-                ("priority", "priority__isnull"),
-                ("kbitem", "kbitem__isnull"),
-            ]
+    if not saved_query and not base_query_params.get("filtering") and not base_query_params.get("filtering_null") and not base_query_params.get("search_string"):
+        has_explicit_sort = "sort" in request.GET or "sortreverse" in request.GET
+        has_explicit_filters = any(
+            k in request.GET
+            for k in ["queue", "assigned_to", "status", "priority", "kbitem", "date_from", "date_to", "q"]
         )
-        for param, filter_command in filter_in_params:
-            if request.GET.get(param) is not None:
-                patterns = request.GET.getlist(param)
-                if not patterns:
-                    continue
-                try:
-                    minus_1_ndx = patterns.index("-1")
-                    # Must have the value so remove it and configure to use OR filter on NULL
-                    patterns.pop(minus_1_ndx)
-                    query_params["filtering_null"][filter_null_params[param]] = True
-                except ValueError:
-                    pass
-                if not patterns:
-                    # Caters for the case where the filter is only a null filter
-                    continue
-                try:
-                    pattern_pks = [int(pattern) for pattern in patterns]
-                    query_params["filtering"][filter_command] = pattern_pks
-                except ValueError:
-                    pass
+        if not has_explicit_sort and not has_explicit_filters:
+            query_params = deepcopy(default_query_params)
 
-        date_from = request.GET.get("date_from")
-        if date_from:
-            query_params["filtering"]["created__gte"] = date_from
-
-        date_to = request.GET.get("date_to")
-        if date_to:
-            query_params["filtering"]["created__lte"] = date_to
-
-        # KEYWORD SEARCHING
-        q = request.GET.get("q", "")
-        context["query"] = q
-        query_params["search_string"] = q
-
-        # SORTING
-        sort = request.GET.get("sort", None)
-        if sort not in (
-            "status",
-            "assigned_to",
-            "created",
-            "title",
-            "queue",
-            "priority",
-            "last_followup",
-            "kbitem",
-        ):
-            sort = "created"
-        query_params["sorting"] = sort
-
-        sortreverse = request.GET.get("sortreverse", None)
-        query_params["sortreverse"] = sortreverse
-
+    context["query"] = query_params.get("search_string", "")
     urlsafe_query = query_to_base64(query_params)
 
     user_saved_queries = SavedSearch.objects.filter(
@@ -1550,16 +1470,17 @@ def get_report_queryset_or_redirect(request, report):
     ):
         return None, None, HttpResponseRedirect(reverse("helpdesk:report_index"))
 
-    report_queryset = (
-        Ticket.objects.all()
-        .select_related()
-        .filter(queue__in=HelpdeskUser(request.user).get_queues())
-    )
+    huser = HelpdeskUser(request.user)
+    base_query_params = build_query_params_from_request(request)
 
     try:
-        saved_query, query_params = load_saved_query(request)
+        saved_query, query_params = load_saved_query(request, base_query_params)
     except QueryLoadError:
-        return None, HttpResponseRedirect(reverse("helpdesk:report_index"))
+        return None, None, HttpResponseRedirect(reverse("helpdesk:report_index"))
+
+    builder = TicketQueryBuilder(huser, query_params=query_params)
+    report_queryset = builder.get_queryset()
+
     return report_queryset, query_params, saved_query, None
 
 
@@ -1631,8 +1552,6 @@ def run_report(request, report):
     )
     if redirect:
         return redirect
-    if request.GET.get("saved_query", None):
-        Query(report_queryset, query_to_base64(query_params))
 
     summarytable = defaultdict(int)
     # a second table for more complex queries
@@ -2220,3 +2139,48 @@ def delete_checklist_template(request, checklist_template_id):
             "checklist_template": checklist_template,
         },
     )
+
+
+@helpdesk_staff_member_required
+def export_tickets_csv(request):
+    """
+    Export the filtered ticket list as a CSV file.
+
+    Uses the exact same query construction as the list view, reports, and API,
+    guaranteeing a consistent result set regardless of which entry point
+    the user arrives from.
+    """
+    import csv
+    from django.utils.encoding import smart_str
+
+    huser = HelpdeskUser(request.user)
+    base_query_params = build_query_params_from_request(request)
+
+    try:
+        saved_query, query_params = load_saved_query(request, base_query_params)
+    except QueryLoadError:
+        return HttpResponseRedirect(reverse("helpdesk:list"))
+
+    if not saved_query and not base_query_params.get("filtering") and not base_query_params.get("filtering_null") and not base_query_params.get("search_string"):
+        has_explicit_filters = any(
+            k in request.GET
+            for k in ["queue", "assigned_to", "status", "priority", "kbitem", "date_from", "date_to", "q", "sort", "sortreverse"]
+        )
+        if not has_explicit_filters:
+            query_params = get_default_list_query_params()
+
+    builder = TicketQueryBuilder(huser, query_params=query_params)
+
+    response = HttpResponse(content_type="text/csv; charset=utf-8")
+    response["Content-Disposition"] = 'attachment; filename="tickets.csv"'
+
+    response.write("\ufeff")
+
+    writer = csv.writer(response)
+    for row in builder.iter_export_rows():
+        writer.writerow([smart_str(cell) for cell in row])
+
+    return response
+
+
+export_tickets_csv = staff_member_required(export_tickets_csv)

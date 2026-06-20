@@ -1,4 +1,5 @@
 from base64 import b64decode, b64encode
+from copy import deepcopy
 from django.db.models import Q, Max
 from django.db.models import F, Window, Subquery, OuterRef
 from .models import FollowUp
@@ -66,7 +67,6 @@ DATATABLES_ORDER_COLUMN_CHOICES = Choices(
     ("7", "assigned_to"),
     ("8", "submitter_email"),
     ("9", "last_followup"),
-    # ('10', 'time_spent'),
     ("11", "kbitem"),
 )
 
@@ -74,99 +74,301 @@ DATATABLES_ORDER_COLUMN_CHOICES = Choices(
 DATATABLES_COLUMN_NUM_LOOKUP = {v: k for k, v in DATATABLES_ORDER_COLUMN_CHOICES}
 
 
+DEFAULT_QUERY_PARAMS = {
+    "filtering": {},
+    "filtering_null": {},
+    "sorting": None,
+    "sortreverse": False,
+    "search_string": "",
+}
+
+
+DEFAULT_LIST_QUERY_PARAMS = {
+    "filtering": {
+        "status__in": [1, 2],
+    },
+    "sorting": "created",
+    "search_string": "",
+    "sortreverse": False,
+}
+
+
+FILTER_IN_PARAMS = [
+    ("queue", "queue__id__in"),
+    ("assigned_to", "assigned_to__id__in"),
+    ("status", "status__in"),
+    ("priority", "priority__in"),
+    ("kbitem", "kbitem__in"),
+]
+
+
+FILTER_NULL_PARAMS = dict(
+    [
+        ("queue", "queue__id__isnull"),
+        ("assigned_to", "assigned_to__id__isnull"),
+        ("status", "status__isnull"),
+        ("priority", "priority__isnull"),
+        ("kbitem", "kbitem__isnull"),
+    ]
+)
+
+
+VALID_SORT_FIELDS = {
+    "status",
+    "assigned_to",
+    "created",
+    "title",
+    "queue",
+    "priority",
+    "last_followup",
+    "kbitem",
+    "modified",
+    "due_date",
+    "id",
+}
+
+
+def build_query_params_from_request(request):
+    """
+    Build query_params dictionary from an HTTP request's GET parameters.
+
+    This is the single, unified entry point for parsing filter/search/sort
+    parameters from user requests. All ticket listing entry points
+    (list view, reports, API, export) should use this function to ensure
+    consistent behavior.
+
+    Returns a dict with keys: filtering, filtering_null, sorting, sortreverse, search_string
+    """
+    query_params = deepcopy(DEFAULT_QUERY_PARAMS)
+
+    has_query_params = {
+        "queue",
+        "assigned_to",
+        "status",
+        "priority",
+        "q",
+        "sort",
+        "sortreverse",
+        "kbitem",
+        "date_from",
+        "date_to",
+    }.intersection(request.GET)
+
+    if not has_query_params:
+        return query_params
+
+    for param, filter_command in FILTER_IN_PARAMS:
+        if request.GET.get(param) is not None:
+            patterns = request.GET.getlist(param)
+            if not patterns:
+                continue
+            try:
+                minus_1_ndx = patterns.index("-1")
+                patterns.pop(minus_1_ndx)
+                query_params["filtering_null"][FILTER_NULL_PARAMS[param]] = True
+            except ValueError:
+                pass
+            if not patterns:
+                continue
+            try:
+                pattern_pks = [int(pattern) for pattern in patterns]
+                query_params["filtering"][filter_command] = pattern_pks
+            except ValueError:
+                pass
+
+    date_from = request.GET.get("date_from")
+    if date_from:
+        query_params["filtering"]["created__gte"] = date_from
+
+    date_to = request.GET.get("date_to")
+    if date_to:
+        query_params["filtering"]["created__lte"] = date_to
+
+    q = request.GET.get("q", "")
+    query_params["search_string"] = q
+
+    sort = request.GET.get("sort", None)
+    if sort and sort in VALID_SORT_FIELDS:
+        query_params["sorting"] = sort
+    else:
+        query_params["sorting"] = "created"
+
+    sortreverse = request.GET.get("sortreverse", None)
+    query_params["sortreverse"] = bool(sortreverse)
+
+    return query_params
+
+
+def get_default_list_query_params():
+    """Return the default query params used by the ticket list view."""
+    return deepcopy(DEFAULT_LIST_QUERY_PARAMS)
+
+
 def get_query_class():
     from django.conf import settings
 
     def _get_query_class():
-        return __Query__
+        return TicketQueryBuilder
 
     return getattr(settings, "HELPDESK_QUERY_CLASS", _get_query_class)()
 
 
-class __Query__:
+class TicketQueryBuilder:
+    """
+    Unified query builder for Ticket queries.
+
+    This class centralizes all ticket query construction logic so that:
+    - List view
+    - Search results
+    - Reports
+    - API endpoints
+    - Exports
+    All produce the same filtered, sorted, and distinct result sets.
+
+    Usage:
+        huser = HelpdeskUser(request.user)
+        builder = TicketQueryBuilder(huser, query_params=params)
+        queryset = builder.get_queryset()
+        count = builder.count()
+    """
+
     def __init__(self, huser, base64query=None, query_params=None):
+        """
+        :param huser: HelpdeskUser instance (for queue permission checks)
+        :param base64query: Optional base64-encoded query string
+        :param query_params: Optional dict of query parameters. Takes precedence over base64query.
+        """
         self.huser = huser
-        self.params = query_params if query_params else query_from_base64(base64query)
-        self.base64 = base64query if base64query else query_to_base64(query_params)
-        self.result = None
+        if query_params is not None:
+            self.params = deepcopy(DEFAULT_QUERY_PARAMS)
+            self.params.update(query_params)
+            self.base64 = query_to_base64(self.params)
+        elif base64query is not None:
+            self.params = query_from_base64(base64query)
+            self.base64 = base64query
+        else:
+            self.params = deepcopy(DEFAULT_QUERY_PARAMS)
+            self.base64 = query_to_base64(self.params)
+        self._cached_queryset = None
 
     def get_search_filter_args(self):
         search = self.params.get("search_string", "")
         return get_search_filter_args(search)
 
-    def __run__(self, queryset):
+    def _build_queryset(self, queryset):
         """
-        Apply a dict-based set of value_filters & parameters to a queryset.
+        Apply the stored filter/search/sort parameters to a queryset.
 
-        queryset is a Django queryset, eg MyModel.objects.all() or
-            MyModel.objects.filter(user=request.user)
-
-        params is a dictionary that contains the following:
-           filtering: A dict of Django ORM value_filters, eg:
-            {'user__id__in': [1, 3, 103], 'title__contains': 'foo'}
-
-        search_string: A freetext search string
-
-        sorting: The name of the column to sort by
+        This is the canonical implementation of the filtering logic.
+        All callers should go through this (directly or via get_queryset)
+        to ensure identical results.
         """
         q_args = []
-        value_filters = self.params.get("filtering", {})
-        null_filters = self.params.get("filtering_null", {})
+        value_filters = dict(self.params.get("filtering", {}))
+        null_filters = dict(self.params.get("filtering_null", {}))
+
         if null_filters:
             if value_filters:
-                # Check if any of the value value_filters are for the same field as the
-                # ISNULL filter so that an OR filter can be set up
                 matched_null_keys = []
-                for null_key in null_filters:
-                    field_path = null_key[:-8]  # Chop off the "__isnull"
+                for null_key in list(null_filters.keys()):
+                    field_path = null_key[:-8]
                     matched_key = None
-                    for val_key in value_filters:
+                    for val_key in list(value_filters.keys()):
                         if val_key.startswith(field_path):
                             matched_key = val_key
                             break
                     if matched_key:
-                        # Remove the matching filters into a Q param
                         matched_null_keys.append(null_key)
-                        # Create an OR query for the selected value(s) OR if the field is NULL
                         v = {}
                         v[val_key] = value_filters[val_key]
                         n = {}
                         n[null_key] = null_filters[null_key]
                         q_args.append((Q(**v) | Q(**n)))
                         del value_filters[matched_key]
-                # Now remove the matched null keys
                 for null_key in matched_null_keys:
                     del null_filters[null_key]
+
         queryset = queryset.filter(
             *q_args,
             (Q(**value_filters) & Q(**null_filters)) & self.get_search_filter_args(),
         )
+
         sorting = self.params.get("sorting", None)
         if sorting:
             sortreverse = self.params.get("sortreverse", None)
             if sortreverse:
                 sorting = "-%s" % sorting
             queryset = queryset.order_by(sorting)
-        # https://stackoverflow.com/questions/30487056/django-queryset-contains-duplicate-entries
+
         return queryset.distinct()
 
+    def get_base_queryset(self):
+        """
+        Return the permission-filtered base queryset (no user filters applied yet).
+        Uses select_related() for efficient access to related objects.
+        """
+        return self.huser.get_tickets_in_queues().select_related()
+
+    def get_queryset(self):
+        """
+        Return the fully filtered, sorted, and distinct queryset.
+
+        This is the main public API for obtaining the ticket list.
+        The result is cached per-instance so repeated calls are cheap.
+        """
+        if self._cached_queryset is None:
+            base = self.get_base_queryset()
+            self._cached_queryset = self._build_queryset(base)
+        return self._cached_queryset
+
     def get(self):
-        # Prefilter the allowed tickets
-        tickets = self.huser.get_tickets_in_queues().select_related()
-        return self.__run__(tickets)
+        """Alias for get_queryset() — kept for backward compatibility."""
+        return self.get_queryset()
+
+    def count(self):
+        """Return the count of matching tickets (efficient)."""
+        return self.get_queryset().count()
+
+    def get_params(self):
+        """Return the current query parameters dict."""
+        return deepcopy(self.params)
+
+    def get_base64(self):
+        """Return the base64-encoded query string."""
+        return self.base64
+
+    def with_last_followup_annotation(self):
+        """
+        Return the queryset annotated with a `last_followup` datetime
+        (the date of the most recent FollowUp for each ticket).
+        """
+        return self.get_queryset().annotate(
+            last_followup=Subquery(
+                FollowUp.objects.order_by()
+                .annotate(
+                    last_followup=Window(
+                        expression=Max("date"),
+                        partition_by=[
+                            F("ticket_id"),
+                        ],
+                        order_by="-date",
+                    )
+                )
+                .filter(ticket_id=OuterRef("id"))
+                .values("last_followup")
+                .distinct()
+            )
+        )
 
     def get_datatables_context(self, *, column_lookup=None, **kwargs):
         """
-        This function takes in a list of ticket objects from the views and throws it
-        to the datatables on ticket_list.html. If a search string was entered, this
-        function filters existing dataset on search string and returns a filtered
-        filtered list. The `draw`, `length` etc parameters are for datatables to
-        display meta data on the table contents. The returning queryset is passed
-        to a Serializer called DatatablesTicketSerializer in serializers.py.
-        Optionally, one can pass a dictionary in to override the default column
-        mapping for sorting
+        Return pagination-aware context for the DataTables AJAX endpoint.
+
+        This function takes the filtered ticket queryset and returns a dict
+        formatted for DataTables consumption: `data`, `recordsFiltered`,
+        `recordsTotal`, `draw`.
         """
-        objects = self.get()
+        objects = self.get_queryset()
         draw = int(kwargs.get("draw", [0])[0])
         length = int(kwargs.get("length", [25])[0])
         start = int(kwargs.get("start", [0])[0])
@@ -186,31 +388,14 @@ class __Query__:
         order = kwargs.get("order[0][dir]", [default_order])[0]
 
         order_column = column_lookup[order_column]
-        # django orm '-' -> desc
         if order == "desc":
             order_column = "-" + order_column
 
-        queryset = objects.annotate(
-            last_followup=Subquery(
-                FollowUp.objects.order_by()
-                .annotate(
-                    last_followup=Window(
-                        expression=Max("date"),
-                        partition_by=[
-                            F("ticket_id"),
-                        ],
-                        order_by="-date",
-                    )
-                )
-                .filter(ticket_id=OuterRef("id"))
-                .values("last_followup")
-                .distinct()
-            )
-        )
+        queryset = self.with_last_followup_annotation()
 
         total = queryset.count()
 
-        if search_value:  # Dead code currently
+        if search_value:
             queryset = queryset.filter(get_search_filter_args(search_value))
 
         count = queryset.count()
@@ -225,7 +410,7 @@ class __Query__:
     def get_timeline_context(self):
         events = []
 
-        for ticket in self.get():
+        for ticket in self.get_queryset():
             for followup in ticket.followup_set.all():
                 event = {
                     "start_date": self.mk_timeline_date(followup.date),
@@ -263,3 +448,66 @@ class __Query__:
             "minute": date.minute,
             "second": date.second,
         }
+
+    def iter_export_rows(self, include_custom_fields=True):
+        """
+        Iterate over rows suitable for CSV / Excel export.
+
+        Yields each ticket as a dict with human-readable values.
+        All entry points that produce exports should use this method
+        to guarantee the same data set and ordering as the list view.
+
+        :param include_custom_fields: If True, include custom field values.
+        """
+        from helpdesk.models import CustomField, TicketCustomFieldValue
+
+        tickets = self.get_queryset()
+        custom_fields = list(CustomField.objects.all()) if include_custom_fields else []
+
+        headers = [
+            "id",
+            "queue",
+            "title",
+            "status",
+            "priority",
+            "assigned_to",
+            "submitter_email",
+            "created",
+            "modified",
+            "due_date",
+            "kbitem",
+            "description",
+            "resolution",
+        ]
+        if custom_fields:
+            headers += [cf.name for cf in custom_fields]
+
+        yield headers
+
+        for ticket in tickets:
+            row = [
+                str(ticket.id),
+                str(ticket.queue) if ticket.queue else "",
+                ticket.title or "",
+                ticket.get_status_display() if hasattr(ticket, "get_status_display") else str(ticket.status),
+                ticket.get_priority_display() if hasattr(ticket, "get_priority_display") else str(ticket.priority),
+                str(ticket.assigned_to) if ticket.assigned_to else "",
+                ticket.submitter_email or "",
+                ticket.created.strftime("%Y-%m-%d %H:%M:%S") if ticket.created else "",
+                ticket.modified.strftime("%Y-%m-%d %H:%M:%S") if ticket.modified else "",
+                ticket.due_date.strftime("%Y-%m-%d %H:%M:%S") if ticket.due_date else "",
+                str(ticket.kbitem) if ticket.kbitem else "",
+                ticket.description or "",
+                ticket.resolution or "",
+            ]
+            if custom_fields:
+                cf_values = {
+                    cfv.field_id: cfv.value
+                    for cfv in TicketCustomFieldValue.objects.filter(ticket=ticket)
+                }
+                for cf in custom_fields:
+                    row.append(cf_values.get(cf.id, ""))
+            yield row
+
+
+__Query__ = TicketQueryBuilder

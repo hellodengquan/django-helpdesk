@@ -149,6 +149,7 @@ if helpdesk_settings.HELPDESK_UI_ENABLED:
             staff.timeline_ticket_list,
             name="timeline_ticket_list",
         ),
+        path("tickets/export/csv/", staff.export_tickets_csv, name="export_tickets_csv"),
         path("", protect_view(public.Homepage.as_view()), name="home"),
         path(
             "tickets/my-tickets/",
