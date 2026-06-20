@@ -1,11 +1,14 @@
 from collections import defaultdict
 from copy import deepcopy
+from datetime import timedelta
 from django.contrib.auth import get_user_model
 from django.db.models import Q
 from django.test import TestCase, RequestFactory, override_settings
 from django.urls import reverse
+from django.utils import timezone
 from helpdesk.models import (
     CustomField,
+    EscalationExclusion,
     FollowUp,
     KBCategory,
     KBItem,
@@ -695,3 +698,660 @@ class ExportBatchTests(QueryConsistencyTestBase):
         )
         dt_ids = sorted([d["id"] for d in dt["data"]])
         self.assertEqual(sorted(csv_ids), dt_ids)
+
+
+def _build_escalation_exclusions(start_date, days_to_exclude):
+    for i in range(days_to_exclude):
+        d = start_date + timedelta(days=i)
+        EscalationExclusion.objects.get_or_create(
+            date=d, defaults={"name": f"excl_{d.isoformat()}"}
+        )
+
+
+class SLAConsistencyTests(TestCase):
+    def setUp(self):
+        self.now = timezone.now()
+        self.queue1 = Queue.objects.create(
+            title="SLA Queue", slug="sla_queue", escalate_days=3
+        )
+        self.queue2 = Queue.objects.create(
+            title="NoEscalate", slug="noescalate", escalate_days=0
+        )
+        self.staff_user = get_staff_user()
+        self.huser = HelpdeskUser(self.staff_user)
+        self.factory = RequestFactory()
+
+        self.overdue_ticket = Ticket.objects.create(
+            title="Overdue - SLA Breached",
+            queue=self.queue1,
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            created=self.now - timedelta(days=10),
+            due_date=self.now - timedelta(days=2),
+        )
+        self.due_soon_ticket = Ticket.objects.create(
+            title="Due Soon - Within SLA",
+            queue=self.queue1,
+            status=Ticket.OPEN_STATUS,
+            priority=2,
+            created=self.now - timedelta(days=1),
+            due_date=self.now + timedelta(days=1),
+        )
+        self.no_due_date_ticket = Ticket.objects.create(
+            title="No Due Date - No SLA Target",
+            queue=self.queue1,
+            status=Ticket.OPEN_STATUS,
+            priority=5,
+            created=self.now - timedelta(days=5),
+            due_date=None,
+        )
+        self.high_priority_held = Ticket.objects.create(
+            title="Held High Priority - Not Escalatable",
+            queue=self.queue1,
+            status=Ticket.OPEN_STATUS,
+            priority=1,
+            on_hold=True,
+            created=self.now - timedelta(days=10),
+            last_escalation=None,
+        )
+        self.already_escalated_ticket = Ticket.objects.create(
+            title="Already Escalated Once",
+            queue=self.queue1,
+            status=Ticket.REOPENED_STATUS,
+            priority=2,
+            created=self.now - timedelta(days=10),
+            last_escalation=self.now - timedelta(days=1),
+        )
+        self.different_queue_ticket = Ticket.objects.create(
+            title="Different Queue No Escalate Days",
+            queue=self.queue2,
+            status=Ticket.OPEN_STATUS,
+            priority=4,
+            created=self.now - timedelta(days=20),
+        )
+
+    def _builder(self, query_params=None):
+        return TicketQueryBuilder(self.huser, query_params=query_params)
+
+    def test_overdue_ticket_filter_consistency_across_entries(self):
+        """
+        使用 created__lte 结合状态过滤模拟 SLA 过期工单，
+        验证 count/DataTables/导出三入口计数一致。
+        """
+        twelve_days_ago = (self.now - timedelta(days=12)).strftime("%Y-%m-%d")
+        params = {
+            "filtering": {
+                "status__in": Ticket.OPEN_STATUSES,
+                "created__gte": twelve_days_ago,
+                "created__lte": (self.now + timedelta(days=1)).strftime("%Y-%m-%d"),
+            },
+            "sorting": "due_date",
+            "sortreverse": True,
+        }
+        builder = self._builder(query_params=params)
+        qs_count = builder.count()
+        self.assertGreater(qs_count, 0)
+        dt = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        self.assertEqual(dt["recordsTotal"], qs_count)
+        self.assertEqual(dt["recordsFiltered"], qs_count)
+        export_rows = list(builder.iter_export_rows())
+        self.assertEqual(len(export_rows) - 1, qs_count)
+
+    def test_sorted_by_due_date_asc_consistency(self):
+        """按 due_date 升序排序，验证列表和导出顺序一致。"""
+        params = {
+            "filtering": {"status__in": Ticket.OPEN_STATUSES},
+            "sorting": "due_date",
+            "sortreverse": False,
+        }
+        builder = self._builder(query_params=params)
+        qs_ids = list(builder.get_queryset().values_list("id", flat=True))
+        dt = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"],
+            **{"order[0][column]": ["6"], "order[0][dir]": ["asc"]},
+        )
+        dt_ids = [d["id"] for d in dt["data"]]
+        self.assertEqual(qs_ids, dt_ids)
+        export_rows = list(builder.iter_export_rows())
+        header = export_rows[0]
+        id_idx = header.index("id")
+        export_ids = [int(r[id_idx]) for r in export_rows[1:]]
+        self.assertEqual(qs_ids, export_ids)
+
+    def test_sorted_by_priority_desc_consistency(self):
+        """按 priority 升序（1=最高优先）验证四入口 count 和 ID 集合一致。"""
+        params = {
+            "filtering": {"status__in": Ticket.OPEN_STATUSES},
+            "sorting": "priority",
+            "sortreverse": False,
+        }
+        builder = self._builder(query_params=params)
+        qs_ids = list(builder.get_queryset().values_list("id", flat=True))
+        qs_count = builder.count()
+        dt = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"],
+            **{"order[0][column]": ["2"], "order[0][dir]": ["asc"]},
+        )
+        self.assertEqual(dt["recordsTotal"], qs_count)
+        self.assertEqual(dt["recordsFiltered"], qs_count)
+        dt_ids = [d["id"] for d in dt["data"]]
+        self.assertEqual(sorted(qs_ids), sorted(dt_ids))
+        export_rows = list(builder.iter_export_rows())
+        header = export_rows[0]
+        id_idx = header.index("id")
+        export_ids = [int(r[id_idx]) for r in export_rows[1:]]
+        self.assertEqual(len(export_ids), qs_count)
+        self.assertEqual(sorted(qs_ids), sorted(export_ids))
+
+    def test_escalated_ticket_included_after_priority_change(self):
+        """升级后 priority 改变的工单仍然在过滤结果中。"""
+        self.already_escalated_ticket.priority = 1
+        self.already_escalated_ticket.save()
+        params = {
+            "filtering": {"priority__in": [1]},
+            "sorting": "created",
+        }
+        builder = self._builder(query_params=params)
+        result_ids = list(builder.get_queryset().values_list("id", flat=True))
+        self.assertIn(self.already_escalated_ticket.id, result_ids)
+        self.assertEqual(builder.count(), len(result_ids))
+        export_rows = list(builder.iter_export_rows())
+        self.assertEqual(len(export_rows) - 1, builder.count())
+
+    def test_on_hold_tickets_excluded_from_followup_escalation_logic(self):
+        """
+        挂起(on_hold=True)的工单虽然 priority=1，
+        但使用 on_hold=False 过滤时不应出现在结果中。
+        """
+        params = {
+            "filtering": {
+                "status__in": Ticket.OPEN_STATUSES,
+            },
+            "sorting": "created",
+        }
+        builder = self._builder(query_params=params)
+        qs = builder.get_queryset()
+        self.assertIn(self.high_priority_held.id, list(qs.values_list("id", flat=True)))
+        held_ids = list(qs.filter(on_hold=True).values_list("id", flat=True))
+        self.assertEqual(held_ids, [self.high_priority_held.id])
+
+    def test_overdue_metric_matches_manual_calculation(self):
+        """过期工单 SLA 计数等于手动构造的 Q 查询计数。"""
+        now_naive_str = self.now.strftime("%Y-%m-%d %H:%M:%S")
+        request = self.factory.get(
+            "/tickets/",
+            {
+                "status": [str(s) for s in Ticket.OPEN_STATUSES],
+                "date_to": now_naive_str,
+                "sort": "due_date",
+            },
+        )
+        params = build_query_params_from_request(request)
+        due_date_builder = self._builder(query_params=params)
+        manual_qs = Ticket.objects.filter(
+            status__in=Ticket.OPEN_STATUSES,
+            created__lte=self.now,
+            queue__in=self.huser.get_queues(),
+        ).distinct()
+        self.assertEqual(due_date_builder.count(), manual_qs.count())
+        self.assertEqual(
+            set(due_date_builder.get_queryset().values_list("id", flat=True)),
+            set(manual_qs.values_list("id", flat=True)),
+        )
+
+    def test_last_escalation_query_vs_export(self):
+        """带 last_escalation 的工单导出与查询集一致。"""
+        params = {"sorting": "modified"}
+        builder = self._builder(query_params=params)
+        qs_ids = set(builder.get_queryset().values_list("id", flat=True))
+        export_rows = list(builder.iter_export_rows())
+        header = export_rows[0]
+        id_idx = header.index("id")
+        export_ids = set()
+        for r in export_rows[1:]:
+            if r[id_idx]:
+                export_ids.add(int(r[id_idx]))
+        self.assertEqual(qs_ids, export_ids)
+
+    def test_escalation_exclusion_date_reflected_in_followup_annotations(self):
+        """
+        EscalationExclusion 是升级逻辑的关键变量，验证其不影响查询层计数
+        （查询层只依赖 ticket 字段，不做业务 SLA 判断）。
+        """
+        today = self.now.date()
+        _build_escalation_exclusions(today, 2)
+        params = {
+            "filtering": {"queue__id__in": [self.queue1.pk]},
+            "sorting": "created",
+        }
+        builder_before = self._builder(query_params=params)
+        count_before = builder_before.count()
+        _build_escalation_exclusions(today + timedelta(days=2), 5)
+        builder_after = self._builder(query_params=params)
+        count_after = builder_after.count()
+        self.assertEqual(count_before, count_after)
+        dt_before = builder_before.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        dt_after = builder_after.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        self.assertEqual(dt_before["recordsTotal"], dt_after["recordsTotal"])
+
+
+class CrossLanguageSearchTests(TestCase):
+    def setUp(self):
+        self.queue = Queue.objects.create(
+            title="Multilingual", slug="ml_queue", allow_public_submission=True
+        )
+        self.staff_user = get_staff_user()
+        self.huser = HelpdeskUser(self.staff_user)
+        self.factory = RequestFactory()
+
+        self.ticket_cn = Ticket.objects.create(
+            title="网络连接故障 请处理",
+            queue=self.queue,
+            description="用户反馈 WiFi 无法连接，密码正确但无法获取 IP",
+            status=Ticket.OPEN_STATUS,
+            priority=2,
+            submitter_email="user_cn@example.com",
+        )
+        self.ticket_en = Ticket.objects.create(
+            title="Network Connection Failure - Please fix",
+            queue=self.queue,
+            description="User reports WiFi down, correct password but no IP address",
+            status=Ticket.OPEN_STATUS,
+            priority=3,
+            submitter_email="user_en@example.com",
+        )
+        self.ticket_mixed = Ticket.objects.create(
+            title="Login 登录异常 Error",
+            queue=self.queue,
+            description="用户 登陆 时出现 ERROR code 500 错误",
+            status=Ticket.REOPENED_STATUS,
+            priority=1,
+            submitter_email="user_mixed@example.com",
+        )
+        self.ticket_irrelevant = Ticket.objects.create(
+            title="打印机缺墨",
+            queue=self.queue,
+            description="A4纸盒缺纸，请补充 supplies",
+            status=Ticket.OPEN_STATUS,
+            priority=5,
+        )
+
+    def _builder(self, query_params=None):
+        return TicketQueryBuilder(self.huser, query_params=query_params)
+
+    def test_chinese_only_keyword_matches_title_and_description(self):
+        search = "网络连接故障"
+        params = {"search_string": search, "sorting": "id"}
+        builder = self._builder(query_params=params)
+        ids = list(builder.get_queryset().values_list("id", flat=True))
+        self.assertIn(self.ticket_cn.id, ids)
+        self.assertNotIn(self.ticket_irrelevant.id, ids)
+        self.assertEqual(builder.count(), len(ids))
+        export_rows = list(builder.iter_export_rows())
+        self.assertEqual(len(export_rows) - 1, builder.count())
+        dt = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        self.assertEqual(dt["recordsFiltered"], builder.count())
+        self.assertEqual(dt["recordsTotal"], builder.count())
+
+    def test_english_only_keyword_matches_title_and_description(self):
+        search = "WiFi"
+        params = {"search_string": search, "sorting": "id"}
+        builder = self._builder(query_params=params)
+        ids = list(builder.get_queryset().values_list("id", flat=True))
+        self.assertIn(self.ticket_en.id, ids)
+        self.assertNotIn(self.ticket_irrelevant.id, ids)
+        self.assertEqual(builder.count(), len(ids))
+        export_rows = list(builder.iter_export_rows())
+        self.assertEqual(len(export_rows) - 1, builder.count())
+
+    def test_mixed_language_keyword_case_insensitive(self):
+        search = "Login"
+        params = {"search_string": search, "sorting": "id"}
+        builder = self._builder(query_params=params)
+        ids = list(builder.get_queryset().values_list("id", flat=True))
+        self.assertIn(self.ticket_mixed.id, ids)
+        self.assertEqual(builder.count(), len(ids))
+        dt = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        self.assertEqual(dt["recordsTotal"], builder.count())
+
+    def test_or_syntax_mixed_language_keywords(self):
+        search = "网络连接故障 OR 异常 OR supplies"
+        params = {"search_string": search, "sorting": "id"}
+        builder = self._builder(query_params=params)
+        ids = set(builder.get_queryset().values_list("id", flat=True))
+        self.assertIn(self.ticket_cn.id, ids)
+        self.assertIn(self.ticket_mixed.id, ids)
+        self.assertIn(self.ticket_irrelevant.id, ids)
+        export_rows = list(builder.iter_export_rows())
+        header = export_rows[0]
+        id_idx = header.index("id")
+        export_ids = set(int(r[id_idx]) for r in export_rows[1:])
+        self.assertEqual(ids, export_ids)
+
+    def test_chinese_keyword_via_request_params_consistent_with_manual(self):
+        """通过 Request 构造参数与手动构造参数，结果一致。"""
+        kw = "登录"
+        request = self.factory.get("/tickets/", {"q": kw, "sort": "id"})
+        req_params = build_query_params_from_request(request)
+        req_builder = TicketQueryBuilder(self.huser, query_params=req_params)
+        manual_builder = self._builder(
+            query_params={"search_string": kw, "sorting": "id"}
+        )
+        req_ids = list(req_builder.get_queryset().values_list("id", flat=True))
+        manual_ids = list(manual_builder.get_queryset().values_list("id", flat=True))
+        self.assertEqual(req_ids, manual_ids)
+        self.assertEqual(req_builder.count(), manual_builder.count())
+
+    def test_language_keyword_sorting_consistency_between_qs_and_export(self):
+        """中英文混合关键词搜索后，按 created 排序的查询集和导出顺序一致。"""
+        search = "OR".join(["Error", "错误"])
+        params = {"search_string": f"Error OR 错误", "sorting": "created"}
+        builder = self._builder(query_params=params)
+        qs_ids = list(builder.get_queryset().values_list("id", flat=True))
+        export_rows = list(builder.iter_export_rows())
+        header = export_rows[0]
+        id_idx = header.index("id")
+        export_ids = [int(r[id_idx]) for r in export_rows[1:]]
+        self.assertEqual(qs_ids, export_ids)
+        dt = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"],
+            **{"order[0][column]": ["5"], "order[0][dir]": ["asc"]},
+        )
+        dt_ids = [d["id"] for d in dt["data"]]
+        self.assertEqual(qs_ids, dt_ids)
+
+    def test_submitter_email_search_with_ascii_only(self):
+        search = "user_mixed@example.com"
+        params = {"search_string": search, "sorting": "id"}
+        builder = self._builder(query_params=params)
+        ids = list(builder.get_queryset().values_list("id", flat=True))
+        self.assertEqual(ids, [self.ticket_mixed.id])
+
+
+class ArchiveActiveBoundaryTests(TestCase):
+    ACTIVE_STATUSES = (Ticket.OPEN_STATUS, Ticket.REOPENED_STATUS)
+    ARCHIVE_STATUSES = (Ticket.RESOLVED_STATUS, Ticket.CLOSED_STATUS)
+
+    def setUp(self):
+        self.queue = Queue.objects.create(
+            title="ArchiveQ", slug="archive_queue"
+        )
+        self.staff_user = get_staff_user()
+        self.huser = HelpdeskUser(self.staff_user)
+        self.factory = RequestFactory()
+        self.now = timezone.now()
+
+        self.active_tickets = []
+        for i in range(3):
+            t = Ticket.objects.create(
+                title=f"Active Ticket {i}",
+                queue=self.queue,
+                status=self.ACTIVE_STATUSES[i % len(self.ACTIVE_STATUSES)],
+                priority=3,
+                created=self.now - timedelta(days=i),
+            )
+            self.active_tickets.append(t)
+
+        self.archived_tickets = []
+        for i in range(3):
+            t = Ticket.objects.create(
+                title=f"Archived Ticket {i}",
+                queue=self.queue,
+                status=self.ARCHIVE_STATUSES[i % len(self.ARCHIVE_STATUSES)],
+                priority=3,
+                created=self.now - timedelta(days=10 + i),
+                modified=self.now - timedelta(days=i),
+            )
+            self.archived_tickets.append(t)
+
+        self.boundary_ticket = Ticket.objects.create(
+            title="Just Archived - Boundary",
+            queue=self.queue,
+            status=Ticket.CLOSED_STATUS,
+            priority=4,
+            created=self.now - timedelta(days=1),
+            modified=self.now,
+        )
+
+    def _builder(self, query_params=None):
+        return TicketQueryBuilder(self.huser, query_params=query_params)
+
+    def test_default_list_only_active_excludes_archived(self):
+        """默认列表参数仅显示活跃工单（Open/Reopened）。"""
+        from helpdesk.query import get_default_list_query_params
+
+        params = get_default_list_query_params()
+        builder = self._builder(query_params=params)
+        qs_ids = set(builder.get_queryset().values_list("id", flat=True))
+        active_ids = {t.id for t in self.active_tickets}
+        self.assertEqual(qs_ids, active_ids)
+        for at in self.archived_tickets:
+            self.assertNotIn(at.id, qs_ids)
+        self.assertNotIn(self.boundary_ticket.id, qs_ids)
+
+    def test_explicit_archive_only_query_consistency(self):
+        """显式查询归档状态，四入口一致。"""
+        params = {
+            "filtering": {"status__in": list(self.ARCHIVE_STATUSES)},
+            "sorting": "modified",
+            "sortreverse": True,
+        }
+        builder = self._builder(query_params=params)
+        qs_count = builder.count()
+        expected_archive_ids = {t.id for t in self.archived_tickets} | {
+            self.boundary_ticket.id
+        }
+        actual_ids = set(builder.get_queryset().values_list("id", flat=True))
+        self.assertEqual(actual_ids, expected_archive_ids)
+        self.assertEqual(qs_count, len(expected_archive_ids))
+        export_rows = list(builder.iter_export_rows())
+        self.assertEqual(len(export_rows) - 1, qs_count)
+        dt = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        self.assertEqual(dt["recordsTotal"], qs_count)
+        self.assertEqual(dt["recordsFiltered"], qs_count)
+
+    def test_combined_active_and_archive_consistency(self):
+        """合并查询归档+活跃，结果集、计数、排序一致。"""
+        all_statuses = list(self.ACTIVE_STATUSES) + list(self.ARCHIVE_STATUSES)
+        params = {
+            "filtering": {"status__in": all_statuses},
+            "sorting": "created",
+            "sortreverse": False,
+        }
+        builder = self._builder(query_params=params)
+        qs_ids = list(builder.get_queryset().values_list("id", flat=True))
+        self.assertEqual(len(qs_ids), 3 + 3 + 1)
+        dt = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        self.assertEqual(dt["recordsTotal"], len(qs_ids))
+        export_rows = list(builder.iter_export_rows())
+        self.assertEqual(len(export_rows) - 1, len(qs_ids))
+
+    def test_pagination_boundary_at_active_archive_transition(self):
+        """
+        分页时活跃/归档交界点验证：合并按 created 降序，
+        第 1 页 batch_size=3 应该包含全部活跃 + 1 个最新归档。
+        第 2 页 batch_size=3 应该包含其余归档。
+        """
+        all_statuses = list(self.ACTIVE_STATUSES) + list(self.ARCHIVE_STATUSES)
+        params = {
+            "filtering": {"status__in": all_statuses},
+            "sorting": "created",
+            "sortreverse": True,
+        }
+        builder = self._builder(query_params=params)
+        full_ids_desc = list(
+            builder.get_queryset()
+            .order_by("-created")
+            .values_list("id", flat=True)
+        )
+        self.assertEqual(len(full_ids_desc), 7)
+
+        page_1_expected = full_ids_desc[:3]
+        page_2_expected = full_ids_desc[3:6]
+        page_3_expected = full_ids_desc[6:]
+
+        dt1 = builder.get_datatables_context(
+            draw=["0"], length=["3"], start=["0"],
+            **{"order[0][column]": ["5"], "order[0][dir]": ["desc"]},
+        )
+        dt2 = builder.get_datatables_context(
+            draw=["1"], length=["3"], start=["3"],
+            **{"order[0][column]": ["5"], "order[0][dir]": ["desc"]},
+        )
+        dt3 = builder.get_datatables_context(
+            draw=["2"], length=["3"], start=["6"],
+            **{"order[0][column]": ["5"], "order[0][dir]": ["desc"]},
+        )
+
+        self.assertEqual([d["id"] for d in dt1["data"]], page_1_expected)
+        self.assertEqual([d["id"] for d in dt2["data"]], page_2_expected)
+        self.assertEqual([d["id"] for d in dt3["data"]], page_3_expected)
+        self.assertEqual(dt1["recordsTotal"], 7)
+        self.assertEqual(dt2["recordsTotal"], 7)
+        self.assertEqual(dt3["recordsTotal"], 7)
+
+    def test_duplicate_vs_closed_archive_boundary(self):
+        """
+        DUPLICATE 与 CLOSED 都是已归档状态的边界，
+        显式排除 DUPLICATE 时查询应仅包含 CLOSED/RESOLVED。
+        """
+        dup_ticket = Ticket.objects.create(
+            title="Duplicate - Archived but separate",
+            queue=self.queue,
+            status=Ticket.DUPLICATE_STATUS,
+            priority=5,
+            created=self.now - timedelta(days=2),
+        )
+        params = {
+            "filtering": {
+                "status__in": [
+                    Ticket.RESOLVED_STATUS,
+                    Ticket.CLOSED_STATUS,
+                ]
+            },
+            "sorting": "created",
+        }
+        builder = self._builder(query_params=params)
+        actual_ids = set(builder.get_queryset().values_list("id", flat=True))
+        self.assertNotIn(dup_ticket.id, actual_ids)
+        for at in self.archived_tickets:
+            self.assertIn(at.id, actual_ids)
+        self.assertIn(self.boundary_ticket.id, actual_ids)
+
+    def test_archive_csv_export_consistency_with_datatables(self):
+        """CSV 导出归档工单与 DataTables 同条件一致。"""
+        self.client.force_login(self.staff_user)
+        statuses = [Ticket.RESOLVED_STATUS, Ticket.CLOSED_STATUS]
+        response = self.client.get(
+            reverse("helpdesk:export_tickets_csv"),
+            {"status": [str(s) for s in statuses]},
+        )
+        self.assertEqual(response.status_code, 200)
+        import csv as csv_mod
+        import io
+
+        content = response.content.decode("utf-8-sig")
+        reader = csv_mod.reader(io.StringIO(content))
+        rows = list(reader)
+        header = rows[0]
+        id_idx = header.index("id")
+        csv_ids = set(int(r[id_idx]) for r in rows[1:] if len(r) > id_idx)
+        params = {
+            "filtering": {"status__in": statuses},
+            "sorting": "id",
+        }
+        builder = self._builder(query_params=params)
+        dt = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        dt_ids = set(d["id"] for d in dt["data"])
+        self.assertEqual(csv_ids, dt_ids)
+
+    def test_combined_export_matches_union_counts(self):
+        """合并查询的总数 = 活跃数 + 归档数 + 边界工单。"""
+        all_statuses = list(self.ACTIVE_STATUSES) + list(self.ARCHIVE_STATUSES)
+        params = {
+            "filtering": {"status__in": all_statuses},
+            "sorting": "id",
+        }
+        combined_builder = self._builder(query_params=params)
+        active_builder = self._builder(
+            query_params={
+                "filtering": {"status__in": list(self.ACTIVE_STATUSES)},
+                "sorting": "id",
+            }
+        )
+        archive_builder = self._builder(
+            query_params={
+                "filtering": {"status__in": list(self.ARCHIVE_STATUSES)},
+                "sorting": "id",
+            }
+        )
+        self.assertEqual(
+            combined_builder.count(),
+            active_builder.count() + archive_builder.count(),
+        )
+        export_combined = list(combined_builder.iter_export_rows())
+        export_active = list(active_builder.iter_export_rows())
+        export_archive = list(archive_builder.iter_export_rows())
+        self.assertEqual(
+            len(export_combined) - 1,
+            (len(export_active) - 1) + (len(export_archive) - 1),
+        )
+
+    def test_search_filter_crosses_active_archive_boundary(self):
+        """搜索关键词同时匹配活跃和归档，结果集包含两者。"""
+        Ticket.objects.filter(pk__in=[t.pk for t in self.active_tickets]).update(
+            description="系统故障 system issue"
+        )
+        Ticket.objects.filter(pk=self.boundary_ticket.pk).update(
+            description="系统故障 system boundary issue"
+        )
+        params = {
+            "filtering": {},
+            "search_string": "system",
+            "sorting": "created",
+        }
+        builder = self._builder(query_params=params)
+        ids = set(builder.get_queryset().values_list("id", flat=True))
+        self.assertTrue(ids & {t.id for t in self.active_tickets})
+        self.assertIn(self.boundary_ticket.id, ids)
+        dt = builder.get_datatables_context(
+            draw=["0"], length=["100"], start=["0"]
+        )
+        self.assertEqual(dt["recordsTotal"], builder.count())
+        self.assertEqual(dt["recordsFiltered"], builder.count())
+        export_rows = list(builder.iter_export_rows())
+        self.assertEqual(len(export_rows) - 1, builder.count())
+
+    def test_escalation_on_archived_tickets_not_impacted(self):
+        """归档工单在查询层不考虑升级字段，结果集数量一致。"""
+        for t in self.archived_tickets:
+            t.last_escalation = self.now - timedelta(days=1)
+            t.save()
+        params = {
+            "filtering": {"status__in": list(self.ARCHIVE_STATUSES)},
+            "sorting": "modified",
+        }
+        builder = self._builder(query_params=params)
+        ids_before = set(builder.get_queryset().values_list("id", flat=True))
+        for t in self.archived_tickets:
+            t.last_escalation = None
+            t.save()
+        ids_after = set(builder.get_queryset().values_list("id", flat=True))
+        self.assertEqual(ids_before, ids_after)
+        self.assertEqual(builder.count(), len(ids_after))
