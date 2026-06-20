@@ -52,6 +52,7 @@ class DatatablesTicketSerializer(serializers.ModelSerializer):
             "password_hash": {"write_only": True},
             "api_token": {"write_only": True},
             "secret_subject": {"write_only": True},
+            "settings_pickled": {"write_only": True},
         }
 
     def get_queue(self, obj):
@@ -251,6 +252,7 @@ class TicketSerializer(BaseTicketSerializer):
             "password_hash": {"write_only": True},
             "api_token": {"write_only": True},
             "secret_subject": {"write_only": True},
+            "settings_pickled": {"write_only": True},
         }
 
     def create(self, validated_data):

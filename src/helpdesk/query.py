@@ -1,7 +1,7 @@
 from base64 import b64decode, b64encode
 from django.db.models import Q, Max
 from django.db.models import F, Window, Subquery, OuterRef
-from .models import FollowUp
+from .models import FollowUp, TICKET_SENSITIVE_FIELDS
 from django.urls import reverse
 from django.utils.html import escape
 from django.utils.translation import gettext as _
@@ -152,7 +152,7 @@ class __Query__:
 
     def get(self):
         # Prefilter the allowed tickets
-        tickets = self.huser.get_tickets_in_queues().select_related()
+        tickets = self.huser.get_tickets_in_queues().select_related().defer(*TICKET_SENSITIVE_FIELDS)
         return self.__run__(tickets)
 
     def get_datatables_context(self, *, column_lookup=None, **kwargs):

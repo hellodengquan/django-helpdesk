@@ -476,6 +476,9 @@ def mk_secret():
     return str(uuid.uuid4())
 
 
+TICKET_SENSITIVE_FIELDS = ["secret_key", "password_hash", "api_token", "secret_subject", "settings_pickled"]
+
+
 class Ticket(models.Model):
     """
     To allow a ticket to be entered as quickly as possible, only the

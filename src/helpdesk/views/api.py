@@ -1,5 +1,6 @@
 from django.contrib.auth import get_user_model
-from helpdesk.models import FollowUp, FollowUpAttachment, Ticket
+from django.db.models import Prefetch
+from helpdesk.models import FollowUp, FollowUpAttachment, Ticket, TICKET_SENSITIVE_FIELDS
 from helpdesk.serializers import (
     FollowUpAttachmentSerializer,
     FollowUpSerializer,
@@ -15,7 +16,23 @@ from rest_framework.pagination import PageNumberPagination
 
 from helpdesk import settings as helpdesk_settings
 
-TICKET_SENSITIVE_FIELDS = ["secret_key", "password_hash", "api_token", "secret_subject", "settings_pickled"]
+
+def _ticket_queryset_defer(queryset):
+    return queryset.defer(*TICKET_SENSITIVE_FIELDS).prefetch_related(
+        Prefetch(
+            "followup_set",
+            queryset=FollowUp.objects.prefetch_related(
+                Prefetch(
+                    "followupattachment_set",
+                    queryset=FollowUpAttachment.objects.all()
+                )
+            ),
+        ),
+        Prefetch(
+            "followup_set__ticket",
+            queryset=Ticket.objects.defer(*TICKET_SENSITIVE_FIELDS),
+        ),
+    )
 
 
 class ConservativePagination(PageNumberPagination):
@@ -35,9 +52,11 @@ class UserTicketViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        tickets = Ticket.objects.filter(
-            submitter_email=self.request.user.email
-        ).order_by("-created").defer(*TICKET_SENSITIVE_FIELDS)
+        tickets = _ticket_queryset_defer(
+            Ticket.objects.filter(
+                submitter_email=self.request.user.email
+            ).order_by("-created")
+        )
         for ticket in tickets:
             ticket.set_custom_field_values()
         return tickets
@@ -73,14 +92,18 @@ class TicketViewSet(viewsets.ModelViewSet):
             if number_statuses:
                 tickets = tickets.filter(status__in=number_statuses)
 
+        tickets = _ticket_queryset_defer(tickets)
+
         for ticket in tickets:
             ticket.set_custom_field_values()
         return tickets
 
     def get_object(self):
-        ticket = super().get_object()
-        ticket.set_custom_field_values()
-        return ticket
+        qs = _ticket_queryset_defer(self.filter_queryset(self.get_queryset()))
+        obj = qs.get(pk=self.kwargs["pk"])
+        obj.set_custom_field_values()
+        self.check_object_permissions(self.request, obj)
+        return obj
 
 
 class FollowUpViewSet(viewsets.ModelViewSet):

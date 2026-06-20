@@ -498,12 +498,20 @@ $( function() {
   var previewLastRun = 0;
   var pendingPreviewArgs = null;
   var pendingPreviewContext = null;
+  var lastPreviewHash = null;
+  var isFlushing = false;
   var PREVIEW_DEBOUNCE_MS = 600;
   var PREVIEW_THROTTLE_MS = 1500;
   var PREVIEW_MIN_CONTENT_LENGTH = 2;
 
+  function getPreviewHash() {
+      var fd = getFormDataForPreview();
+      return [fd.comment, fd.public, fd.new_status || ''].join('|||');
+  }
+
   function debounce(func, wait) {
       var debounced = function() {
+          if (isFlushing) return;
           var context = this, args = arguments;
           pendingPreviewContext = context;
           pendingPreviewArgs = args;
@@ -512,7 +520,9 @@ $( function() {
               previewDebounceTimer = null;
               pendingPreviewContext = null;
               pendingPreviewArgs = null;
-              func.apply(context, args);
+              if (!isFlushing) {
+                  func.apply(context, args);
+              }
           }, wait);
       };
       debounced.flush = function() {
@@ -544,6 +554,7 @@ $( function() {
 
   function throttle(func, limit) {
       var throttled = function() {
+          if (isFlushing) return;
           var context = this, args = arguments;
           var now = Date.now();
           var elapsed = now - previewLastRun;
@@ -554,7 +565,9 @@ $( function() {
               previewThrottleTimer = setTimeout(function() {
                   previewLastRun = Date.now();
                   previewThrottleTimer = null;
-                  func.apply(context, args);
+                  if (!isFlushing) {
+                      func.apply(context, args);
+                  }
               }, limit - elapsed);
           }
       };
@@ -569,6 +582,7 @@ $( function() {
   }
 
   function clearAllPreviewTimers() {
+      isFlushing = false;
       if (previewDebounceTimer) {
           clearTimeout(previewDebounceTimer);
           previewDebounceTimer = null;
@@ -586,14 +600,29 @@ $( function() {
   }
 
   function flushPendingPreview() {
-      var shouldLoad = false;
-      if (debouncedThrottledLoadPreview && debouncedThrottledLoadPreview.pending && debouncedThrottledLoadPreview.pending()) {
-          shouldLoad = true;
+      if (isFlushing) return;
+      isFlushing = true;
+
+      var hasDebouncePending = debouncedThrottledLoadPreview && debouncedThrottledLoadPreview.pending && debouncedThrottledLoadPreview.pending();
+      var currentHash = getPreviewHash();
+      var isContentChanged = (currentHash !== lastPreviewHash);
+
+      if (hasDebouncePending) {
+          try {
+              debouncedThrottledLoadPreview.flush();
+          } catch (e) {}
       }
+
       clearAllPreviewTimers();
-      if (shouldLoad) {
+      previewLastRun = Date.now();
+
+      if (isContentChanged) {
           loadPreview();
       }
+
+      setTimeout(function() {
+          isFlushing = false;
+      }, 50);
   }
 
   function loadPreview() {
@@ -605,13 +634,21 @@ $( function() {
           return;
       }
 
+      var currentHash = getPreviewHash();
+      if (currentHash === lastPreviewHash && !isFlushing) {
+          return;
+      }
+
       var formData = getFormDataForPreview();
       if (formData.comment && formData.comment.trim().length < PREVIEW_MIN_CONTENT_LENGTH) {
           var emptyHtml = '<div class="text-center text-muted py-4"><i class="fas fa-edit fa-2x mb-2"></i><p class="mb-0">{% trans "Start typing to see the preview..." %}</p></div>';
           customerContent.html(emptyHtml);
           staffContent.html(emptyHtml);
+          lastPreviewHash = currentHash;
           return;
       }
+
+      lastPreviewHash = currentHash;
 
       var loadingHtml = '<div class="text-center text-muted py-5"><i class="fas fa-spinner fa-spin fa-2x mb-3"></i><p>{% trans "Updating preview..." %}</p></div>';
       customerContent.html(loadingHtml);
@@ -661,6 +698,7 @@ $( function() {
               errorHtml += '</div>';
               customerContent.html(errorHtml);
               staffContent.html(errorHtml);
+              lastPreviewHash = null;
           },
           complete: function() {
               previewXhr = null;
