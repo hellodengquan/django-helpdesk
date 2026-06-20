@@ -15,6 +15,8 @@ from rest_framework.pagination import PageNumberPagination
 
 from helpdesk import settings as helpdesk_settings
 
+TICKET_SENSITIVE_FIELDS = ["secret_key", "password_hash", "api_token", "secret_subject", "settings_pickled"]
+
 
 class ConservativePagination(PageNumberPagination):
     page_size = 25
@@ -35,7 +37,7 @@ class UserTicketViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         tickets = Ticket.objects.filter(
             submitter_email=self.request.user.email
-        ).order_by("-created")
+        ).order_by("-created").defer(*TICKET_SENSITIVE_FIELDS)
         for ticket in tickets:
             ticket.set_custom_field_values()
         return tickets
@@ -50,13 +52,13 @@ class TicketViewSet(viewsets.ModelViewSet):
     `/api/tickets/?status=Open,Resolved` will return all the tickets that are Open or Resolved.
     """
 
-    queryset = Ticket.objects.all()
+    queryset = Ticket.objects.all().defer(*TICKET_SENSITIVE_FIELDS)
     serializer_class = TicketSerializer
     pagination_class = ConservativePagination
     permission_classes = [IsAdminUser]
 
     def get_queryset(self):
-        tickets = Ticket.objects.all()
+        tickets = Ticket.objects.all().defer(*TICKET_SENSITIVE_FIELDS)
 
         # filter by status
         status = self.request.query_params.get("status", None)

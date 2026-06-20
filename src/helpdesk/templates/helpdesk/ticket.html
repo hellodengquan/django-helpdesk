@@ -496,23 +496,54 @@ $( function() {
   var previewDebounceTimer = null;
   var previewThrottleTimer = null;
   var previewLastRun = 0;
+  var pendingPreviewArgs = null;
+  var pendingPreviewContext = null;
   var PREVIEW_DEBOUNCE_MS = 600;
   var PREVIEW_THROTTLE_MS = 1500;
   var PREVIEW_MIN_CONTENT_LENGTH = 2;
 
   function debounce(func, wait) {
-      return function() {
+      var debounced = function() {
           var context = this, args = arguments;
+          pendingPreviewContext = context;
+          pendingPreviewArgs = args;
           clearTimeout(previewDebounceTimer);
           previewDebounceTimer = setTimeout(function() {
               previewDebounceTimer = null;
+              pendingPreviewContext = null;
+              pendingPreviewArgs = null;
               func.apply(context, args);
           }, wait);
       };
+      debounced.flush = function() {
+          if (previewDebounceTimer) {
+              clearTimeout(previewDebounceTimer);
+              previewDebounceTimer = null;
+              var ctx = pendingPreviewContext;
+              var args = pendingPreviewArgs;
+              pendingPreviewContext = null;
+              pendingPreviewArgs = null;
+              if (ctx && args) {
+                  func.apply(ctx, args);
+              }
+          }
+      };
+      debounced.cancel = function() {
+          if (previewDebounceTimer) {
+              clearTimeout(previewDebounceTimer);
+              previewDebounceTimer = null;
+          }
+          pendingPreviewContext = null;
+          pendingPreviewArgs = null;
+      };
+      debounced.pending = function() {
+          return !!previewDebounceTimer;
+      };
+      return debounced;
   }
 
   function throttle(func, limit) {
-      return function() {
+      var throttled = function() {
           var context = this, args = arguments;
           var now = Date.now();
           var elapsed = now - previewLastRun;
@@ -527,6 +558,14 @@ $( function() {
               }, limit - elapsed);
           }
       };
+      throttled.flush = function() {
+          if (previewThrottleTimer) {
+              clearTimeout(previewThrottleTimer);
+              previewThrottleTimer = null;
+              previewLastRun = Date.now();
+          }
+      };
+      return throttled;
   }
 
   function clearAllPreviewTimers() {
@@ -541,6 +580,19 @@ $( function() {
       if (previewXhr) {
           previewXhr.abort();
           previewXhr = null;
+      }
+      pendingPreviewContext = null;
+      pendingPreviewArgs = null;
+  }
+
+  function flushPendingPreview() {
+      var shouldLoad = false;
+      if (debouncedThrottledLoadPreview && debouncedThrottledLoadPreview.pending && debouncedThrottledLoadPreview.pending()) {
+          shouldLoad = true;
+      }
+      clearAllPreviewTimers();
+      if (shouldLoad) {
+          loadPreview();
       }
   }
 
@@ -631,6 +683,9 @@ $( function() {
   });
 
   $('#commentBox').on('input propertychange paste', debouncedThrottledLoadPreview);
+  $('#commentBox').on('blur', function() {
+      flushPendingPreview();
+  });
   $('input[name="public"]').on('change', function() {
       clearAllPreviewTimers();
       loadPreview();
