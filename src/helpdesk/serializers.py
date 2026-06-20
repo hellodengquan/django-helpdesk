@@ -47,6 +47,12 @@ class DatatablesTicketSerializer(serializers.ModelSerializer):
             "time_spent",
             "kbitem",
         )
+        extra_kwargs = {
+            "secret_key": {"write_only": True},
+            "password_hash": {"write_only": True},
+            "api_token": {"write_only": True},
+            "secret_subject": {"write_only": True},
+        }
 
     def get_queue(self, obj):
         return {"title": obj.queue.title, "id": obj.queue.id}
@@ -188,6 +194,13 @@ class PublicTicketListingSerializer(BaseTicketSerializer):
             "submitter",
             "kbitem",
         )
+        extra_kwargs = {
+            "secret_key": {"write_only": True},
+            "password_hash": {"write_only": True},
+            "api_token": {"write_only": True},
+            "secret_subject": {"write_only": True},
+            "settings_pickled": {"write_only": True},
+        }
 
     def get_queue(self, obj):
         return {"title": obj.queue.title, "id": obj.queue.id}
@@ -233,6 +246,12 @@ class TicketSerializer(BaseTicketSerializer):
             "attachment",
             "followup_set",
         )
+        extra_kwargs = {
+            "secret_key": {"write_only": True},
+            "password_hash": {"write_only": True},
+            "api_token": {"write_only": True},
+            "secret_subject": {"write_only": True},
+        }
 
     def create(self, validated_data):
         """Use TicketForm to validate and create ticket"""

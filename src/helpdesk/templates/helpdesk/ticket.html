@@ -493,10 +493,75 @@ $( function() {
   }
 
   var previewXhr = null;
+  var previewDebounceTimer = null;
+  var previewThrottleTimer = null;
+  var previewLastRun = 0;
+  var PREVIEW_DEBOUNCE_MS = 600;
+  var PREVIEW_THROTTLE_MS = 1500;
+  var PREVIEW_MIN_CONTENT_LENGTH = 2;
+
+  function debounce(func, wait) {
+      return function() {
+          var context = this, args = arguments;
+          clearTimeout(previewDebounceTimer);
+          previewDebounceTimer = setTimeout(function() {
+              previewDebounceTimer = null;
+              func.apply(context, args);
+          }, wait);
+      };
+  }
+
+  function throttle(func, limit) {
+      return function() {
+          var context = this, args = arguments;
+          var now = Date.now();
+          var elapsed = now - previewLastRun;
+          if (!previewThrottleTimer && elapsed >= limit) {
+              previewLastRun = now;
+              func.apply(context, args);
+          } else if (!previewThrottleTimer) {
+              previewThrottleTimer = setTimeout(function() {
+                  previewLastRun = Date.now();
+                  previewThrottleTimer = null;
+                  func.apply(context, args);
+              }, limit - elapsed);
+          }
+      };
+  }
+
+  function clearAllPreviewTimers() {
+      if (previewDebounceTimer) {
+          clearTimeout(previewDebounceTimer);
+          previewDebounceTimer = null;
+      }
+      if (previewThrottleTimer) {
+          clearTimeout(previewThrottleTimer);
+          previewThrottleTimer = null;
+      }
+      if (previewXhr) {
+          previewXhr.abort();
+          previewXhr = null;
+      }
+  }
+
   function loadPreview() {
       var customerContent = $('#customerPreviewContent');
       var staffContent = $('#staffPreviewContent');
-      var loadingHtml = '<div class="text-center text-muted py-5"><i class="fas fa-spinner fa-spin fa-2x mb-3"></i><p>{% trans "Loading preview..." %}</p></div>';
+      var modal = $('#previewDraftModal');
+
+      if (!modal.hasClass('show')) {
+          return;
+      }
+
+      var formData = getFormDataForPreview();
+      if (formData.comment && formData.comment.trim().length < PREVIEW_MIN_CONTENT_LENGTH) {
+          var emptyHtml = '<div class="text-center text-muted py-4"><i class="fas fa-edit fa-2x mb-2"></i><p class="mb-0">{% trans "Start typing to see the preview..." %}</p></div>';
+          customerContent.html(emptyHtml);
+          staffContent.html(emptyHtml);
+          return;
+      }
+
+      var loadingHtml = '<div class="text-center text-muted py-5"><i class="fas fa-spinner fa-spin fa-2x mb-3"></i><p>{% trans "Updating preview..." %}</p></div>';
       customerContent.html(loadingHtml);
       staffContent.html(loadingHtml);
 
@@ -504,7 +569,6 @@ $( function() {
           previewXhr.abort();
       }
 
-      var formData = getFormDataForPreview();
       var postData = {
           'comment': formData.comment,
           'public': formData.public
@@ -552,46 +616,29 @@ $( function() {
       });
   }
 
-  function getCookie(name) {
-      var cookieValue = null;
-      if (document.cookie && document.cookie !== '') {
-          var cookies = document.cookie.split(';');
-          for (var i = 0; i < cookies.length; i++) {
-              var cookie = cookies[i].trim();
-              if (cookie.substring(0, name.length + 1) === (name + '=')) {
-                  cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
-                  break;
-              }
-          }
-      }
-      return cookieValue;
-  }
-
-  function debounce(func, wait) {
-      var timeout;
-      return function() {
-          var context = this, args = arguments;
-          clearTimeout(timeout);
-          timeout = setTimeout(function() {
-              timeout = null;
-              func.apply(context, args);
-          }, wait);
-      };
-  }
-
-  var debouncedLoadPreview = debounce(function() {
+  var debouncedThrottledLoadPreview = throttle(debounce(function() {
       if ($('#previewDraftModal').hasClass('show')) {
           loadPreview();
       }
-  }, 500);
+  }, PREVIEW_DEBOUNCE_MS), PREVIEW_THROTTLE_MS);
 
   $('#previewDraftModal').on('show.bs.modal', function (e) {
       loadPreview();
   });
 
-  $('#commentBox').on('input', debouncedLoadPreview);
-  $('input[name="public"]').on('change', debouncedLoadPreview);
-  $('input[name="new_status"]').on('change', debouncedLoadPreview);
+  $('#previewDraftModal').on('hidden.bs.modal', function (e) {
+      clearAllPreviewTimers();
+  });
+
+  $('#commentBox').on('input propertychange paste', debouncedThrottledLoadPreview);
+  $('input[name="public"]').on('change', function() {
+      clearAllPreviewTimers();
+      loadPreview();
+  });
+  $('input[name="new_status"]').on('change', function() {
+      clearAllPreviewTimers();
+      loadPreview();
+  });
 
   $('#previewTabs button').on('shown.bs.tab', function (e) {
   });

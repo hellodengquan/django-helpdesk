@@ -310,6 +310,7 @@ def ticket_perm_check(request, ticket):
 
 
 @helpdesk_staff_member_required
+@requires_csrf_token
 def delete_ticket(request, ticket_id):
     ticket = get_object_or_404(Ticket, id=ticket_id)
     ticket_perm_check(request, ticket)
@@ -332,6 +333,7 @@ delete_ticket = staff_member_required(delete_ticket)
 
 
 @helpdesk_staff_member_required
+@requires_csrf_token
 def followup_edit(request, ticket_id, followup_id):
     """Edit followup options with an ability to change the ticket."""
     followup = get_object_or_404(FollowUp, id=followup_id)
@@ -442,6 +444,7 @@ followup_delete = staff_member_required(followup_delete)
 
 @helpdesk_staff_member_required
 @ensure_csrf_cookie
+@requires_csrf_token
 def view_ticket(request, ticket_id):
     ticket = get_object_or_404(Ticket, id=ticket_id)
     ticket_perm_check(request, ticket)
@@ -541,6 +544,7 @@ def view_ticket(request, ticket_id):
 
 
 @helpdesk_staff_member_required
+@requires_csrf_token
 def edit_ticket_checklist(request, ticket_id, checklist_id):
     ticket = get_object_or_404(Ticket, id=ticket_id)
     ticket_perm_check(request, ticket)
@@ -578,6 +582,7 @@ def edit_ticket_checklist(request, ticket_id, checklist_id):
 
 
 @helpdesk_staff_member_required
+@requires_csrf_token
 def delete_ticket_checklist(request, ticket_id, checklist_id):
     ticket = get_object_or_404(Ticket, id=ticket_id)
     ticket_perm_check(request, ticket)
@@ -745,6 +750,7 @@ def return_to_ticket(user, ticket):
 
 
 @helpdesk_staff_member_required
+@requires_csrf_token
 def mass_update(request):
     tickets = request.POST.getlist("ticket_id")
     action = request.POST.get("action", None)
@@ -1008,6 +1014,7 @@ def redirect_from_chosen_ticket(
 
 
 @helpdesk_staff_member_required
+@requires_csrf_token
 def merge_tickets(request):
     """
     An intermediate view to merge up to 3 tickets in one main ticket.
@@ -1312,6 +1319,7 @@ def timeline_ticket_list(request, query):
 
 
 @helpdesk_staff_member_required
+@requires_csrf_token
 def edit_ticket(request, ticket_id):
     ticket = get_object_or_404(Ticket, id=ticket_id)
     ticket_perm_check(request, ticket)
@@ -1784,6 +1792,7 @@ saved_searches_list = staff_member_required(saved_searches_list)
 
 
 @helpdesk_staff_member_required
+@requires_csrf_token
 def save_query(request):
     title = request.POST.get("title", None)
     shared = request.POST.get("shared", False)
@@ -1808,6 +1817,7 @@ save_query = staff_member_required(save_query)
 
 
 @helpdesk_staff_member_required
+@requires_csrf_token
 def delete_saved_query(request, pk):
     query = get_object_or_404(SavedSearch, id=pk, user=request.user)
 
@@ -1848,6 +1858,7 @@ email_ignore = superuser_required(email_ignore)
 
 
 @helpdesk_superuser_required
+@requires_csrf_token
 def email_ignore_add(request):
     if request.method == "POST":
         form = EmailIgnoreForm(request.POST)
@@ -1864,6 +1875,7 @@ email_ignore_add = superuser_required(email_ignore_add)
 
 
 @helpdesk_superuser_required
+@requires_csrf_token
 def email_ignore_del(request, pk):
     ignore = get_object_or_404(IgnoreEmail, id=pk)
     if request.method == "POST":
@@ -1896,6 +1908,7 @@ ticket_cc = staff_member_required(ticket_cc)
 
 
 @helpdesk_staff_member_required
+@requires_csrf_token
 def ticket_cc_add(request, ticket_id):
     ticket = get_object_or_404(Ticket, id=ticket_id)
     ticket_perm_check(request, ticket)
@@ -1936,6 +1949,7 @@ ticket_cc_add = staff_member_required(ticket_cc_add)
 
 
 @helpdesk_staff_member_required
+@requires_csrf_token
 def ticket_cc_del(request, ticket_id, cc_id):
     ticket = get_object_or_404(Ticket, id=ticket_id)
     ticket_perm_check(request, ticket)
@@ -1954,6 +1968,7 @@ ticket_cc_del = staff_member_required(ticket_cc_del)
 
 
 @helpdesk_staff_member_required
+@requires_csrf_token
 def ticket_dependency_add(request, ticket_id):
     ticket = get_object_or_404(Ticket, id=ticket_id)
     ticket_perm_check(request, ticket)
@@ -1981,6 +1996,7 @@ ticket_dependency_add = staff_member_required(ticket_dependency_add)
 
 
 @helpdesk_staff_member_required
+@requires_csrf_token
 def ticket_dependency_del(request, ticket_id, dependency_id):
     ticket = get_object_or_404(Ticket, id=ticket_id)
     ticket_perm_check(request, ticket)
@@ -1999,6 +2015,7 @@ ticket_dependency_del = staff_member_required(ticket_dependency_del)
 
 
 @helpdesk_staff_member_required
+@requires_csrf_token
 def ticket_resolves_add(request, ticket_id):
     depends_on = get_object_or_404(Ticket, id=ticket_id)
     ticket_perm_check(request, depends_on)
@@ -2026,6 +2043,7 @@ ticket_resolves_add = staff_member_required(ticket_resolves_add)
 
 
 @helpdesk_staff_member_required
+@requires_csrf_token
 def ticket_resolves_del(request, ticket_id, dependency_id):
     ticket = get_object_or_404(Ticket, id=ticket_id)
     ticket_perm_check(request, ticket)
@@ -2045,6 +2063,7 @@ ticket_resolves_del = staff_member_required(ticket_resolves_del)
 
 
 @helpdesk_staff_member_required
+@requires_csrf_token
 def attachment_del(request, ticket_id, attachment_id):
     ticket = get_object_or_404(Ticket, id=ticket_id)
     ticket_perm_check(request, ticket)
@@ -2187,6 +2206,7 @@ def sort_string(begin, end):
 
 
 @helpdesk_staff_member_required
+@requires_csrf_token
 def checklist_templates(request, checklist_template_id=None):
     checklist_template = None
     if checklist_template_id:
@@ -2209,6 +2229,7 @@ def checklist_templates(request, checklist_template_id=None):
 
 
 @helpdesk_staff_member_required
+@requires_csrf_token
 def delete_checklist_template(request, checklist_template_id):
     checklist_template = get_object_or_404(ChecklistTemplate, id=checklist_template_id)
     if request.method == "POST":
