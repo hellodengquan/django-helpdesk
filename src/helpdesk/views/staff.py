@@ -2220,3 +2220,75 @@ def delete_checklist_template(request, checklist_template_id):
             "checklist_template": checklist_template,
         },
     )
+
+
+@helpdesk_staff_member_required
+def preview_followup(request, ticket_id):
+    ticket = get_object_or_404(Ticket, id=ticket_id)
+    ticket_perm_check(request, ticket)
+
+    if request.method != "POST":
+        return JsonResponse(
+            {"error": _("Only POST requests are allowed")},
+            status=status.HTTP_405_METHOD_NOT_ALLOWED,
+        )
+
+    comment = request.POST.get("comment", "")
+    public = request.POST.get("public", "false") == "true" or request.POST.get("public") == "1"
+    new_status = request.POST.get("new_status", None)
+    title = request.POST.get("title", ticket.title)
+
+    from django.template import engines
+
+    template_func = engines["django"].from_string
+    context = safe_template_context(ticket)
+
+    comment_safe = comment.replace("{%", "X-HELPDESK-COMMENT-VERBATIM").replace(
+        "%}", "X-HELPDESK-COMMENT-ENDVERBATIM"
+    )
+    comment_safe = comment_safe.replace(
+        "X-HELPDESK-COMMENT-VERBATIM", "{% verbatim %}{%"
+    ).replace("X-HELPDESK-COMMENT-ENDVERBATIM", "%}{% endverbatim %}")
+    try:
+        rendered_comment = template_func(comment_safe).render(context)
+    except Exception:
+        rendered_comment = comment
+
+    from helpdesk.models import get_markdown
+
+    rendered_comment_html = get_markdown(rendered_comment)
+
+    status_display = None
+    if new_status and int(new_status) != ticket.status:
+        try:
+            status_choice = dict(Ticket.STATUS_CHOICES)[int(new_status)]
+            status_display = str(status_choice)
+        except (KeyError, ValueError):
+            pass
+
+    preview_title = ""
+    if public:
+        if new_status and status_display:
+            preview_title = status_display
+        if rendered_comment:
+            if preview_title:
+                preview_title += " " + _("and Comment")
+            else:
+                preview_title = _("Comment")
+        if not preview_title:
+            preview_title = _("Updated")
+    else:
+        preview_title = _("Private Note")
+        if rendered_comment:
+            preview_title += " - " + _("Internal Note")
+
+    return JsonResponse(
+        {
+            "title": preview_title,
+            "comment_html": str(rendered_comment_html),
+            "public": public,
+            "status_display": status_display,
+            "author": str(request.user.get_username() if request.user else _("Staff")),
+            "date": now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    )

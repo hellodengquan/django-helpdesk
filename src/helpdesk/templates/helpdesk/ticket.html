@@ -254,10 +254,63 @@
 
         </fieldset>
 
-        <button class="btn btn-primary float-end" type='submit' onclick='$("#ShowFurtherEditOptions").click()'>{% trans "Update This Ticket" %}</button>
+        <div class="d-flex justify-content-end gap-2">
+            <button type="button" class="btn btn-outline-secondary" id="previewDraftBtn" data-bs-toggle="modal" data-bs-target="#previewDraftModal">
+                <i class="fas fa-eye"></i>&nbsp;{% trans "Preview Draft" %}
+            </button>
+            <button class="btn btn-primary" type='submit' onclick='$("#ShowFurtherEditOptions").click()'>{% trans "Update This Ticket" %}</button>
+        </div>
 
         {% csrf_token %}</form>
 
+            </div>
+        </div>
+
+        <div class="modal fade" id="previewDraftModal" tabindex="-1" role="dialog" aria-labelledby="previewDraftModalLabel" aria-hidden="true">
+            <div class="modal-dialog modal-lg modal-dialog-centered" role="document">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="previewDraftModalLabel">
+                            <i class="fas fa-eye"></i>&nbsp;{% trans "Draft Preview" %}
+                        </h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{% trans 'Close' %}"></button>
+                    </div>
+                    <div class="modal-body">
+                        <ul class="nav nav-tabs mb-3" id="previewTabs" role="tablist">
+                            <li class="nav-item" role="presentation">
+                                <button class="nav-link active" id="customer-view-tab" data-bs-toggle="tab" data-bs-target="#customer-view" type="button" role="tab" aria-controls="customer-view" aria-selected="true">
+                                    <i class="fas fa-user"></i>&nbsp;{% trans "Customer View" %}
+                                </button>
+                            </li>
+                            <li class="nav-item" role="presentation">
+                                <button class="nav-link" id="staff-view-tab" data-bs-toggle="tab" data-bs-target="#staff-view" type="button" role="tab" aria-controls="staff-view" aria-selected="false">
+                                    <i class="fas fa-user-shield"></i>&nbsp;{% trans "Staff View" %}
+                                </button>
+                            </li>
+                        </ul>
+                        <div class="tab-content" id="previewTabsContent">
+                            <div class="tab-pane fade show active" id="customer-view" role="tabpanel" aria-labelledby="customer-view-tab">
+                                <div id="customerPreviewContent" class="border rounded p-3 bg-light">
+                                    <div class="text-center text-muted py-5">
+                                        <i class="fas fa-spinner fa-spin fa-2x mb-3"></i>
+                                        <p>{% trans "Loading preview..." %}</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="tab-pane fade" id="staff-view" role="tabpanel" aria-labelledby="staff-view-tab">
+                                <div id="staffPreviewContent" class="border rounded p-3 bg-light">
+                                    <div class="text-center text-muted py-5">
+                                        <i class="fas fa-spinner fa-spin fa-2x mb-3"></i>
+                                        <p>{% trans "Loading preview..." %}</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">{% trans "Close" %}</button>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -368,5 +421,124 @@ $( function() {
       input.trigger('fileselect', [numFiles, label, inputWidgetNum]);
   });
   {% endif %}
+
+  function getFormDataForPreview() {
+      var comment = $('#commentBox').val();
+      var public_val;
+      {% if helpdesk_settings.HELPDESK_UPDATE_PUBLIC_DEFAULT %}
+          public_val = '1';
+      {% else %}
+          public_val = $('input[name="public"]').is(':checked') ? '1' : '0';
+      {% endif %}
+      var new_status = $('input[name="new_status"]:checked').val();
+      return {
+          'comment': comment,
+          'public': public_val,
+          'new_status': new_status
+      };
+  }
+
+  function escapeHtml(text) {
+      var div = document.createElement('div');
+      div.appendChild(document.createTextNode(text));
+      return div.innerHTML;
+  }
+
+  function renderStaffPreview(data) {
+      var html = '';
+      html += '<div class="list-group-item list-group-item-action' + (data.public ? '' : ' list-group-item-warning') + '">';
+      html += '<div class="d-flex w-100 justify-content-between">';
+      html += '<h5 class="mb-1">' + escapeHtml(data.title) + '</h5>';
+      html += '<small><i class="fas fa-clock"></i>&nbsp;<span class="byline text-info">by ' + escapeHtml(data.author) + ', just now';
+      if (!data.public) {
+          html += " <span class='private'>({% trans 'Private' %})</span>";
+      }
+      html += '</span></small>';
+      html += '</div>';
+      if (data.comment_html) {
+          html += '<p class="mb-1"><p>' + data.comment_html + '</p></p>';
+      }
+      html += '</div>';
+      if (!data.public) {
+          html += '<div class="alert alert-warning mt-2 mb-0" role="alert">';
+          html += '<i class="fas fa-exclamation-triangle"></i>&nbsp;';
+          html += '<strong>{% trans "Internal Note" %}:</strong> ';
+          html += '{% trans "This follow-up is marked as private and will NOT be visible to the customer." %}';
+          html += '</div>';
+      }
+      return html;
+  }
+
+  function renderCustomerPreview(data) {
+      var html = '';
+      if (data.public) {
+          html += "<div class='followup well card'>";
+          html += "<p><b>" + escapeHtml(data.title) + " <span class='byline text-info'>by " + escapeHtml(data.author) + " <span title='" + escapeHtml(data.date) + "'>just now</span></span></b></p>";
+          if (data.comment_html) {
+              html += data.comment_html;
+          }
+          html += "</div>";
+      } else {
+          html += '<div class="alert alert-info" role="alert">';
+          html += '<i class="fas fa-info-circle"></i>&nbsp;';
+          html += '<strong>{% trans "Customer View" %}:</strong> ';
+          html += '{% trans "No content visible. This draft is marked as an internal note and the customer will NOT see anything." %}';
+          html += '</div>';
+          html += '<div class="text-center text-muted py-4">';
+          html += '<i class="fas fa-lock fa-3x mb-2"></i>';
+          html += '<p class="mb-0">{% trans "Content hidden from customer" %}</p>';
+          html += '</div>';
+      }
+      return html;
+  }
+
+  function loadPreview() {
+      var customerContent = $('#customerPreviewContent');
+      var staffContent = $('#staffPreviewContent');
+      var loadingHtml = '<div class="text-center text-muted py-5"><i class="fas fa-spinner fa-spin fa-2x mb-3"></i><p>{% trans "Loading preview..." %}</p></div>';
+      customerContent.html(loadingHtml);
+      staffContent.html(loadingHtml);
+
+      var formData = getFormDataForPreview();
+      var postData = {
+          'comment': formData.comment,
+          'public': formData.public,
+          'csrfmiddlewaretoken': $('input[name="csrfmiddlewaretoken"]').val()
+      };
+      if (formData.new_status) {
+          postData['new_status'] = formData.new_status;
+      }
+
+      $.ajax({
+          url: "{% url 'helpdesk:preview_followup' ticket.id %}",
+          type: 'POST',
+          data: postData,
+          dataType: 'json',
+          success: function(response) {
+              customerContent.html(renderCustomerPreview(response));
+              staffContent.html(renderStaffPreview(response));
+          },
+          error: function(xhr, status, error) {
+              var errorHtml = '<div class="alert alert-danger" role="alert"><i class="fas fa-exclamation-circle"></i>&nbsp;';
+              errorHtml += '<strong>{% trans "Error" %}:</strong> ';
+              try {
+                  var resp = JSON.parse(xhr.responseText);
+                  errorHtml += escapeHtml(resp.error || error);
+              } catch(e) {
+                  errorHtml += escapeHtml(error);
+              }
+              errorHtml += '</div>';
+              customerContent.html(errorHtml);
+              staffContent.html(errorHtml);
+          }
+      });
+  }
+
+  $('#previewDraftModal').on('show.bs.modal', function (e) {
+      loadPreview();
+  });
+
+  $('#previewTabs button').on('shown.bs.tab', function (e) {
+  });
   </script>
 {% endblock %}

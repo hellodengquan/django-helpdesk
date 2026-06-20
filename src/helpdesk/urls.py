@@ -102,6 +102,11 @@ if helpdesk_settings.HELPDESK_UI_ENABLED:
             name="attachment_del",
         ),
         path(
+            "tickets/<int:ticket_id>/preview/",
+            staff.preview_followup,
+            name="preview_followup",
+        ),
+        path(
             "tickets/<int:ticket_id>/checklists/<int:checklist_id>/",
             staff.edit_ticket_checklist,
             name="edit_ticket_checklist",
