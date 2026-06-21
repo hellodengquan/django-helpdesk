@@ -6,6 +6,7 @@ from helpdesk.models import (
     ChecklistTask,
     ChecklistTemplate,
     CustomField,
+    EmailLog,
     EmailTemplate,
     EscalationExclusion,
     FollowUp,
@@ -157,3 +158,56 @@ class ChecklistAdmin(admin.ModelAdmin):
 
 admin.site.register(PreSetReply)
 admin.site.register(EscalationExclusion)
+
+
+@admin.register(EmailLog)
+class EmailLogAdmin(admin.ModelAdmin):
+    list_display = (
+        "timestamp",
+        "direction",
+        "status",
+        "error_type",
+        "queue",
+        "subject",
+        "sender",
+        "recipient",
+    )
+    list_filter = (
+        "direction",
+        "status",
+        "error_type",
+        "is_bounce",
+        "queue",
+        "timestamp",
+    )
+    search_fields = (
+        "subject",
+        "sender",
+        "recipient",
+        "error_message",
+        "message_id",
+    )
+    date_hierarchy = "timestamp"
+    readonly_fields = (
+        "timestamp",
+        "direction",
+        "status",
+        "error_type",
+        "error_message",
+        "queue",
+        "message_id",
+        "subject",
+        "sender",
+        "recipient",
+        "is_bounce",
+        "bounce_reason",
+        "attachment_count",
+        "attachment_errors",
+        "raw_message_excerpt",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False

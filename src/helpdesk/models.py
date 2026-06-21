@@ -2274,3 +2274,232 @@ class ChecklistTask(models.Model):
 
     def __str__(self):
         return self.description
+
+
+class EmailLog(models.Model):
+    """
+    Email processing log for diagnostic purposes.
+    Records both incoming and outgoing email events to help diagnose
+    email pipeline issues (IMAP/SMTP config errors, bounces, attachment failures, etc.)
+    """
+
+    DIRECTION_INCOMING = "incoming"
+    DIRECTION_OUTGOING = "outgoing"
+    DIRECTION_CHOICES = (
+        (DIRECTION_INCOMING, _("Incoming")),
+        (DIRECTION_OUTGOING, _("Outgoing")),
+    )
+
+    STATUS_SUCCESS = "success"
+    STATUS_FAILED = "failed"
+    STATUS_IGNORED = "ignored"
+    STATUS_DEFERRED = "deferred"
+    STATUS_CHOICES = (
+        (STATUS_SUCCESS, _("Success")),
+        (STATUS_FAILED, _("Failed")),
+        (STATUS_IGNORED, _("Ignored")),
+        (STATUS_DEFERRED, _("Deferred")),
+    )
+
+    ERROR_TYPE_NONE = "none"
+    ERROR_TYPE_AUTH = "auth"
+    ERROR_TYPE_CONNECTION = "connection"
+    ERROR_TYPE_SSL = "ssl"
+    ERROR_TYPE_PARSE = "parse"
+    ERROR_TYPE_ATTACHMENT = "attachment"
+    ERROR_TYPE_BOUNCE = "bounce"
+    ERROR_TYPE_SMTP = "smtp"
+    ERROR_TYPE_UNKNOWN = "unknown"
+    ERROR_TYPE_CHOICES = (
+        (ERROR_TYPE_NONE, _("None")),
+        (ERROR_TYPE_AUTH, _("Authentication")),
+        (ERROR_TYPE_CONNECTION, _("Connection")),
+        (ERROR_TYPE_SSL, _("SSL/TLS")),
+        (ERROR_TYPE_PARSE, _("Parse")),
+        (ERROR_TYPE_ATTACHMENT, _("Attachment")),
+        (ERROR_TYPE_BOUNCE, _("Bounce")),
+        (ERROR_TYPE_SMTP, _("SMTP")),
+        (ERROR_TYPE_UNKNOWN, _("Unknown")),
+    )
+
+    queue = models.ForeignKey(
+        Queue,
+        on_delete=models.CASCADE,
+        verbose_name=_("Queue"),
+        related_name="email_logs",
+        null=True,
+        blank=True,
+    )
+
+    direction = models.CharField(
+        _("Direction"),
+        max_length=10,
+        choices=DIRECTION_CHOICES,
+        default=DIRECTION_INCOMING,
+        db_index=True,
+    )
+
+    status = models.CharField(
+        _("Status"),
+        max_length=10,
+        choices=STATUS_CHOICES,
+        default=STATUS_SUCCESS,
+        db_index=True,
+    )
+
+    error_type = models.CharField(
+        _("Error Type"),
+        max_length=20,
+        choices=ERROR_TYPE_CHOICES,
+        default=ERROR_TYPE_NONE,
+        db_index=True,
+    )
+
+    error_message = models.TextField(
+        _("Error Message"),
+        blank=True,
+        null=True,
+    )
+
+    message_id = models.CharField(
+        _("Message ID"),
+        max_length=255,
+        blank=True,
+        null=True,
+        db_index=True,
+    )
+
+    subject = models.CharField(
+        _("Subject"),
+        max_length=255,
+        blank=True,
+        null=True,
+    )
+
+    sender = models.CharField(
+        _("Sender"),
+        max_length=255,
+        blank=True,
+        null=True,
+        db_index=True,
+    )
+
+    recipient = models.CharField(
+        _("Recipient"),
+        max_length=255,
+        blank=True,
+        null=True,
+        db_index=True,
+    )
+
+    is_bounce = models.BooleanField(
+        _("Is Bounce"),
+        default=False,
+        db_index=True,
+    )
+
+    bounce_reason = models.CharField(
+        _("Bounce Reason"),
+        max_length=255,
+        blank=True,
+        null=True,
+    )
+
+    attachment_count = models.PositiveIntegerField(
+        _("Attachment Count"),
+        default=0,
+    )
+
+    attachment_errors = models.TextField(
+        _("Attachment Errors"),
+        blank=True,
+        null=True,
+    )
+
+    raw_message_excerpt = models.TextField(
+        _("Raw Message Excerpt"),
+        blank=True,
+        null=True,
+        help_text=_("First portion of the raw message for debugging purposes."),
+    )
+
+    timestamp = models.DateTimeField(
+        _("Timestamp"),
+        default=timezone.now,
+        db_index=True,
+    )
+
+    class Meta:
+        ordering = ("-timestamp",)
+        verbose_name = _("Email Log")
+        verbose_name_plural = _("Email Logs")
+        indexes = [
+            models.Index(fields=["direction", "status", "-timestamp"]),
+            models.Index(fields=["error_type", "-timestamp"]),
+            models.Index(fields=["queue", "direction", "-timestamp"]),
+        ]
+
+    def __str__(self):
+        return f"{self.get_direction_display()} - {self.get_status_display()} - {self.timestamp}"
+
+    @classmethod
+    def log_incoming(
+        cls,
+        queue,
+        status,
+        error_type=ERROR_TYPE_NONE,
+        error_message=None,
+        message_id=None,
+        subject=None,
+        sender=None,
+        is_bounce=False,
+        bounce_reason=None,
+        attachment_count=0,
+        attachment_errors=None,
+        raw_message_excerpt=None,
+    ):
+        return cls.objects.create(
+            queue=queue,
+            direction=cls.DIRECTION_INCOMING,
+            status=status,
+            error_type=error_type,
+            error_message=error_message,
+            message_id=message_id,
+            subject=subject,
+            sender=sender,
+            is_bounce=is_bounce,
+            bounce_reason=bounce_reason,
+            attachment_count=attachment_count,
+            attachment_errors=attachment_errors,
+            raw_message_excerpt=raw_message_excerpt,
+        )
+
+    @classmethod
+    def log_outgoing(
+        cls,
+        queue,
+        status,
+        error_type=ERROR_TYPE_NONE,
+        error_message=None,
+        message_id=None,
+        subject=None,
+        recipient=None,
+        is_bounce=False,
+        bounce_reason=None,
+        attachment_count=0,
+        raw_message_excerpt=None,
+    ):
+        return cls.objects.create(
+            queue=queue,
+            direction=cls.DIRECTION_OUTGOING,
+            status=status,
+            error_type=error_type,
+            error_message=error_message,
+            message_id=message_id,
+            subject=subject,
+            recipient=recipient,
+            is_bounce=is_bounce,
+            bounce_reason=bounce_reason,
+            attachment_count=attachment_count,
+            raw_message_excerpt=raw_message_excerpt,
+        )

@@ -8,6 +8,50 @@ from smtplib import SMTPException
 logger = logging.getLogger("helpdesk")
 
 
+def _get_queue_from_context(context):
+    try:
+        from helpdesk.models import Queue
+        queue_ctx = context.get("queue", {})
+        queue_slug = queue_ctx.get("slug") if isinstance(queue_ctx, dict) else None
+        if queue_slug:
+            return Queue.objects.filter(slug=queue_slug).first()
+    except Exception:
+        pass
+    return None
+
+
+def _log_outgoing_email(
+    queue,
+    status,
+    error_type="none",
+    error_message=None,
+    subject=None,
+    recipient=None,
+    attachment_count=0,
+):
+    try:
+        from helpdesk.models import EmailLog
+        error_type_map = {
+            "none": EmailLog.ERROR_TYPE_NONE,
+            "auth": EmailLog.ERROR_TYPE_AUTH,
+            "connection": EmailLog.ERROR_TYPE_CONNECTION,
+            "ssl": EmailLog.ERROR_TYPE_SSL,
+            "smtp": EmailLog.ERROR_TYPE_SMTP,
+            "unknown": EmailLog.ERROR_TYPE_UNKNOWN,
+        }
+        EmailLog.log_outgoing(
+            queue=queue,
+            status=status,
+            error_type=error_type_map.get(error_type, EmailLog.ERROR_TYPE_UNKNOWN),
+            error_message=error_message,
+            subject=subject[:255] if subject and len(subject) > 255 else subject,
+            recipient=recipient,
+            attachment_count=attachment_count,
+        )
+    except Exception:
+        pass
+
+
 def send_templated_mail(
     template_name,
     context,
@@ -124,11 +168,40 @@ def send_templated_mail(
             filefield.close()
     logger.debug("Sending email to: {!r}".format(recipients))
 
+    queue = _get_queue_from_context(context)
+    attachment_count = len(files) if files else 0
+    recipient_str = ", ".join(recipients) if isinstance(recipients, list) else recipients
+
     try:
-        return msg.send()
+        result = msg.send()
+        _log_outgoing_email(
+            queue=queue,
+            status="success",
+            subject=subject_part,
+            recipient=recipient_str,
+            attachment_count=attachment_count,
+        )
+        return result
     except SMTPException as e:
         logger.exception(
             "SMTPException raised while sending email to {}".format(recipients)
+        )
+        error_str = str(e).lower()
+        error_type = "smtp"
+        if "auth" in error_str or "authentication" in error_str:
+            error_type = "auth"
+        elif "ssl" in error_str or "tls" in error_str:
+            error_type = "ssl"
+        elif "connect" in error_str or "connection" in error_str:
+            error_type = "connection"
+        _log_outgoing_email(
+            queue=queue,
+            status="failed",
+            error_type=error_type,
+            error_message=str(e),
+            subject=subject_part,
+            recipient=recipient_str,
+            attachment_count=attachment_count,
         )
         if not fail_silently:
             raise e

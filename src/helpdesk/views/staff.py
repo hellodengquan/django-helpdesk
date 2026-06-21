@@ -2220,3 +2220,155 @@ def delete_checklist_template(request, checklist_template_id):
             "checklist_template": checklist_template,
         },
     )
+
+
+@helpdesk_superuser_required
+def email_diagnostic(request):
+    from collections import defaultdict
+    from datetime import timedelta
+    from helpdesk.models import EmailLog, Queue
+
+    days = int(request.GET.get("days", 7))
+    if days < 1:
+        days = 7
+    if days > 30:
+        days = 30
+
+    start_time = now() - timedelta(days=days)
+
+    queues = Queue.objects.filter(
+        email_box_type__isnull=False, allow_email_submission=True
+    )
+
+    all_logs = EmailLog.objects.filter(timestamp__gte=start_time)
+
+    total_incoming = all_logs.filter(direction=EmailLog.DIRECTION_INCOMING).count()
+    total_outgoing = all_logs.filter(direction=EmailLog.DIRECTION_OUTGOING).count()
+    total_failed = all_logs.filter(status=EmailLog.STATUS_FAILED).count()
+    total_ignored = all_logs.filter(status=EmailLog.STATUS_IGNORED).count()
+
+    hourly_data = []
+    for i in range(days * 24):
+        hour_start = now().replace(minute=0, second=0, microsecond=0) - timedelta(
+            hours=(days * 24 - 1 - i)
+        )
+        hour_end = hour_start + timedelta(hours=1)
+        incoming_count = EmailLog.objects.filter(
+            direction=EmailLog.DIRECTION_INCOMING,
+            timestamp__gte=hour_start,
+            timestamp__lt=hour_end,
+        ).count()
+        outgoing_count = EmailLog.objects.filter(
+            direction=EmailLog.DIRECTION_OUTGOING,
+            timestamp__gte=hour_start,
+            timestamp__lt=hour_end,
+        ).count()
+        hourly_data.append(
+            {
+                "hour": hour_start.strftime("%Y-%m-%d %H:00"),
+                "incoming": incoming_count,
+                "outgoing": outgoing_count,
+            }
+        )
+
+    daily_data = []
+    for i in range(days):
+        day_start = (now() - timedelta(days=(days - 1 - i))).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        day_end = day_start + timedelta(days=1)
+        incoming_count = EmailLog.objects.filter(
+            direction=EmailLog.DIRECTION_INCOMING,
+            timestamp__gte=day_start,
+            timestamp__lt=day_end,
+        ).count()
+        outgoing_count = EmailLog.objects.filter(
+            direction=EmailLog.DIRECTION_OUTGOING,
+            timestamp__gte=day_start,
+            timestamp__lt=day_end,
+        ).count()
+        failed_count = EmailLog.objects.filter(
+            status=EmailLog.STATUS_FAILED,
+            timestamp__gte=day_start,
+            timestamp__lt=day_end,
+        ).count()
+        daily_data.append(
+            {
+                "date": day_start.strftime("%Y-%m-%d"),
+                "incoming": incoming_count,
+                "outgoing": outgoing_count,
+                "failed": failed_count,
+            }
+        )
+
+    error_type_stats = []
+    for error_type, error_label in EmailLog.ERROR_TYPE_CHOICES:
+        if error_type == EmailLog.ERROR_TYPE_NONE:
+            continue
+        count = all_logs.filter(error_type=error_type).count()
+        if count > 0:
+            error_type_stats.append(
+                {
+                    "type": error_type,
+                    "label": error_label,
+                    "count": count,
+                }
+            )
+    error_type_stats.sort(key=lambda x: x["count"], reverse=True)
+
+    incoming_errors = all_logs.filter(
+        direction=EmailLog.DIRECTION_INCOMING,
+        status=EmailLog.STATUS_FAILED,
+    ).order_by("-timestamp")[:20]
+
+    outgoing_errors = all_logs.filter(
+        direction=EmailLog.DIRECTION_OUTGOING,
+        status=EmailLog.STATUS_FAILED,
+    ).order_by("-timestamp")[:20]
+
+    bounce_samples = all_logs.filter(
+        is_bounce=True,
+    ).order_by("-timestamp")[:10]
+
+    queue_stats = []
+    for queue in queues:
+        queue_logs = all_logs.filter(queue=queue)
+        incoming_count = queue_logs.filter(direction=EmailLog.DIRECTION_INCOMING).count()
+        outgoing_count = queue_logs.filter(direction=EmailLog.DIRECTION_OUTGOING).count()
+        failed_count = queue_logs.filter(status=EmailLog.STATUS_FAILED).count()
+        last_check = queue.email_box_last_check
+        queue_stats.append(
+            {
+                "queue": queue,
+                "incoming": incoming_count,
+                "outgoing": outgoing_count,
+                "failed": failed_count,
+                "last_check": last_check,
+                "interval": queue.email_box_interval,
+            }
+        )
+
+    recent_logs = all_logs.order_by("-timestamp")[:50]
+
+    context = {
+        "days": days,
+        "queues": queues,
+        "total_incoming": total_incoming,
+        "total_outgoing": total_outgoing,
+        "total_failed": total_failed,
+        "total_ignored": total_ignored,
+        "hourly_data": hourly_data,
+        "daily_data": daily_data,
+        "error_type_stats": error_type_stats,
+        "incoming_errors": incoming_errors,
+        "outgoing_errors": outgoing_errors,
+        "bounce_samples": bounce_samples,
+        "queue_stats": queue_stats,
+        "recent_logs": recent_logs,
+    }
+
+    return render(
+        request,
+        "helpdesk/email_diagnostic.html",
+        context,
+    )

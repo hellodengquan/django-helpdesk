@@ -60,6 +60,14 @@
             <span>{% trans "Reports" %}</span>
           </a>
         </li>
+        {% if user.is_superuser %}
+        <li class="nav-item{% if 'email-diagnostic' in request.path %} active{% endif %}">
+          <a class="nav-link" href="{% url 'helpdesk:email_diagnostic' %}">
+            <i class="fas fa-fw fa-envelope"></i>
+            <span>{% trans "Email Diagnostics" %}</span>
+          </a>
+        </li>
+        {% endif %}
         {% if helpdesk_settings.HELPDESK_KB_ENABLED %}
         <li class="nav-item{% if 'kb' in request.path %} active{% endif %}">
           <a class="nav-link" href="{% url 'helpdesk:kb_index' %}">

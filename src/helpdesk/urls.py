@@ -277,4 +277,9 @@ urlpatterns += [
         ),
         name="system_settings",
     ),
+    path(
+        "email-diagnostic/",
+        staff.email_diagnostic,
+        name="email_diagnostic",
+    ),
 ]
