@@ -125,25 +125,42 @@
 {% csrf_token %}
 
 <div class="card mb-3">
-    <div class="card-header d-flex justify-content-between align-items-center">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap">
         <div>
             <i class="fas fa-fw fa-chart-bar"></i>
             {% trans "队列负载统计" %}
             <small class="text-muted ml-2">
                 {% trans "平均响应时间统计窗口：" %}
-                <span class="badge badge-pill badge-info">{% trans "最近 24 小时" %}</span>
-                <span class="badge badge-pill badge-outline-info ml-1" style="border:1px solid #17a2b8;color:#17a2b8;">{% trans "滚动 7 天" %}</span>
+                <span class="badge badge-pill badge-info">{{ response_window_label }}</span>
                 <span class="badge badge-pill badge-secondary ml-1" data-toggle="tooltip" title="{% trans '统计逻辑：针对队列内打开且非搁置的工单，取每个工单创建后客服首次跟进（FollowUp）的时间差，按窗口滚动计算平均值。' %}">
                     <i class="fas fa-question-circle"></i>
                 </span>
             </small>
         </div>
-        <span class="float-right">
+        <div class="d-flex align-items-center">
+            <div class="btn-group btn-group-sm mr-2" role="group" aria-label="{% trans '响应时间统计窗口' %}">
+                {% for rw in response_window_options %}
+                <a href="?response_window={{ rw.id }}&staff_source={{ staff_source }}" 
+                   class="btn btn-outline-info {% if response_window == rw.id %}active{% endif %}">
+                    <i class="fas fa-clock mr-1"></i>{{ rw.label }}
+                </a>
+                {% endfor %}
+            </div>
+            <div class="btn-group btn-group-sm mr-2" role="group" aria-label="{% trans '在岗人员数据源' %}">
+                {% for sso in staff_source_options %}
+                <a href="?response_window={{ response_window }}&staff_source={{ sso.id }}" 
+                   class="btn btn-outline-secondary {% if staff_source == sso.id %}active{% endif %}"
+                   data-toggle="tooltip" 
+                   title="{% if sso.id == 'permission' %}{% trans '所有激活且有队列权限的客服均视为在岗' %}{% elif sso.id == 'timesheet' %}{% trans '根据当前星期和时间段判断是否在工作时段' %}{% elif sso.id == 'manual' %}{% trans '读取用户 is_on_shift 标志（可手动切换）' %}{% endif %}">
+                    <i class="{{ sso.icon }} mr-1"></i>{{ sso.label }}
+                </a>
+                {% endfor %}
+            </div>
             <button type="button" class="btn btn-sm btn-outline-secondary" onclick="toggleAllQueues(this)">
                 <i class="fas fa-check-double"></i>
                 {% trans "全选 / 全不选" %}
             </button>
-        </span>
+        </div>
     </div>
     <div class="card-body">
         <div class="table-responsive">
@@ -156,24 +173,21 @@
                         <th>{% trans "队列名称" %}</th>
                         <th class="text-center" style="width: 90px;">{% trans "积压量" %}</th>
                         <th class="text-center" style="width: 90px;">{% trans "未分配" %}</th>
-                        <th class="text-center">
-                            <i class="fas fa-bolt text-warning"></i>
-                            {% trans "平均响应时间（近24小时）" %}
-                            <small class="text-muted d-block">
+                        <th class="text-center bg-info">
+                            <i class="fas fa-star"></i>
+                            {% trans "当前窗口：" %}{{ response_window_label }}
+                            <small class="d-block">
                                 {% trans "样本数" %}:
                                 <span class="badge badge-light">
-                                    {% for qs in queue_stats %}{% if forloop.first %}{{ qs.sample_count_24h }}{% endif %}{% endfor %}
+                                    {% for qs in queue_stats %}{% if forloop.first %}{{ qs.sample_count_current }}{% endif %}{% endfor %}
                                 </span>
                             </small>
                         </th>
                         <th class="text-center">
-                            <i class="fas fa-calendar-week text-info"></i>
-                            {% trans "平均响应时间（滚动7天）" %}
+                            <i class="fas fa-calendar-alt text-muted"></i>
+                            {% trans "其他窗口参考" %}
                             <small class="text-muted d-block">
-                                {% trans "样本数" %}:
-                                <span class="badge badge-light">
-                                    {% for qs in queue_stats %}{% if forloop.first %}{{ qs.sample_count_7d }}{% endif %}{% endfor %}
-                                </span>
+                                {% if response_window == "24h" %}{% trans "滚动 7 天" %}{% else %}{% trans "最近 24 小时" %}{% endif %}
                             </small>
                         </th>
                         <th class="text-center">
@@ -226,25 +240,36 @@
                             </span>
                             {% endif %}
                         </td>
-                        <td class="text-center align-middle">
-                            {% with secs_24h=qs.avg_response_time_24h.total_seconds %}
-                            <span class="{% if secs_24h and secs_24h > 7200 %}text-danger font-weight-bold{% elif secs_24h and secs_24h > 3600 %}text-warning font-weight-bold{% elif secs_24h %}text-success{% else %}text-muted{% endif %}">
-                                <div class="mb-1">{{ qs.avg_response_time_24h_formatted }}</div>
+                        <td class="text-center align-middle bg-info-light">
+                            {% with secs_cur=qs.avg_response_time_current.total_seconds %}
+                            <span class="{% if secs_cur and secs_cur > 7200 %}text-danger font-weight-bold{% elif secs_cur and secs_cur > 3600 %}text-warning font-weight-bold{% elif secs_cur %}text-success{% else %}text-muted{% endif %}" style="font-size: 1.15rem;">
+                                <div class="mb-1">{{ qs.avg_response_time_current_formatted }}</div>
                                 <small class="text-muted">
-                                    {% trans "样本数" %}: <span class="badge badge-light">{{ qs.sample_count_24h }}</span>
+                                    {% trans "样本数" %}: <span class="badge badge-light">{{ qs.sample_count_current }}</span>
                                 </small>
                             </span>
                             {% endwith %}
                         </td>
-                        <td class="text-center align-middle">
-                            {% with secs_7d=qs.avg_response_time_7d.total_seconds %}
-                            <span class="{% if secs_7d and secs_7d > 7200 %}text-danger font-weight-bold{% elif secs_7d and secs_7d > 3600 %}text-warning font-weight-bold{% elif secs_7d %}text-success{% else %}text-muted{% endif %}">
-                                <div class="mb-1">{{ qs.avg_response_time_7d_formatted }}</div>
-                                <small class="text-muted">
-                                    {% trans "样本数" %}: <span class="badge badge-light">{{ qs.sample_count_7d }}</span>
-                                </small>
-                            </span>
-                            {% endwith %}
+                        <td class="text-center align-middle text-muted">
+                            {% if response_window == "24h" %}
+                                {% with secs=qs.avg_response_time_7d.total_seconds %}
+                                <span class="{% if secs and secs > 7200 %}text-danger{% elif secs and secs > 3600 %}text-warning{% elif secs %}text-success{% else %}text-muted{% endif %}" style="font-size: 0.9rem;">
+                                    <div class="mb-1">{{ qs.avg_response_time_7d_formatted }}</div>
+                                    <small class="text-muted">
+                                        {% trans "样本" %}: {{ qs.sample_count_7d }}
+                                    </small>
+                                </span>
+                                {% endwith %}
+                            {% else %}
+                                {% with secs=qs.avg_response_time_24h.total_seconds %}
+                                <span class="{% if secs and secs > 7200 %}text-danger{% elif secs and secs > 3600 %}text-warning{% elif secs %}text-success{% else %}text-muted{% endif %}" style="font-size: 0.9rem;">
+                                    <div class="mb-1">{{ qs.avg_response_time_24h_formatted }}</div>
+                                    <small class="text-muted">
+                                        {% trans "样本" %}: {{ qs.sample_count_24h }}
+                                    </small>
+                                </span>
+                                {% endwith %}
+                            {% endif %}
                         </td>
                         <td class="text-center align-middle">
                             <div class="d-flex flex-column align-items-center">
@@ -327,18 +352,28 @@
                 <div class="col-md-4">
                     <strong>{% trans "平均响应时间计算逻辑：" %}</strong>
                     <ul class="mb-0 mt-1">
-                        <li>{% trans "窗口一：最近 24 小时（滚动计算）" %}</li>
-                        <li>{% trans "窗口二：最近 7 天（滚动计算）" %}</li>
+                        <li>{% trans "当前主窗口：" %}<code>{{ response_window_label }}</code>（{{ response_window_hours }} {% trans "小时滚动窗口" %}）</li>
+                        <li>{% trans "参考窗口：" %}{% if response_window == "24h" %}{% trans "滚动 7 天" %}{% else %}{% trans "最近 24 小时" %}{% endif %}</li>
                         <li>{% trans "计算公式：Σ(首次跟进时间 - 工单创建时间) ÷ 有响应的工单数" %}</li>
+                        <li class="text-muted"><small>{% trans "* 只统计窗口内有客服首次跟进记录的打开工单" %}</small></li>
                     </ul>
                 </div>
                 <div class="col-md-4">
                     <strong>{% trans "在岗人员识别规则：" %}</strong>
                     <ul class="mb-0 mt-1">
-                        <li>{% trans "当前数据源：" %}<code>{{ staff_source_label }}</code></li>
+                        <li>{% trans "当前数据源：" %}<code class="text-primary">{{ staff_source_label }}</code></li>
+                        {% if staff_source == "permission" %}
                         <li>{% trans "识别标准：用户 is_active=True 且拥有该队列权限" %}</li>
                         <li>{% trans "超级用户自动纳入所有队列" %}</li>
-                        <li class="text-muted"><small>{% trans "* 可扩展：接入工时表接口 / 手动排班切换来动态标记在岗状态" %}</small></li>
+                        {% elif staff_source == "timesheet" %}
+                        <li>{% trans "识别标准：根据当前星期与时间段判定是否在排班表内" %}</li>
+                        <li>{% trans "示例规则：工作日 9:00-18:00，周末 10:00-16:00" %}</li>
+                        <li>{% trans "超级用户默认视为在岗" %}</li>
+                        {% elif staff_source == "manual" %}
+                        <li>{% trans "识别标准：读取用户 Profile 上的 is_on_shift 标志" %}</li>
+                        <li>{% trans "管理员或用户本人可手动切换在岗状态" %}</li>
+                        {% endif %}
+                        <li class="text-muted"><small>{% trans "* 可切换顶部按钮使用其他数据源" %}</small></li>
                     </ul>
                 </div>
                 <div class="col-md-4">

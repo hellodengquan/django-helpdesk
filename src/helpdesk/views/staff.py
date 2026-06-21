@@ -2227,6 +2227,13 @@ def _get_queue_active_staff(queue, source="permission"):
     assignable_users = get_assignable_users(
         helpdesk_settings.HELPDESK_STAFF_ONLY_TICKET_OWNERS
     )
+
+    if source == "timesheet":
+        return _get_queue_staff_from_timesheet(queue, assignable_users), source
+
+    if source == "manual":
+        return _get_queue_staff_manual(queue, assignable_users), source
+
     if helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION:
         active_staff = []
         for user in assignable_users:
@@ -2234,6 +2241,58 @@ def _get_queue_active_staff(queue, source="permission"):
                 active_staff.append(user)
         return active_staff, source
     return list(assignable_users), source
+
+
+def _get_queue_staff_from_timesheet(queue, assignable_users):
+    now = timezone.now()
+    weekday = now.weekday()
+    current_hour = now.hour
+
+    shift_rules = {
+        0: range(9, 18),
+        1: range(9, 18),
+        2: range(9, 18),
+        3: range(9, 18),
+        4: range(9, 18),
+        5: range(10, 16),
+        6: range(10, 16),
+    }
+    work_hours = shift_rules.get(weekday, range(9, 18))
+    in_shift = current_hour in work_hours
+
+    active_staff = []
+    if helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION:
+        for user in assignable_users:
+            if user.is_superuser or user.has_perm(queue.permission_name):
+                if in_shift or user.is_superuser:
+                    active_staff.append(user)
+    else:
+        for user in assignable_users:
+            if in_shift or user.is_superuser:
+                active_staff.append(user)
+
+    return active_staff
+
+
+def _get_queue_staff_manual(queue, assignable_users):
+    from django.contrib.auth.models import Permission
+
+    manual_flag_attr = "is_on_shift"
+    active_staff = []
+
+    if helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION:
+        for user in assignable_users:
+            has_perm = user.is_superuser or user.has_perm(queue.permission_name)
+            on_shift = getattr(user, manual_flag_attr, True)
+            if has_perm and on_shift:
+                active_staff.append(user)
+    else:
+        for user in assignable_users:
+            on_shift = getattr(user, manual_flag_attr, True)
+            if on_shift:
+                active_staff.append(user)
+
+    return active_staff
 
 
 def _get_queue_avg_response_time(queue, window_hours=24):
@@ -2297,6 +2356,27 @@ def load_overview(request):
     huser = HelpdeskUser(request.user)
     user_queues = huser.get_queues()
 
+    response_window = request.GET.get("response_window", "24h")
+    if response_window not in ("24h", "7d"):
+        response_window = "24h"
+    response_window_hours = 24 if response_window == "24h" else 24 * 7
+    response_window_label = _("最近 24 小时") if response_window == "24h" else _("滚动 7 天")
+
+    staff_source = request.GET.get("staff_source", "permission")
+    if staff_source not in ("permission", "timesheet", "manual"):
+        staff_source = "permission"
+
+    staff_source_label_map = {
+        "permission": _("权限自动推导"),
+        "timesheet": _("从工时表获取"),
+        "manual": _("手动切换排班"),
+    }
+    staff_source_help_map = {
+        "permission": _("根据【权限自动推导】识别在岗人员：所有激活且拥有该队列权限的客服人员均视为在岗"),
+        "timesheet": _("根据【从工时表获取】识别在岗人员：按当前星期和时间点判断是否在排班表工作时段内（示例：工作日 9:00-18:00，周末 10:00-16:00）"),
+        "manual": _("根据【手动切换排班】识别在岗人员：读取用户 profile 上的 is_on_shift 标志（可由管理员或用户手动切换）"),
+    }
+
     queue_stats = []
     for queue in user_queues:
         backlog = queue.ticket_set.filter(
@@ -2315,8 +2395,11 @@ def load_overview(request):
         avg_response_7d, sample_count_7d = _get_queue_avg_response_time(
             queue, window_hours=24 * 7
         )
+        avg_response_current, sample_count_current = _get_queue_avg_response_time(
+            queue, window_hours=response_window_hours
+        )
 
-        active_staff, staff_source = _get_queue_active_staff(queue, source="permission")
+        active_staff, staff_source_key = _get_queue_active_staff(queue, source=staff_source)
         staff_on_shift = len(active_staff)
 
         queue_stats.append({
@@ -2329,9 +2412,12 @@ def load_overview(request):
             "avg_response_time_7d": avg_response_7d,
             "avg_response_time_7d_formatted": _format_timedelta(avg_response_7d),
             "sample_count_7d": sample_count_7d,
+            "avg_response_time_current": avg_response_current,
+            "avg_response_time_current_formatted": _format_timedelta(avg_response_current),
+            "sample_count_current": sample_count_current,
             "staff_on_shift": staff_on_shift,
             "active_staff": active_staff,
-            "staff_source": staff_source,
+            "staff_source": staff_source_key,
             "backlog_per_staff": round(backlog / staff_on_shift, 1) if staff_on_shift > 0 else 0,
         })
 
@@ -2357,12 +2443,16 @@ def load_overview(request):
         },
     ]
 
-    staff_source_label_map = {
-        "permission": _("权限自动推导"),
-        "timesheet": _("从工时表获取"),
-        "manual": _("手动切换排班"),
-    }
-    current_staff_source = "permission"
+    response_window_options = [
+        {"id": "24h", "label": _("最近 24 小时"), "hours": 24},
+        {"id": "7d", "label": _("滚动 7 天"), "hours": 24 * 7},
+    ]
+
+    staff_source_options = [
+        {"id": "permission", "label": _("权限自动推导"), "icon": "fas fa-shield-alt"},
+        {"id": "timesheet", "label": _("从工时表获取"), "icon": "fas fa-calendar-alt"},
+        {"id": "manual", "label": _("手动切换排班"), "icon": "fas fa-user-check"},
+    ]
 
     context = {
         "queue_stats": queue_stats,
@@ -2370,12 +2460,14 @@ def load_overview(request):
         "total_staff": total_staff,
         "strategy_options": strategy_options,
         "default_strategy": "round_robin",
-        "staff_source_label": staff_source_label_map.get(current_staff_source, current_staff_source),
-        "staff_source_help": _("当前数据源：根据 %s 自动识别在岗人员（所有激活且拥有该队列权限的客服人员）") % staff_source_label_map.get(current_staff_source),
-        "response_time_windows": [
-            {"hours": 24, "label": _("最近 24 小时")},
-            {"hours": 24 * 7, "label": _("滚动 7 天")},
-        ],
+        "response_window": response_window,
+        "response_window_label": response_window_label,
+        "response_window_hours": response_window_hours,
+        "response_window_options": response_window_options,
+        "staff_source": staff_source,
+        "staff_source_label": staff_source_label_map.get(staff_source, staff_source),
+        "staff_source_help": staff_source_help_map.get(staff_source, ""),
+        "staff_source_options": staff_source_options,
     }
 
     if request.method == "POST":
@@ -2556,29 +2648,18 @@ def _redistribute_round_robin(request, unassigned_tickets, assigned_tickets, all
 
     total_tickets = sum(staff_load.values()) + unassigned_tickets.count()
     ideal_per_staff = total_tickets // num_staff if num_staff > 0 else 0
-    max_extra = 1 if num_staff > 0 else 0
 
-    sorted_staff = sorted(
-        all_active_staff,
-        key=lambda s: (staff_load.get(s.id, 0), s.id)
-    )
+    def _min_load_staff():
+        return min(
+            all_active_staff,
+            key=lambda s: (staff_load.get(s.id, 0), s.id)
+        )
 
     reassigned_count = 0
-    current_idx = 0
 
     unassigned_list = list(unassigned_tickets.order_by("-priority", "created"))
     for ticket in unassigned_list:
-        while current_idx < num_staff:
-            target_staff = sorted_staff[current_idx % num_staff]
-            if staff_load.get(target_staff.id, 0) <= ideal_per_staff + max_extra:
-                break
-            current_idx += 1
-        if current_idx >= num_staff:
-            current_idx = 0
-            target_staff = sorted_staff[0]
-        else:
-            target_staff = sorted_staff[current_idx % num_staff]
-
+        target_staff = _min_load_staff()
         ticket.assigned_to = target_staff
         ticket.save()
         ticket.followup_set.create(
@@ -2590,46 +2671,44 @@ def _redistribute_round_robin(request, unassigned_tickets, assigned_tickets, all
             user=request.user,
         )
         staff_load[target_staff.id] = staff_load.get(target_staff.id, 0) + 1
-        sorted_staff = sorted(
-            all_active_staff,
-            key=lambda s: (staff_load.get(s.id, 0), s.id)
-        )
         reassigned_count += 1
-        current_idx += 1
 
     assigned_list = list(assigned_tickets.order_by("-priority", "created"))
-    for ticket in assigned_list:
-        current_count = staff_load.get(ticket.assigned_to_id, 0)
-        min_count = min(staff_load.values()) if staff_load else 0
-        max_count = max(staff_load.values()) if staff_load else 0
+    max_iterations = num_staff * 2
+    iteration = 0
+    changed = True
 
-        if max_count - min_count <= 1:
-            break
+    while changed and iteration < max_iterations:
+        changed = False
+        iteration += 1
+        for ticket in assigned_list:
+            current_count = staff_load.get(ticket.assigned_to_id, 0)
+            min_count = min(staff_load.values()) if staff_load else 0
 
-        max_allowed = ideal_per_staff + max_extra + 1
-        if current_count > max_allowed and current_count > min_count + 1:
-            min_staff = min(
-                all_active_staff,
-                key=lambda s: (staff_load.get(s.id, 0), s.id)
-            )
-            if min_staff.id != ticket.assigned_to_id and staff_load.get(min_staff.id, 0) + 1 <= ideal_per_staff + max_extra:
-                old_owner_id = ticket.assigned_to_id
-                old_owner = ticket.assigned_to
-                ticket.assigned_to = min_staff
-                ticket.save()
-                ticket.followup_set.create(
-                    date=timezone.now(),
-                    title=_("Reassigned from %(old)s to %(new)s via load balancing (Round-Robin)") % {
-                        "old": old_owner.get_username() if old_owner else "Unassigned",
-                        "new": min_staff.get_username(),
-                    },
-                    public=True,
-                    user=request.user,
-                )
-                if old_owner_id:
-                    staff_load[old_owner_id] = staff_load.get(old_owner_id, 0) - 1
-                staff_load[min_staff.id] = staff_load.get(min_staff.id, 0) + 1
-                reassigned_count += 1
+            if current_count - min_count <= 1:
+                continue
+
+            if current_count > ideal_per_staff + 1:
+                min_staff = _min_load_staff()
+                if min_staff.id != ticket.assigned_to_id:
+                    old_owner_id = ticket.assigned_to_id
+                    old_owner = ticket.assigned_to
+                    ticket.assigned_to = min_staff
+                    ticket.save()
+                    ticket.followup_set.create(
+                        date=timezone.now(),
+                        title=_("Reassigned from %(old)s to %(new)s via load balancing (Round-Robin)") % {
+                            "old": old_owner.get_username() if old_owner else "Unassigned",
+                            "new": min_staff.get_username(),
+                        },
+                        public=True,
+                        user=request.user,
+                    )
+                    if old_owner_id:
+                        staff_load[old_owner_id] = staff_load.get(old_owner_id, 0) - 1
+                    staff_load[min_staff.id] = staff_load.get(min_staff.id, 0) + 1
+                    reassigned_count += 1
+                    changed = True
 
     return reassigned_count
 
