@@ -139,6 +139,7 @@ if helpdesk_settings.HELPDESK_UI_ENABLED:
             staff.delete_checklist_template,
             name="delete_checklist_template",
         ),
+        path("load-overview/", staff.load_overview, name="load_overview"),
         re_path(
             r"^datatables_ticket_list/(?P<query>{})$".format(base64_pattern),
             staff.datatables_ticket_list,

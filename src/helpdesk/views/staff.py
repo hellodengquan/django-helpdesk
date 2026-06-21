@@ -2220,3 +2220,414 @@ def delete_checklist_template(request, checklist_template_id):
             "checklist_template": checklist_template,
         },
     )
+
+
+def _get_queue_active_staff(queue):
+    from django.contrib.auth.models import Permission
+    assignable_users = get_assignable_users(
+        helpdesk_settings.HELPDESK_STAFF_ONLY_TICKET_OWNERS
+    )
+    if helpdesk_settings.HELPDESK_ENABLE_PER_QUEUE_STAFF_PERMISSION:
+        active_staff = []
+        for user in assignable_users:
+            if user.is_superuser or user.has_perm(queue.permission_name):
+                active_staff.append(user)
+        return active_staff
+    return list(assignable_users)
+
+
+def _get_queue_avg_response_time(queue):
+    active_tickets = queue.ticket_set.filter(
+        status__in=Ticket.OPEN_STATUSES,
+        on_hold=False,
+    ).exclude(assigned_to__isnull=True)
+    response_times = []
+    for ticket in active_tickets:
+        first_staff_followup = FollowUp.objects.filter(
+            ticket=ticket,
+            user__isnull=False,
+        ).order_by("date").first()
+        if first_staff_followup:
+            delta = first_staff_followup.date - ticket.created
+            response_times.append(delta.total_seconds())
+    if not response_times:
+        return None
+    avg_seconds = sum(response_times) / len(response_times)
+    return timedelta(seconds=avg_seconds)
+
+
+def _get_ticket_sla_remaining(ticket):
+    if not ticket.due_date:
+        return None
+    now = timezone.now()
+    remaining = ticket.due_date - now
+    return remaining
+
+
+def _format_timedelta(td):
+    if td is None:
+        return _("N/A")
+    total_seconds = int(td.total_seconds())
+    if total_seconds < 0:
+        hours = abs(total_seconds) // 3600
+        minutes = (abs(total_seconds) % 3600) // 60
+        return _("Overdue %dh %dm") % (hours, minutes)
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    return "%dh %dm" % (hours, minutes)
+
+
+@helpdesk_staff_member_required
+def load_overview(request):
+    huser = HelpdeskUser(request.user)
+    user_queues = huser.get_queues()
+
+    queue_stats = []
+    for queue in user_queues:
+        backlog = queue.ticket_set.filter(
+            status__in=Ticket.OPEN_STATUSES,
+            on_hold=False,
+        ).count()
+        unassigned_count = queue.ticket_set.filter(
+            status__in=Ticket.OPEN_STATUSES,
+            on_hold=False,
+            assigned_to__isnull=True,
+        ).count()
+        avg_response = _get_queue_avg_response_time(queue)
+        active_staff = _get_queue_active_staff(queue)
+        staff_on_shift = len(active_staff)
+
+        queue_stats.append({
+            "queue": queue,
+            "backlog": backlog,
+            "unassigned_count": unassigned_count,
+            "avg_response_time": avg_response,
+            "avg_response_time_formatted": _format_timedelta(avg_response),
+            "staff_on_shift": staff_on_shift,
+            "active_staff": active_staff,
+            "backlog_per_staff": round(backlog / staff_on_shift, 1) if staff_on_shift > 0 else 0,
+        })
+
+    total_backlog = sum(q["backlog"] for q in queue_stats)
+    total_staff = sum(q["staff_on_shift"] for q in queue_stats)
+
+    if request.method == "POST":
+        selected_queue_ids = request.POST.getlist("queue_ids")
+        strategy = request.POST.get("strategy", "round_robin")
+        return _handle_redistribute(request, selected_queue_ids, strategy, queue_stats)
+
+    return render(
+        request,
+        "helpdesk/load_overview.html",
+        {
+            "queue_stats": queue_stats,
+            "total_backlog": total_backlog,
+            "total_staff": total_staff,
+        },
+    )
+
+
+def _handle_redistribute(request, selected_queue_ids, strategy, queue_stats):
+    from django.db.models import Count
+
+    if not selected_queue_ids:
+        messages = [(_("No queues selected for redistribution."), "warning")]
+        return render(
+            request,
+            "helpdesk/load_overview.html",
+            {
+                "queue_stats": queue_stats,
+                "total_backlog": sum(q["backlog"] for q in queue_stats),
+                "total_staff": sum(q["staff_on_shift"] for q in queue_stats),
+                "messages": messages,
+            },
+        )
+
+    selected_queues = Queue.objects.filter(id__in=selected_queue_ids)
+
+    all_active_staff_set = set()
+    for q in selected_queues:
+        for staff in _get_queue_active_staff(q):
+            all_active_staff_set.add(staff)
+    all_active_staff = list(all_active_staff_set)
+
+    if not all_active_staff:
+        messages = [(_("No active staff available for redistribution."), "error")]
+        return render(
+            request,
+            "helpdesk/load_overview.html",
+            {
+                "queue_stats": queue_stats,
+                "total_backlog": sum(q["backlog"] for q in queue_stats),
+                "total_staff": sum(q["staff_on_shift"] for q in queue_stats),
+                "messages": messages,
+            },
+        )
+
+    tickets_to_redistribute = Ticket.objects.filter(
+        queue__in=selected_queues,
+        status__in=Ticket.OPEN_STATUSES,
+        on_hold=False,
+    )
+
+    redistribution_results = {
+        "round_robin": _("Round-Robin"),
+        "sla_priority": _("SLA Priority"),
+    }
+
+    reassigned_count = 0
+    unassigned_tickets = tickets_to_redistribute.filter(assigned_to__isnull=True)
+    assigned_tickets = tickets_to_redistribute.filter(assigned_to__isnull=False)
+
+    if strategy == "round_robin":
+        reassigned_count = _redistribute_round_robin(
+            request, unassigned_tickets, assigned_tickets, all_active_staff, selected_queues
+        )
+    elif strategy == "sla_priority":
+        reassigned_count = _redistribute_sla_priority(
+            request, unassigned_tickets, assigned_tickets, all_active_staff, selected_queues
+        )
+
+    messages = [(
+        _("%(count)d tickets redistributed successfully using %(strategy)s strategy.") % {
+            "count": reassigned_count,
+            "strategy": redistribution_results.get(strategy, strategy),
+        },
+        "success"
+    )]
+
+    huser = HelpdeskUser(request.user)
+    user_queues = huser.get_queues()
+    queue_stats = []
+    for queue in user_queues:
+        backlog = queue.ticket_set.filter(
+            status__in=Ticket.OPEN_STATUSES,
+            on_hold=False,
+        ).count()
+        unassigned_count = queue.ticket_set.filter(
+            status__in=Ticket.OPEN_STATUSES,
+            on_hold=False,
+            assigned_to__isnull=True,
+        ).count()
+        avg_response = _get_queue_avg_response_time(queue)
+        active_staff = _get_queue_active_staff(queue)
+        staff_on_shift = len(active_staff)
+        queue_stats.append({
+            "queue": queue,
+            "backlog": backlog,
+            "unassigned_count": unassigned_count,
+            "avg_response_time": avg_response,
+            "avg_response_time_formatted": _format_timedelta(avg_response),
+            "staff_on_shift": staff_on_shift,
+            "active_staff": active_staff,
+            "backlog_per_staff": round(backlog / staff_on_shift, 1) if staff_on_shift > 0 else 0,
+        })
+
+    return render(
+        request,
+        "helpdesk/load_overview.html",
+        {
+            "queue_stats": queue_stats,
+            "total_backlog": sum(q["backlog"] for q in queue_stats),
+            "total_staff": sum(q["staff_on_shift"] for q in queue_stats),
+            "messages": messages,
+        },
+    )
+
+
+def _get_staff_ticket_counts(staff_list, tickets_queryset):
+    staff_counts = {}
+    for staff in staff_list:
+        staff_counts[staff.id] = 0
+    for ticket in tickets_queryset.filter(assigned_to__in=staff_list):
+        if ticket.assigned_to_id in staff_counts:
+            staff_counts[ticket.assigned_to_id] += 1
+    return staff_counts
+
+
+def _redistribute_round_robin(request, unassigned_tickets, assigned_tickets, all_active_staff, selected_queues):
+    from django.db.models import Count
+
+    staff_by_id = {s.id: s for s in all_active_staff}
+    num_staff = len(all_active_staff)
+    if num_staff == 0:
+        return 0
+
+    all_related_tickets = Ticket.objects.filter(
+        queue__in=selected_queues,
+        status__in=Ticket.OPEN_STATUSES,
+        on_hold=False,
+        assigned_to__isnull=False,
+    )
+    staff_load = _get_staff_ticket_counts(all_active_staff, all_related_tickets)
+
+    total_tickets = sum(staff_load.values()) + unassigned_tickets.count()
+    ideal_per_staff = total_tickets // num_staff if num_staff > 0 else 0
+    max_extra = 1 if num_staff > 0 else 0
+
+    sorted_staff = sorted(
+        all_active_staff,
+        key=lambda s: (staff_load.get(s.id, 0), s.id)
+    )
+
+    reassigned_count = 0
+    current_idx = 0
+
+    unassigned_list = list(unassigned_tickets.order_by("-priority", "created"))
+    for ticket in unassigned_list:
+        while current_idx < num_staff:
+            target_staff = sorted_staff[current_idx % num_staff]
+            if staff_load.get(target_staff.id, 0) <= ideal_per_staff + max_extra:
+                break
+            current_idx += 1
+        if current_idx >= num_staff:
+            current_idx = 0
+            target_staff = sorted_staff[0]
+        else:
+            target_staff = sorted_staff[current_idx % num_staff]
+
+        ticket.assigned_to = target_staff
+        ticket.save()
+        ticket.followup_set.create(
+            date=timezone.now(),
+            title=_("Assigned to %(username)s via load balancing (Round-Robin)") % {
+                "username": target_staff.get_username()
+            },
+            public=True,
+            user=request.user,
+        )
+        staff_load[target_staff.id] = staff_load.get(target_staff.id, 0) + 1
+        sorted_staff = sorted(
+            all_active_staff,
+            key=lambda s: (staff_load.get(s.id, 0), s.id)
+        )
+        reassigned_count += 1
+        current_idx += 1
+
+    assigned_list = list(assigned_tickets.order_by("-priority", "created"))
+    for ticket in assigned_list:
+        current_count = staff_load.get(ticket.assigned_to_id, 0)
+        min_count = min(staff_load.values()) if staff_load else 0
+        max_count = max(staff_load.values()) if staff_load else 0
+
+        if max_count - min_count <= 1:
+            break
+
+        max_allowed = ideal_per_staff + max_extra + 1
+        if current_count > max_allowed and current_count > min_count + 1:
+            min_staff = min(
+                all_active_staff,
+                key=lambda s: (staff_load.get(s.id, 0), s.id)
+            )
+            if min_staff.id != ticket.assigned_to_id and staff_load.get(min_staff.id, 0) + 1 <= ideal_per_staff + max_extra:
+                old_owner_id = ticket.assigned_to_id
+                old_owner = ticket.assigned_to
+                ticket.assigned_to = min_staff
+                ticket.save()
+                ticket.followup_set.create(
+                    date=timezone.now(),
+                    title=_("Reassigned from %(old)s to %(new)s via load balancing (Round-Robin)") % {
+                        "old": old_owner.get_username() if old_owner else "Unassigned",
+                        "new": min_staff.get_username(),
+                    },
+                    public=True,
+                    user=request.user,
+                )
+                if old_owner_id:
+                    staff_load[old_owner_id] = staff_load.get(old_owner_id, 0) - 1
+                staff_load[min_staff.id] = staff_load.get(min_staff.id, 0) + 1
+                reassigned_count += 1
+
+    return reassigned_count
+
+
+def _redistribute_sla_priority(request, unassigned_tickets, assigned_tickets, all_active_staff, selected_queues):
+    from django.db.models import Count
+
+    staff_by_id = {s.id: s for s in all_active_staff}
+
+    all_related_tickets = Ticket.objects.filter(
+        queue__in=selected_queues,
+        status__in=Ticket.OPEN_STATUSES,
+        on_hold=False,
+        assigned_to__isnull=False,
+    )
+    staff_load = _get_staff_ticket_counts(all_active_staff, all_related_tickets)
+
+    def sort_key_sla(ticket):
+        sla_remaining = _get_ticket_sla_remaining(ticket)
+        if sla_remaining is None:
+            return (2, ticket.priority, ticket.created)
+        total_seconds = int(sla_remaining.total_seconds())
+        if total_seconds < 0:
+            return (0, abs(total_seconds), ticket.priority, ticket.created)
+        return (1, total_seconds, ticket.priority, ticket.created)
+
+    all_priority_tickets = list(unassigned_tickets) + list(assigned_tickets)
+    all_priority_tickets.sort(key=sort_key_sla)
+
+    reassigned_count = 0
+
+    for ticket in all_priority_tickets:
+        sorted_staff = sorted(
+            all_active_staff,
+            key=lambda s: (staff_load.get(s.id, 0), s.id)
+        )
+        target_staff = sorted_staff[0]
+
+        current_owner_id = ticket.assigned_to_id if ticket.assigned_to else None
+
+        if current_owner_id is None:
+            ticket.assigned_to = target_staff
+            ticket.save()
+            ticket.followup_set.create(
+                date=timezone.now(),
+                title=_("Assigned to %(username)s via load balancing (SLA Priority)") % {
+                    "username": target_staff.get_username()
+                },
+                public=True,
+                user=request.user,
+            )
+            staff_load[target_staff.id] = staff_load.get(target_staff.id, 0) + 1
+            reassigned_count += 1
+        else:
+            current_count = staff_load.get(current_owner_id, 0)
+            min_count = min(staff_load.values()) if staff_load else 0
+            sla_remaining = _get_ticket_sla_remaining(ticket)
+            is_urgent = sla_remaining is not None and int(sla_remaining.total_seconds()) < 3600
+
+            if is_urgent and target_staff.id != current_owner_id:
+                if staff_load.get(target_staff.id, 0) + 1 <= current_count or current_count > min_count + 1:
+                    old_owner = ticket.assigned_to
+                    ticket.assigned_to = target_staff
+                    ticket.save()
+                    ticket.followup_set.create(
+                        date=timezone.now(),
+                        title=_("Reassigned from %(old)s to %(new)s via load balancing (SLA Priority - Urgent)") % {
+                            "old": old_owner.get_username() if old_owner else "Unassigned",
+                            "new": target_staff.get_username(),
+                        },
+                        public=True,
+                        user=request.user,
+                    )
+                    staff_load[current_owner_id] = staff_load.get(current_owner_id, 0) - 1
+                    staff_load[target_staff.id] = staff_load.get(target_staff.id, 0) + 1
+                    reassigned_count += 1
+            elif current_count > min_count + 2 and target_staff.id != current_owner_id:
+                old_owner = ticket.assigned_to
+                ticket.assigned_to = target_staff
+                ticket.save()
+                ticket.followup_set.create(
+                    date=timezone.now(),
+                    title=_("Reassigned from %(old)s to %(new)s via load balancing (SLA Priority)") % {
+                        "old": old_owner.get_username() if old_owner else "Unassigned",
+                        "new": target_staff.get_username(),
+                    },
+                    public=True,
+                    user=request.user,
+                )
+                staff_load[current_owner_id] = staff_load.get(current_owner_id, 0) - 1
+                staff_load[target_staff.id] = staff_load.get(target_staff.id, 0) + 1
+                reassigned_count += 1
+
+    return reassigned_count
