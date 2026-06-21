@@ -63,6 +63,7 @@ def _extract_error_code(error_message, protocol):
     if not error_message:
         return None
     import re
+    http_match = re.search(r"\b(4\d{2}|5\d{2})\b", error_message)
     if protocol in (EmailLog.PROTOCOL_SMTP,):
         smtp_match = re.search(r"\b([45]\d{2})\b", error_message)
         if smtp_match:
@@ -74,7 +75,38 @@ def _extract_error_code(error_message, protocol):
         num_match = re.search(r"\[(\w+)\]", error_message)
         if num_match:
             return num_match.group(1)
+    ssl_match = re.search(
+        r"(SSL_ERROR_\w+|TLSV1_ALERT_\w+|CERTIFICATE_\w+|SSLError|SSL:\s*\w+)",
+        error_message,
+        re.IGNORECASE,
+    )
+    if ssl_match:
+        return ssl_match.group(1)
+    dns_match = re.search(
+        r"(NXDOMAIN|SERVFAIL|HOST_NOT_FOUND|NO_ADDRESS|TRY_AGAIN|DNS_ERROR)",
+        error_message,
+        re.IGNORECASE,
+    )
+    if dns_match:
+        return dns_match.group(1).upper()
     return None
+
+
+def _extract_headers(raw_message):
+    if not raw_message:
+        return None, None
+    import re
+    reply_to = None
+    cc = None
+    reply_match = re.search(r"(?im)^Reply-To:\s*(.+?)(?:\r?\n\s|\r?\n\r?\n|$)", raw_message)
+    if reply_match:
+        reply_to = reply_match.group(1).strip()
+        if len(reply_to) > 512:
+            reply_to = reply_to[:512]
+    cc_match = re.search(r"(?im)^Cc:\s*(.+?)(?:\r?\n\s|\r?\n\r?\n|$)", raw_message)
+    if cc_match:
+        cc = cc_match.group(1).strip()
+    return reply_to, cc
 
 
 def _log_incoming_email(
@@ -99,6 +131,7 @@ def _log_incoming_email(
             raw_message_excerpt = raw_message_excerpt[:2000]
         if not error_code and error_message:
             error_code = _extract_error_code(error_message, protocol)
+        reply_to, cc = _extract_headers(raw_message_excerpt)
         EmailLog.log_incoming(
             queue=queue,
             status=status,
@@ -107,6 +140,8 @@ def _log_incoming_email(
             message_id=message_id,
             subject=subject[:255] if subject and len(subject) > 255 else subject,
             sender=sender,
+            reply_to=reply_to,
+            cc=cc,
             is_bounce=is_bounce,
             bounce_reason=bounce_reason,
             attachment_count=attachment_count,
@@ -134,6 +169,8 @@ def _log_outgoing_email(
     raw_message_excerpt=None,
     protocol=EmailLog.PROTOCOL_SMTP,
     error_code=None,
+    reply_to=None,
+    cc=None,
 ):
     try:
         if raw_message_excerpt and len(raw_message_excerpt) > 2000:
@@ -148,6 +185,8 @@ def _log_outgoing_email(
             message_id=message_id,
             subject=subject[:255] if subject and len(subject) > 255 else subject,
             recipient=recipient,
+            reply_to=reply_to,
+            cc=cc,
             is_bounce=is_bounce,
             bounce_reason=bounce_reason,
             attachment_count=attachment_count,

@@ -2226,6 +2226,8 @@ def delete_checklist_template(request, checklist_template_id):
 def email_diagnostic(request):
     from collections import defaultdict, Counter
     from datetime import timedelta
+    from django.conf import settings
+    from django.utils import timezone as django_timezone
     from helpdesk.models import EmailLog, Queue
 
     days = int(request.GET.get("days", 7))
@@ -2246,6 +2248,11 @@ def email_diagnostic(request):
     total_outgoing = all_logs.filter(direction=EmailLog.DIRECTION_OUTGOING).count()
     total_failed = all_logs.filter(status=EmailLog.STATUS_FAILED).count()
     total_ignored = all_logs.filter(status=EmailLog.STATUS_IGNORED).count()
+
+    timezone_name = getattr(settings, "TIME_ZONE", "UTC")
+    current_tz = django_timezone.get_current_timezone_name() if django_timezone.is_naive(now()) else timezone_name
+    use_tz = getattr(settings, "USE_TZ", False)
+    timezone_display = f"{current_tz} (Django USE_TZ={'enabled' if use_tz else 'disabled'})"
 
     daily_data = []
     for i in range(days):
@@ -2299,17 +2306,21 @@ def email_diagnostic(request):
         if protocol_failed.exists():
             error_code_counter = Counter()
             error_type_counter = Counter()
+            category_counter = Counter()
             for log in protocol_failed:
                 if log.error_code:
                     error_code_counter[log.error_code] += 1
                 if log.error_type and log.error_type != EmailLog.ERROR_TYPE_NONE:
                     error_type_counter[log.get_error_type_display()] += 1
+                if log.error_code_category and log.error_code_category != EmailLog.ERROR_CODE_CATEGORY_UNKNOWN:
+                    category_counter[log.get_error_code_category_display()] += 1
             protocol_error_stats.append({
                 "protocol": protocol,
                 "label": protocol_label,
                 "total_failed": protocol_failed.count(),
                 "error_codes": error_code_counter.most_common(10),
                 "error_types": error_type_counter.most_common(10),
+                "categories": category_counter.most_common(5),
             })
     protocol_error_stats.sort(key=lambda x: x["total_failed"], reverse=True)
 
@@ -2328,16 +2339,42 @@ def email_diagnostic(request):
     failed_with_code = failed_logs.exclude(error_code__isnull=True).exclude(error_code="")
     error_code_counter = Counter()
     for log in failed_with_code:
-        key = (log.protocol, log.error_code)
+        key = (log.protocol, log.error_code, log.error_code_category)
         error_code_counter[key] += 1
-    for (protocol, code), count in error_code_counter.most_common(20):
+    for (protocol, code, category), count in error_code_counter.most_common(20):
         protocol_label = dict(EmailLog.PROTOCOL_CHOICES).get(protocol, protocol)
+        category_label = dict(EmailLog.ERROR_CODE_CATEGORY_CHOICES).get(category, category)
+        code_desc = None
+        if category == EmailLog.ERROR_CODE_CATEGORY_SMTP:
+            code_desc = EmailLog.SMTP_ENHANCED_STATUS_CODES.get(code)
         error_code_stats.append({
             "protocol": protocol,
             "protocol_label": protocol_label,
             "error_code": code,
+            "category": category,
+            "category_label": category_label,
+            "description": code_desc,
             "count": count,
         })
+
+    error_code_category_stats = []
+    for cat, cat_label in EmailLog.ERROR_CODE_CATEGORY_CHOICES:
+        cat_logs = failed_logs.filter(error_code_category=cat)
+        cat_count = cat_logs.count()
+        if cat_count > 0:
+            top_codes = []
+            code_counter = Counter()
+            for log in cat_logs:
+                if log.error_code:
+                    code_counter[log.error_code] += 1
+            top_codes = code_counter.most_common(5)
+            error_code_category_stats.append({
+                "category": cat,
+                "label": cat_label,
+                "count": cat_count,
+                "top_codes": top_codes,
+            })
+    error_code_category_stats.sort(key=lambda x: x["count"], reverse=True)
 
     incoming_errors = all_logs.filter(
         direction=EmailLog.DIRECTION_INCOMING,
@@ -2384,7 +2421,11 @@ def email_diagnostic(request):
         "error_type_stats": error_type_stats,
         "protocol_error_stats": protocol_error_stats,
         "error_code_stats": error_code_stats,
+        "error_code_category_stats": error_code_category_stats,
         "fetch_type_stats": fetch_type_stats,
+        "timezone_display": timezone_display,
+        "timezone_name": timezone_name,
+        "use_tz": use_tz,
         "incoming_errors": incoming_errors,
         "outgoing_errors": outgoing_errors,
         "bounce_samples": bounce_samples,

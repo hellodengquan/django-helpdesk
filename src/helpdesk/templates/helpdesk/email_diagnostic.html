@@ -22,6 +22,18 @@
     The default fetch mechanism is <strong>scheduled polling</strong> — the system checks each queue's mailbox at the configured interval.
     Email addresses in sample displays are masked to protect privacy.
     {% endblocktrans %}
+    <hr>
+    <i class="fas fa-globe-americas"></i>
+    <strong>{% trans "Time Zone:" %}</strong>
+    <code>{{ timezone_display }}</code>
+    {% if use_tz %}
+    <span class="badge badge-info ml-2">{% trans "Django USE_TZ=enabled (times converted to admin's local time for display)" %}</span>
+    {% else %}
+    <span class="badge badge-warning ml-2">{% trans "Django USE_TZ=disabled (displaying raw UTC or server local time)" %}</span>
+    {% endif %}
+    <small class="form-text text-muted mt-1">
+        {% trans "All timestamps above use Django's current timezone. Database stores in UTC when USE_TZ is enabled." %}
+    </small>
 </div>
 
 <div class="mb-3">
@@ -92,7 +104,7 @@
         <i class="fas fa-sync"></i>
         {% trans "Fetch Type Distribution" %}
         <small class="text-muted ml-2">
-            {% blocktrans %}How incoming emails were collected: polling (scheduled), event-triggered, or manually.{% endblocktrans %}
+            {% blocktrans %}How incoming emails were collected: polling (scheduled), event-triggered, or manually. Timestamps shown in {{ timezone_display }}.{% endblocktrans %}
         </small>
     </div>
     <div class="card-body">
@@ -125,6 +137,9 @@
     <div class="card-header">
         <i class="fas fa-chart-bar"></i>
         {% trans "Daily Email Volume" %}
+        <small class="text-muted ml-2">
+            <i class="fas fa-clock"></i> {% trans "Dates in" %} {{ timezone_display }}
+        </small>
     </div>
     <div class="card-body">
         <div class="table-responsive">
@@ -225,7 +240,7 @@
             <div class="card-header">
                 <i class="fas fa-hashtag"></i>
                 {% trans "Top Error Codes" %}
-                <small class="text-muted ml-2">{% trans "Grouped by protocol" %}</small>
+                <small class="text-muted ml-2">{% trans "With category classification" %}</small>
             </div>
             <div class="card-body">
                 {% if error_code_stats %}
@@ -234,6 +249,7 @@
                         <thead>
                             <tr>
                                 <th>{% trans "Protocol" %}</th>
+                                <th>{% trans "Category" %}</th>
                                 <th>{% trans "Error Code" %}</th>
                                 <th>{% trans "Count" %}</th>
                             </tr>
@@ -246,7 +262,19 @@
                                         {{ ec.protocol_label }}
                                     </span>
                                 </td>
-                                <td><code>{{ ec.error_code }}</code></td>
+                                <td>
+                                    <span class="badge badge-{% if ec.category == 'smtp' %}danger{% elif ec.category == 'imap' %}info{% elif ec.category == 'pop3' %}secondary{% elif ec.category == 'http' %}warning{% elif ec.category == 'ssl' %}dark{% elif ec.category == 'dns' %}primary{% elif ec.category == 'custom' %}info{% else %}light text-dark{% endif %}">
+                                        {{ ec.category_label }}
+                                    </span>
+                                </td>
+                                <td>
+                                    <div>
+                                        <code>{{ ec.error_code }}</code>
+                                    </div>
+                                    {% if ec.description %}
+                                    <small class="text-muted">{{ ec.description }}</small>
+                                    {% endif %}
+                                </td>
                                 <td><strong>{{ ec.count }}</strong></td>
                             </tr>
                             {% endfor %}
@@ -260,6 +288,57 @@
         </div>
     </div>
 </div>
+
+{% if error_code_category_stats %}
+<div class="card mb-4">
+    <div class="card-header">
+        <i class="fas fa-layer-group"></i>
+        {% trans "Error Code Categories" %}
+        <small class="text-muted ml-2">{% trans "SMTP status codes vs IMAP/POP3 responses vs HTTP/SSL/DNS/custom enumerations" %}</small>
+    </div>
+    <div class="card-body">
+        <div class="row">
+            {% for cat in error_code_category_stats %}
+            <div class="col-lg-3 col-md-6 mb-4">
+                <div class="card border-{% if cat.category == 'smtp' %}danger{% elif cat.category == 'imap' %}info{% elif cat.category == 'pop3' %}secondary{% elif cat.category == 'http' %}warning{% elif cat.category == 'ssl' %}dark{% elif cat.category == 'dns' %}primary{% elif cat.category == 'custom' %}info{% else %}light{% endif %} h-100">
+                    <div class="card-header bg-{% if cat.category == 'smtp' %}danger{% elif cat.category == 'imap' %}info{% elif cat.category == 'pop3' %}secondary{% elif cat.category == 'http' %}warning{% elif cat.category == 'ssl' %}dark{% elif cat.category == 'dns' %}primary{% elif cat.category == 'custom' %}info{% else %}light text-dark{% endif %} text-white">
+                        <i class="fas fa-{% if cat.category == 'smtp' %}paper-plane{% elif cat.category == 'imap' or cat.category == 'pop3' %}inbox{% elif cat.category == 'http' %}globe{% elif cat.category == 'ssl' %}lock{% elif cat.category == 'dns' %}network-wired{% elif cat.category == 'custom' %}tags{% else %}question-circle{% endif %}"></i>
+                        <strong>{{ cat.label }}</strong>
+                        <span class="badge badge-light ml-2">{{ cat.count }}</span>
+                    </div>
+                    <div class="card-body">
+                        {% if cat.top_codes %}
+                        <h6 class="mt-1">{% trans "Top Codes" %}</h6>
+                        <ul class="list-group list-group-flush">
+                            {% for code, cnt in cat.top_codes %}
+                            <li class="list-group-item d-flex justify-content-between align-items-center px-0 py-1">
+                                <div>
+                                    <code>{{ code }}</code>
+                                    {% if cat.category == 'smtp' %}
+                                        {% if code == '550' %}<small class="text-muted d-block">Mailbox unavailable</small>
+                                        {% elif code == '535' %}<small class="text-muted d-block">Auth credentials invalid</small>
+                                        {% elif code == '554' %}<small class="text-muted d-block">Transaction failed</small>
+                                        {% elif code == '421' %}<small class="text-muted d-block">Service unavailable</small>
+                                        {% elif code == '501' %}<small class="text-muted d-block">Syntax error in args</small>
+                                        {% elif code == '552' %}<small class="text-muted d-block">Exceeded storage</small>
+                                        {% endif %}
+                                    {% endif %}
+                                </div>
+                                <span class="badge badge-{% if cat.category == 'smtp' %}danger{% elif cat.category == 'imap' %}info{% elif cat.category == 'pop3' %}secondary{% elif cat.category == 'http' %}warning{% elif cat.category == 'ssl' %}dark{% elif cat.category == 'dns' %}primary{% elif cat.category == 'custom' %}info{% else %}light{% endif %} badge-pill">{{ cnt }}</span>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                        {% else %}
+                        <p class="text-muted small mb-0">{% trans "No specific codes for this category yet." %}</p>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+{% endif %}
 
 {% if protocol_error_stats %}
 <div class="card mb-4">
@@ -279,6 +358,17 @@
                         <span class="badge badge-light ml-2">{{ ps.total_failed }} {% trans "failed" %}</span>
                     </div>
                     <div class="card-body">
+                        {% if ps.categories %}
+                        <h6>{% trans "Code Categories" %}</h6>
+                        <ul class="list-group list-group-flush mb-2">
+                            {% for cname, ccnt in ps.categories %}
+                            <li class="list-group-item d-flex justify-content-between align-items-center px-0 py-1">
+                                <span class="small">{{ cname }}</span>
+                                <span class="badge badge-info badge-pill">{{ ccnt }}</span>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                        {% endif %}
                         {% if ps.error_codes %}
                         <h6 class="mt-2">{% trans "Top Error Codes" %}</h6>
                         <ul class="list-group list-group-flush mb-3">
@@ -315,7 +405,7 @@
         <i class="fas fa-server"></i>
         {% trans "Queue Email Status" %}
         <small class="text-muted ml-2">
-            {% blocktrans %}Each queue is polled at its configured interval (minutes).{% endblocktrans %}
+            {% blocktrans %}Each queue is polled at its configured interval (minutes). Last check times shown in {{ timezone_display }}.{% endblocktrans %}
         </small>
     </div>
     <div class="card-body">
@@ -347,6 +437,7 @@
                         <td>
                             {% if qs.last_check %}
                                 {{ qs.last_check|date:"Y-m-d H:i" }}
+                                <small class="text-muted d-block">{% trans "TZ:" %} {{ timezone_display|truncatechars:20 }}</small>
                             {% else %}
                                 <span class="text-warning">{% trans "Never" %}</span>
                             {% endif %}
@@ -394,9 +485,10 @@
                         <th>{% trans "Time" %}</th>
                         <th>{% trans "Queue" %}</th>
                         <th>{% trans "Protocol" %}</th>
+                        <th>{% trans "Category" %}</th>
                         <th>{% trans "Error Code" %}</th>
                         <th>{% trans "Error Type" %}</th>
-                        <th>{% trans "Sender" %}</th>
+                        <th>{% trans "Sender / Reply-To / CC" %}</th>
                         <th>{% trans "Error Message" %}</th>
                         <th>{% trans "Actions" %}</th>
                     </tr>
@@ -404,7 +496,7 @@
                 <tbody>
                     {% for log in incoming_errors %}
                     <tr>
-                        <td>{{ log.timestamp|date:"Y-m-d H:i:s" }}</td>
+                        <td>{{ log.timestamp|date:"Y-m-d H:i:s" }}<small class="text-muted d-block">{{ timezone_name }}</small></td>
                         <td>{{ log.queue.title|default:"-" }}</td>
                         <td>
                             {% if log.get_protocol_display %}
@@ -414,8 +506,20 @@
                             {% endif %}
                         </td>
                         <td>
+                            {% if log.get_error_code_category_display and log.error_code_category != 'unknown' %}
+                                <span class="badge badge-light">{{ log.get_error_code_category_display|truncatechars:16 }}</span>
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                        <td>
                             {% if log.error_code %}
-                                <code>{{ log.error_code }}</code>
+                                <div>
+                                    <code>{{ log.error_code }}</code>
+                                </div>
+                                {% if log.error_code_description %}
+                                    <small class="text-muted">{{ log.error_code_description|truncatechars:30 }}</small>
+                                {% endif %}
                             {% else %}
                                 -
                             {% endif %}
@@ -425,8 +529,15 @@
                         </td>
                         <td>
                             {% if log.sender_masked %}
-                                {{ log.sender_masked }}
-                            {% else %}
+                                <div><strong>{% trans "From:" %}</strong> {{ log.sender_masked|truncatechars:30 }}</div>
+                            {% endif %}
+                            {% if log.reply_to_masked %}
+                                <div class="small text-muted"><strong>RT:</strong> {{ log.reply_to_masked|truncatechars:30 }}</div>
+                            {% endif %}
+                            {% if log.cc_masked %}
+                                <div class="small text-muted"><strong>CC:</strong> {{ log.cc_masked|truncatechars:30 }}</div>
+                            {% endif %}
+                            {% if not log.sender_masked and not log.reply_to_masked and not log.cc_masked %}
                                 -
                             {% endif %}
                         </td>
@@ -454,8 +565,18 @@
                                         <div class="modal-body">
                                             <div class="alert alert-warning" role="alert">
                                                 <i class="fas fa-eye-slash"></i>
-                                                {% trans "Email addresses in this view are masked to protect privacy." %}
+                                                {% trans "All email addresses (From, To, Reply-To, CC, BCC) are masked in this view to protect privacy." %}
                                             </div>
+                                            {% if log.reply_to_masked or log.cc_masked %}
+                                            <div class="card mb-3">
+                                                <div class="card-header small">{% trans "Header Recipients (masked)" %}</div>
+                                                <div class="card-body small">
+                                                    {% if log.sender_masked %}<div><strong>From:</strong> {{ log.sender_masked }}</div>{% endif %}
+                                                    {% if log.reply_to_masked %}<div><strong>Reply-To:</strong> {{ log.reply_to_masked }}</div>{% endif %}
+                                                    {% if log.cc_masked %}<div><strong>CC:</strong> {{ log.cc_masked }}</div>{% endif %}
+                                                </div>
+                                            </div>
+                                            {% endif %}
                                             <pre class="bg-light p-3 rounded"><code>{{ log.raw_message_excerpt_masked|escape }}</code></pre>
                                         </div>
                                     </div>
@@ -487,8 +608,9 @@
                     <tr>
                         <th>{% trans "Time" %}</th>
                         <th>{% trans "Queue" %}</th>
+                        <th>{% trans "Category" %}</th>
                         <th>{% trans "Error Code" %}</th>
-                        <th>{% trans "Recipient" %}</th>
+                        <th>{% trans "Recipient / Reply-To / CC" %}</th>
                         <th>{% trans "Subject" %}</th>
                         <th>{% trans "Error Type" %}</th>
                         <th>{% trans "Error Message" %}</th>
@@ -497,16 +619,41 @@
                 <tbody>
                     {% for log in outgoing_errors %}
                     <tr>
-                        <td>{{ log.timestamp|date:"Y-m-d H:i:s" }}</td>
+                        <td>{{ log.timestamp|date:"Y-m-d H:i:s" }}<small class="text-muted d-block">{{ timezone_name }}</small></td>
                         <td>{{ log.queue.title|default:"-" }}</td>
                         <td>
-                            {% if log.error_code %}
-                                <code class="text-danger">{{ log.error_code }}</code>
+                            {% if log.get_error_code_category_display and log.error_code_category != 'unknown' %}
+                                <span class="badge badge-light">{{ log.get_error_code_category_display|truncatechars:16 }}</span>
                             {% else %}
                                 -
                             {% endif %}
                         </td>
-                        <td>{{ log.recipient_masked|default:"-"|truncatechars:30 }}</td>
+                        <td>
+                            {% if log.error_code %}
+                                <div>
+                                    <code class="text-danger">{{ log.error_code }}</code>
+                                </div>
+                                {% if log.error_code_description %}
+                                    <small class="text-muted">{{ log.error_code_description|truncatechars:30 }}</small>
+                                {% endif %}
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if log.recipient_masked %}
+                                <div><strong>{% trans "To:" %}</strong> {{ log.recipient_masked|truncatechars:30 }}</div>
+                            {% endif %}
+                            {% if log.reply_to_masked %}
+                                <div class="small text-muted"><strong>RT:</strong> {{ log.reply_to_masked|truncatechars:30 }}</div>
+                            {% endif %}
+                            {% if log.cc_masked %}
+                                <div class="small text-muted"><strong>CC:</strong> {{ log.cc_masked|truncatechars:30 }}</div>
+                            {% endif %}
+                            {% if not log.recipient_masked and not log.reply_to_masked and not log.cc_masked %}
+                                -
+                            {% endif %}
+                        </td>
                         <td>{{ log.subject|truncatechars:40 }}</td>
                         <td>
                             <span class="badge badge-danger">{{ log.get_error_type_display }}</span>
@@ -529,7 +676,7 @@
         {% trans "SMTP Bounce Samples" %}
         <small class="text-muted ml-2">
             <i class="fas fa-eye-slash"></i>
-            {% trans "Email addresses are masked for privacy" %}
+            {% trans "All addresses (To, From, Reply-To, CC) masked for privacy" %}
         </small>
     </div>
     <div class="card-body">
@@ -541,7 +688,7 @@
                         <th>{% trans "Time" %}</th>
                         <th>{% trans "Direction" %}</th>
                         <th>{% trans "Protocol" %}</th>
-                        <th>{% trans "Recipient/Sender" %}</th>
+                        <th>{% trans "Recipient/Sender + RT/CC" %}</th>
                         <th>{% trans "Bounce Reason" %}</th>
                         <th>{% trans "Subject" %}</th>
                     </tr>
@@ -549,7 +696,7 @@
                 <tbody>
                     {% for log in bounce_samples %}
                     <tr>
-                        <td>{{ log.timestamp|date:"Y-m-d H:i:s" }}</td>
+                        <td>{{ log.timestamp|date:"Y-m-d H:i:s" }}<small class="text-muted d-block">{{ timezone_name }}</small></td>
                         <td>
                             {% if log.direction == 'incoming' %}
                                 <span class="badge badge-info">{% trans "Incoming" %}</span>
@@ -564,7 +711,15 @@
                                 -
                             {% endif %}
                         </td>
-                        <td>{{ log.recipient_masked|default:log.sender_masked|truncatechars:40 }}</td>
+                        <td>
+                            <div>{{ log.recipient_masked|default:log.sender_masked|truncatechars:40 }}</div>
+                            {% if log.reply_to_masked %}
+                                <div class="small text-muted"><strong>RT:</strong> {{ log.reply_to_masked|truncatechars:30 }}</div>
+                            {% endif %}
+                            {% if log.cc_masked %}
+                                <div class="small text-muted"><strong>CC:</strong> {{ log.cc_masked|truncatechars:30 }}</div>
+                            {% endif %}
+                        </td>
                         <td>{{ log.bounce_reason_masked|default:"-"|truncatechars:60 }}</td>
                         <td>{{ log.subject|truncatechars:40 }}</td>
                     </tr>
@@ -582,6 +737,9 @@
     <div class="card-header">
         <i class="fas fa-history"></i>
         {% trans "Recent Email Activity Log" %} ({% trans "last 50 entries" %})
+        <small class="text-muted ml-2">
+            <i class="fas fa-clock"></i> {% trans "Timestamps in" %} {{ timezone_display|truncatechars:30 }}
+        </small>
     </div>
     <div class="card-body">
         {% if recent_logs %}
@@ -595,7 +753,7 @@
                         <th>{% trans "Fetch" %}</th>
                         <th>{% trans "Status" %}</th>
                         <th>{% trans "Queue" %}</th>
-                        <th>{% trans "Subject/Sender" %}</th>
+                        <th>{% trans "Subject / From / To / RT" %}</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -643,9 +801,25 @@
                         <td class="small">{{ log.queue.title|default:"-" }}</td>
                         <td class="small">
                             {% if log.subject %}
-                                {{ log.subject|truncatechars:40 }}
-                            {% else %}
-                                {{ log.sender_masked|default:log.recipient_masked|truncatechars:30 }}
+                                <div class="font-weight-bold">{{ log.subject|truncatechars:40 }}</div>
+                            {% endif %}
+                            {% if log.sender_masked or log.recipient_masked %}
+                                <div class="text-muted">
+                                    {% if log.direction == 'incoming' %}
+                                        {% trans "From:" %} {{ log.sender_masked|default:"-"|truncatechars:25 }}
+                                    {% else %}
+                                        {% trans "To:" %} {{ log.recipient_masked|default:"-"|truncatechars:25 }}
+                                    {% endif %}
+                                    {% if log.reply_to_masked %}
+                                        | RT: {{ log.reply_to_masked|truncatechars:20 }}
+                                    {% endif %}
+                                    {% if log.cc_masked %}
+                                        | CC: {{ log.cc_masked|truncatechars:20 }}
+                                    {% endif %}
+                                </div>
+                            {% endif %}
+                            {% if not log.subject and not log.sender_masked and not log.recipient_masked %}
+                                -
                             {% endif %}
                         </td>
                     </tr>

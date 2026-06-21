@@ -2346,6 +2346,44 @@ class EmailLog(models.Model):
         (FETCH_TYPE_MANUAL, _("Manual Trigger")),
     )
 
+    ERROR_CODE_CATEGORY_SMTP = "smtp"
+    ERROR_CODE_CATEGORY_IMAP = "imap"
+    ERROR_CODE_CATEGORY_POP3 = "pop3"
+    ERROR_CODE_CATEGORY_HTTP = "http"
+    ERROR_CODE_CATEGORY_SSL = "ssl"
+    ERROR_CODE_CATEGORY_DNS = "dns"
+    ERROR_CODE_CATEGORY_CUSTOM = "custom"
+    ERROR_CODE_CATEGORY_UNKNOWN = "unknown"
+    ERROR_CODE_CATEGORY_CHOICES = (
+        (ERROR_CODE_CATEGORY_SMTP, _("SMTP Status Code (4xx/5xx)")),
+        (ERROR_CODE_CATEGORY_IMAP, _("IMAP Response Code (NO/BAD/BYE)")),
+        (ERROR_CODE_CATEGORY_POP3, _("POP3 Response Code (ERR)")),
+        (ERROR_CODE_CATEGORY_HTTP, _("HTTP Status Code")),
+        (ERROR_CODE_CATEGORY_SSL, _("SSL/TLS Error Code")),
+        (ERROR_CODE_CATEGORY_DNS, _("DNS Resolution Error")),
+        (ERROR_CODE_CATEGORY_CUSTOM, _("Custom Enumeration")),
+        (ERROR_CODE_CATEGORY_UNKNOWN, _("Unknown/Unclassified")),
+    )
+
+    SMTP_ENHANCED_STATUS_CODES = {
+        "550": "Mailbox unavailable / User not found",
+        "551": "User not local / Please try forward path",
+        "552": "Requested mail action aborted: exceeded storage allocation",
+        "553": "Requested action not taken: mailbox name not allowed",
+        "554": "Transaction failed / Message rejected",
+        "500": "Syntax error / Command unrecognized",
+        "501": "Syntax error in parameters or arguments",
+        "502": "Command not implemented",
+        "503": "Bad sequence of commands",
+        "504": "Command parameter not implemented",
+        "530": "Authentication required",
+        "535": "Authentication credentials invalid",
+        "421": "Service not available / Connection will be dropped",
+        "450": "Requested mail action not taken: mailbox unavailable",
+        "451": "Requested action aborted: local error in processing",
+        "452": "Requested action not taken: insufficient system storage",
+    }
+
     queue = models.ForeignKey(
         Queue,
         on_delete=models.CASCADE,
@@ -2403,6 +2441,15 @@ class EmailLog(models.Model):
         help_text=_("Protocol-specific error code, e.g. SMTP 550, IMAP NO, etc."),
     )
 
+    error_code_category = models.CharField(
+        _("Error Code Category"),
+        max_length=20,
+        choices=ERROR_CODE_CATEGORY_CHOICES,
+        default=ERROR_CODE_CATEGORY_UNKNOWN,
+        db_index=True,
+        help_text=_("Category of the error code: SMTP, IMAP, HTTP, SSL, DNS, custom enumeration, etc."),
+    )
+
     fetch_type = models.CharField(
         _("Fetch Type"),
         max_length=10,
@@ -2433,6 +2480,21 @@ class EmailLog(models.Model):
         blank=True,
         null=True,
         db_index=True,
+    )
+
+    reply_to = models.CharField(
+        _("Reply-To"),
+        max_length=512,
+        blank=True,
+        null=True,
+        help_text=_("Reply-To address(es) from email headers"),
+    )
+
+    cc = models.TextField(
+        _("CC Recipients"),
+        blank=True,
+        null=True,
+        help_text=_("CC recipient addresses from email headers"),
     )
 
     recipient = models.CharField(
@@ -2490,11 +2552,53 @@ class EmailLog(models.Model):
             models.Index(fields=["queue", "direction", "-timestamp"]),
             models.Index(fields=["protocol", "status", "-timestamp"]),
             models.Index(fields=["error_code", "-timestamp"]),
+            models.Index(fields=["error_code_category", "-timestamp"]),
             models.Index(fields=["fetch_type", "-timestamp"]),
         ]
 
     def __str__(self):
         return f"{self.get_direction_display()} - {self.get_status_display()} - {self.timestamp}"
+
+    @staticmethod
+    def classify_error_code(error_code, protocol=None):
+        if not error_code:
+            return EmailLog.ERROR_CODE_CATEGORY_UNKNOWN
+        import re
+        error_code_str = str(error_code).strip()
+        if re.match(r"^[45]\d{2}$", error_code_str):
+            return EmailLog.ERROR_CODE_CATEGORY_SMTP
+        if re.match(r"^(NO|BAD|BYE|OK|PREAUTH|STARTTLS|AUTHENTICATE)$", error_code_str, re.IGNORECASE):
+            return EmailLog.ERROR_CODE_CATEGORY_IMAP
+        if re.match(r"^\+OK|\-ERR|\+", error_code_str, re.IGNORECASE) or error_code_str.upper() == "ERR":
+            return EmailLog.ERROR_CODE_CATEGORY_POP3
+        if re.match(r"^\d{3}$", error_code_str) and 400 <= int(error_code_str) <= 599:
+            return EmailLog.ERROR_CODE_CATEGORY_HTTP
+        ssl_patterns = ["SSL", "TLS", "CERTIFICATE", "HANDSHAKE", "CIPHER", "PROTOCOL_VERSION", "SSLError", "SSL_ERROR"]
+        for pat in ssl_patterns:
+            if pat.lower() in error_code_str.lower():
+                return EmailLog.ERROR_CODE_CATEGORY_SSL
+        dns_patterns = ["DNS", "NXDOMAIN", "SERVFAIL", "HOST_NOT_FOUND", "NO_ADDRESS", "TRY_AGAIN"]
+        for pat in dns_patterns:
+            if pat.lower() in error_code_str.lower():
+                return EmailLog.ERROR_CODE_CATEGORY_DNS
+        if re.match(r"^[A-Z_]+$", error_code_str) and len(error_code_str) >= 3:
+            return EmailLog.ERROR_CODE_CATEGORY_CUSTOM
+        if protocol:
+            if protocol in (EmailLog.PROTOCOL_IMAP, EmailLog.PROTOCOL_IMAP_OAUTH):
+                return EmailLog.ERROR_CODE_CATEGORY_IMAP
+            if protocol == EmailLog.PROTOCOL_POP3:
+                return EmailLog.ERROR_CODE_CATEGORY_POP3
+            if protocol == EmailLog.PROTOCOL_SMTP:
+                return EmailLog.ERROR_CODE_CATEGORY_SMTP
+        return EmailLog.ERROR_CODE_CATEGORY_UNKNOWN
+
+    @property
+    def error_code_description(self):
+        if not self.error_code:
+            return None
+        if self.error_code_category == EmailLog.ERROR_CODE_CATEGORY_SMTP:
+            return EmailLog.SMTP_ENHANCED_STATUS_CODES.get(self.error_code)
+        return None
 
     @staticmethod
     def mask_email(email):
@@ -2533,6 +2637,14 @@ class EmailLog(models.Model):
         return self.mask_email(self.recipient)
 
     @property
+    def reply_to_masked(self):
+        return self.mask_email(self.reply_to)
+
+    @property
+    def cc_masked(self):
+        return self.mask_email(self.cc)
+
+    @property
     def error_message_masked(self):
         return self.mask_email(self.error_message)
 
@@ -2554,6 +2666,8 @@ class EmailLog(models.Model):
         message_id=None,
         subject=None,
         sender=None,
+        reply_to=None,
+        cc=None,
         is_bounce=False,
         bounce_reason=None,
         attachment_count=0,
@@ -2563,23 +2677,27 @@ class EmailLog(models.Model):
         error_code=None,
         fetch_type=FETCH_TYPE_POLL,
     ):
+        error_code_category = cls.classify_error_code(error_code, protocol)
         return cls.objects.create(
             queue=queue,
             direction=cls.DIRECTION_INCOMING,
             status=status,
             error_type=error_type,
             error_message=error_message,
+            protocol=protocol,
+            error_code=error_code,
+            error_code_category=error_code_category,
+            fetch_type=fetch_type,
             message_id=message_id,
             subject=subject,
             sender=sender,
+            reply_to=reply_to,
+            cc=cc,
             is_bounce=is_bounce,
             bounce_reason=bounce_reason,
             attachment_count=attachment_count,
             attachment_errors=attachment_errors,
             raw_message_excerpt=raw_message_excerpt,
-            protocol=protocol,
-            error_code=error_code,
-            fetch_type=fetch_type,
         )
 
     @classmethod
@@ -2592,6 +2710,8 @@ class EmailLog(models.Model):
         message_id=None,
         subject=None,
         recipient=None,
+        reply_to=None,
+        cc=None,
         is_bounce=False,
         bounce_reason=None,
         attachment_count=0,
@@ -2599,19 +2719,23 @@ class EmailLog(models.Model):
         protocol=PROTOCOL_SMTP,
         error_code=None,
     ):
+        error_code_category = cls.classify_error_code(error_code, protocol)
         return cls.objects.create(
             queue=queue,
             direction=cls.DIRECTION_OUTGOING,
             status=status,
             error_type=error_type,
             error_message=error_message,
+            protocol=protocol,
+            error_code=error_code,
+            error_code_category=error_code_category,
             message_id=message_id,
             subject=subject,
             recipient=recipient,
+            reply_to=reply_to,
+            cc=cc,
             is_bounce=is_bounce,
             bounce_reason=bounce_reason,
             attachment_count=attachment_count,
             raw_message_excerpt=raw_message_excerpt,
-            protocol=protocol,
-            error_code=error_code,
         )
