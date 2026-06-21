@@ -2222,7 +2222,7 @@ def delete_checklist_template(request, checklist_template_id):
     )
 
 
-def _get_queue_active_staff(queue):
+def _get_queue_active_staff(queue, source="permission"):
     from django.contrib.auth.models import Permission
     assignable_users = get_assignable_users(
         helpdesk_settings.HELPDESK_STAFF_ONLY_TICKET_OWNERS
@@ -2232,28 +2232,43 @@ def _get_queue_active_staff(queue):
         for user in assignable_users:
             if user.is_superuser or user.has_perm(queue.permission_name):
                 active_staff.append(user)
-        return active_staff
-    return list(assignable_users)
+        return active_staff, source
+    return list(assignable_users), source
 
 
-def _get_queue_avg_response_time(queue):
-    active_tickets = queue.ticket_set.filter(
-        status__in=Ticket.OPEN_STATUSES,
-        on_hold=False,
-    ).exclude(assigned_to__isnull=True)
+def _get_queue_avg_response_time(queue, window_hours=24):
+    now = timezone.now()
+    window_start = now - timedelta(hours=window_hours)
+
+    followups_in_window = FollowUp.objects.filter(
+        ticket__queue=queue,
+        ticket__status__in=Ticket.OPEN_STATUSES,
+        ticket__on_hold=False,
+        user__isnull=False,
+        date__gte=window_start,
+    ).select_related("ticket", "user")
+
+    ticket_first_response = {}
+    for fu in followups_in_window:
+        tid = fu.ticket_id
+        if tid not in ticket_first_response or fu.date < ticket_first_response[tid][0]:
+            ticket_first_response[tid] = (fu.date, fu.ticket.created)
+
     response_times = []
-    for ticket in active_tickets:
-        first_staff_followup = FollowUp.objects.filter(
-            ticket=ticket,
-            user__isnull=False,
-        ).order_by("date").first()
-        if first_staff_followup:
-            delta = first_staff_followup.date - ticket.created
+    for tid, (first_fu_date, ticket_created) in ticket_first_response.items():
+        if first_fu_date >= ticket_created:
+            delta = first_fu_date - ticket_created
             response_times.append(delta.total_seconds())
+
     if not response_times:
-        return None
+        return None, 0
+
     avg_seconds = sum(response_times) / len(response_times)
-    return timedelta(seconds=avg_seconds)
+    return timedelta(seconds=avg_seconds), len(response_times)
+
+
+def _get_queue_avg_response_time_7d(queue):
+    return _get_queue_avg_response_time(queue, window_hours=24 * 7)
 
 
 def _get_ticket_sla_remaining(ticket):
@@ -2293,76 +2308,131 @@ def load_overview(request):
             on_hold=False,
             assigned_to__isnull=True,
         ).count()
-        avg_response = _get_queue_avg_response_time(queue)
-        active_staff = _get_queue_active_staff(queue)
+
+        avg_response_24h, sample_count_24h = _get_queue_avg_response_time(
+            queue, window_hours=24
+        )
+        avg_response_7d, sample_count_7d = _get_queue_avg_response_time(
+            queue, window_hours=24 * 7
+        )
+
+        active_staff, staff_source = _get_queue_active_staff(queue, source="permission")
         staff_on_shift = len(active_staff)
 
         queue_stats.append({
             "queue": queue,
             "backlog": backlog,
             "unassigned_count": unassigned_count,
-            "avg_response_time": avg_response,
-            "avg_response_time_formatted": _format_timedelta(avg_response),
+            "avg_response_time_24h": avg_response_24h,
+            "avg_response_time_24h_formatted": _format_timedelta(avg_response_24h),
+            "sample_count_24h": sample_count_24h,
+            "avg_response_time_7d": avg_response_7d,
+            "avg_response_time_7d_formatted": _format_timedelta(avg_response_7d),
+            "sample_count_7d": sample_count_7d,
             "staff_on_shift": staff_on_shift,
             "active_staff": active_staff,
+            "staff_source": staff_source,
             "backlog_per_staff": round(backlog / staff_on_shift, 1) if staff_on_shift > 0 else 0,
         })
 
     total_backlog = sum(q["backlog"] for q in queue_stats)
     total_staff = sum(q["staff_on_shift"] for q in queue_stats)
 
+    strategy_options = [
+        {
+            "id": "round_robin",
+            "label": _("当班轮询 / Round-Robin"),
+            "icon": "fas fa-sync-alt",
+            "short_desc": _("公平分配，追求人均工单一致"),
+            "long_desc": _("按优先级→创建时间排序工单，轮询分配给在岗人员，负载差超过阈值时自动再平衡"),
+            "color": "primary",
+        },
+        {
+            "id": "sla_priority",
+            "label": _("SLA余量优先 / SLA Priority"),
+            "icon": "fas fa-clock",
+            "short_desc": _("SLA紧迫度优先，保障最危工单"),
+            "long_desc": _("按 SLA 剩余时间排序：逾期→1h内到期→剩余时间少→无截止日，紧急工单优先转给低负载人员"),
+            "color": "warning",
+        },
+    ]
+
+    staff_source_label_map = {
+        "permission": _("权限自动推导"),
+        "timesheet": _("从工时表获取"),
+        "manual": _("手动切换排班"),
+    }
+    current_staff_source = "permission"
+
+    context = {
+        "queue_stats": queue_stats,
+        "total_backlog": total_backlog,
+        "total_staff": total_staff,
+        "strategy_options": strategy_options,
+        "default_strategy": "round_robin",
+        "staff_source_label": staff_source_label_map.get(current_staff_source, current_staff_source),
+        "staff_source_help": _("当前数据源：根据 %s 自动识别在岗人员（所有激活且拥有该队列权限的客服人员）") % staff_source_label_map.get(current_staff_source),
+        "response_time_windows": [
+            {"hours": 24, "label": _("最近 24 小时")},
+            {"hours": 24 * 7, "label": _("滚动 7 天")},
+        ],
+    }
+
     if request.method == "POST":
         selected_queue_ids = request.POST.getlist("queue_ids")
         strategy = request.POST.get("strategy", "round_robin")
-        return _handle_redistribute(request, selected_queue_ids, strategy, queue_stats)
+        return _handle_redistribute(
+            request, selected_queue_ids, strategy, queue_stats, context
+        )
 
-    return render(
-        request,
-        "helpdesk/load_overview.html",
-        {
-            "queue_stats": queue_stats,
-            "total_backlog": total_backlog,
-            "total_staff": total_staff,
-        },
-    )
+    return render(request, "helpdesk/load_overview.html", context)
 
 
-def _handle_redistribute(request, selected_queue_ids, strategy, queue_stats):
+def _handle_redistribute(request, selected_queue_ids, strategy, queue_stats, base_context=None):
     from django.db.models import Count
 
+    if base_context is None:
+        base_context = {}
+
     if not selected_queue_ids:
-        messages = [(_("No queues selected for redistribution."), "warning")]
-        return render(
-            request,
-            "helpdesk/load_overview.html",
-            {
-                "queue_stats": queue_stats,
-                "total_backlog": sum(q["backlog"] for q in queue_stats),
-                "total_staff": sum(q["staff_on_shift"] for q in queue_stats),
-                "messages": messages,
-            },
-        )
+        messages = [(_("未选择任何队列，请先勾选需要进行再分配的队列。"), "warning")]
+        context = dict(base_context)
+        context["messages"] = messages
+        context["queue_stats"] = queue_stats
+        context["total_backlog"] = sum(q["backlog"] for q in queue_stats)
+        context["total_staff"] = sum(q["staff_on_shift"] for q in queue_stats)
+        return render(request, "helpdesk/load_overview.html", context)
+
+    strategy_meta_map = {
+        "round_robin": {
+            "label": _("当班轮询 / Round-Robin"),
+            "entry": _("策略入口：公平优先 · 轮询分配"),
+            "description": _("特点：分配均匀，避免某个人被工单压垮。适合队列难度差异不大的场景。"),
+        },
+        "sla_priority": {
+            "label": _("SLA余量优先 / SLA Priority"),
+            "entry": _("策略入口：SLA 优先 · 紧迫先处理"),
+            "description": _("特点：保障服务级别协议，最紧急的工单先被处理。适合 SLA 要求严格的场景。"),
+        },
+    }
 
     selected_queues = Queue.objects.filter(id__in=selected_queue_ids)
 
     all_active_staff_set = set()
     for q in selected_queues:
-        for staff in _get_queue_active_staff(q):
+        staff_list, _src = _get_queue_active_staff(q)
+        for staff in staff_list:
             all_active_staff_set.add(staff)
     all_active_staff = list(all_active_staff_set)
 
     if not all_active_staff:
-        messages = [(_("No active staff available for redistribution."), "error")]
-        return render(
-            request,
-            "helpdesk/load_overview.html",
-            {
-                "queue_stats": queue_stats,
-                "total_backlog": sum(q["backlog"] for q in queue_stats),
-                "total_staff": sum(q["staff_on_shift"] for q in queue_stats),
-                "messages": messages,
-            },
-        )
+        messages = [(_("所选队列范围内暂无可用在岗人员，无法执行再分配。"), "error")]
+        context = dict(base_context)
+        context["messages"] = messages
+        context["queue_stats"] = queue_stats
+        context["total_backlog"] = sum(q["backlog"] for q in queue_stats)
+        context["total_staff"] = sum(q["staff_on_shift"] for q in queue_stats)
+        return render(request, "helpdesk/load_overview.html", context)
 
     tickets_to_redistribute = Ticket.objects.filter(
         queue__in=selected_queues,
@@ -2370,14 +2440,12 @@ def _handle_redistribute(request, selected_queue_ids, strategy, queue_stats):
         on_hold=False,
     )
 
-    redistribution_results = {
-        "round_robin": _("Round-Robin"),
-        "sla_priority": _("SLA Priority"),
-    }
-
     reassigned_count = 0
     unassigned_tickets = tickets_to_redistribute.filter(assigned_to__isnull=True)
     assigned_tickets = tickets_to_redistribute.filter(assigned_to__isnull=False)
+
+    strategy_meta = strategy_meta_map.get(strategy, {})
+    strategy_label = strategy_meta.get("label", strategy)
 
     if strategy == "round_robin":
         reassigned_count = _redistribute_round_robin(
@@ -2388,13 +2456,27 @@ def _handle_redistribute(request, selected_queue_ids, strategy, queue_stats):
             request, unassigned_tickets, assigned_tickets, all_active_staff, selected_queues
         )
 
-    messages = [(
-        _("%(count)d tickets redistributed successfully using %(strategy)s strategy.") % {
-            "count": reassigned_count,
-            "strategy": redistribution_results.get(strategy, strategy),
-        },
-        "success"
-    )]
+    strategy_entry = strategy_meta.get("entry", "")
+    strategy_desc = strategy_meta.get("description", "")
+
+    messages = [
+        (
+            _("%(strategy_entry)s：共成功再分配 %(count)d 个工单。%(strategy_desc)s") % {
+                "count": reassigned_count,
+                "strategy_entry": strategy_entry,
+                "strategy_desc": strategy_desc,
+            },
+            "success",
+        ),
+        (
+            _("策略标签：%(label)s | 涉及队列：%(queues)d 个 | 可用在岗人员：%(staff)d 人") % {
+                "label": strategy_label,
+                "queues": len(selected_queues),
+                "staff": len(all_active_staff),
+            },
+            "info",
+        ),
+    ]
 
     huser = HelpdeskUser(request.user)
     user_queues = huser.get_queues()
@@ -2409,30 +2491,41 @@ def _handle_redistribute(request, selected_queue_ids, strategy, queue_stats):
             on_hold=False,
             assigned_to__isnull=True,
         ).count()
-        avg_response = _get_queue_avg_response_time(queue)
-        active_staff = _get_queue_active_staff(queue)
+        avg_response_24h, sample_count_24h = _get_queue_avg_response_time(
+            queue, window_hours=24
+        )
+        avg_response_7d, sample_count_7d = _get_queue_avg_response_time(
+            queue, window_hours=24 * 7
+        )
+        active_staff, staff_source = _get_queue_active_staff(queue)
         staff_on_shift = len(active_staff)
         queue_stats.append({
             "queue": queue,
             "backlog": backlog,
             "unassigned_count": unassigned_count,
-            "avg_response_time": avg_response,
-            "avg_response_time_formatted": _format_timedelta(avg_response),
+            "avg_response_time_24h": avg_response_24h,
+            "avg_response_time_24h_formatted": _format_timedelta(avg_response_24h),
+            "sample_count_24h": sample_count_24h,
+            "avg_response_time_7d": avg_response_7d,
+            "avg_response_time_7d_formatted": _format_timedelta(avg_response_7d),
+            "sample_count_7d": sample_count_7d,
             "staff_on_shift": staff_on_shift,
             "active_staff": active_staff,
+            "staff_source": staff_source,
             "backlog_per_staff": round(backlog / staff_on_shift, 1) if staff_on_shift > 0 else 0,
         })
 
-    return render(
-        request,
-        "helpdesk/load_overview.html",
-        {
-            "queue_stats": queue_stats,
-            "total_backlog": sum(q["backlog"] for q in queue_stats),
-            "total_staff": sum(q["staff_on_shift"] for q in queue_stats),
-            "messages": messages,
-        },
-    )
+    context = dict(base_context)
+    context.update({
+        "queue_stats": queue_stats,
+        "total_backlog": sum(q["backlog"] for q in queue_stats),
+        "total_staff": sum(q["staff_on_shift"] for q in queue_stats),
+        "messages": messages,
+        "last_strategy": strategy,
+        "last_strategy_label": strategy_label,
+    })
+
+    return render(request, "helpdesk/load_overview.html", context)
 
 
 def _get_staff_ticket_counts(staff_list, tickets_queryset):
