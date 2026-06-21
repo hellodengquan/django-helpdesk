@@ -59,6 +59,24 @@ STRIPPED_SUBJECT_STRINGS = [
 HTML_EMAIL_ATTACHMENT_FILENAME = _("email_html_body.html")
 
 
+def _extract_error_code(error_message, protocol):
+    if not error_message:
+        return None
+    import re
+    if protocol in (EmailLog.PROTOCOL_SMTP,):
+        smtp_match = re.search(r"\b([45]\d{2})\b", error_message)
+        if smtp_match:
+            return smtp_match.group(1)
+    if protocol in (EmailLog.PROTOCOL_IMAP, EmailLog.PROTOCOL_IMAP_OAUTH, EmailLog.PROTOCOL_POP3):
+        code_match = re.search(r"\b(NO|BAD|BYE|AUTH|ERR)\b", error_message, re.IGNORECASE)
+        if code_match:
+            return code_match.group(1).upper()
+        num_match = re.search(r"\[(\w+)\]", error_message)
+        if num_match:
+            return num_match.group(1)
+    return None
+
+
 def _log_incoming_email(
     queue,
     status,
@@ -72,10 +90,15 @@ def _log_incoming_email(
     attachment_count=0,
     attachment_errors=None,
     raw_message_excerpt=None,
+    protocol=EmailLog.PROTOCOL_UNKNOWN,
+    error_code=None,
+    fetch_type=EmailLog.FETCH_TYPE_POLL,
 ):
     try:
         if raw_message_excerpt and len(raw_message_excerpt) > 2000:
             raw_message_excerpt = raw_message_excerpt[:2000]
+        if not error_code and error_message:
+            error_code = _extract_error_code(error_message, protocol)
         EmailLog.log_incoming(
             queue=queue,
             status=status,
@@ -89,6 +112,9 @@ def _log_incoming_email(
             attachment_count=attachment_count,
             attachment_errors=attachment_errors,
             raw_message_excerpt=raw_message_excerpt,
+            protocol=protocol,
+            error_code=error_code,
+            fetch_type=fetch_type,
         )
     except Exception:
         pass
@@ -106,10 +132,14 @@ def _log_outgoing_email(
     bounce_reason=None,
     attachment_count=0,
     raw_message_excerpt=None,
+    protocol=EmailLog.PROTOCOL_SMTP,
+    error_code=None,
 ):
     try:
         if raw_message_excerpt and len(raw_message_excerpt) > 2000:
             raw_message_excerpt = raw_message_excerpt[:2000]
+        if not error_code and error_message:
+            error_code = _extract_error_code(error_message, protocol)
         EmailLog.log_outgoing(
             queue=queue,
             status=status,
@@ -122,6 +152,8 @@ def _log_outgoing_email(
             bounce_reason=bounce_reason,
             attachment_count=attachment_count,
             raw_message_excerpt=raw_message_excerpt,
+            protocol=protocol,
+            error_code=error_code,
         )
     except Exception:
         pass
@@ -217,6 +249,7 @@ def pop3_sync(q, logger, server):
             status=EmailLog.STATUS_FAILED,
             error_type=EmailLog.ERROR_TYPE_AUTH if "auth" in error_str.lower() or "password" in error_str.lower() else EmailLog.ERROR_TYPE_CONNECTION,
             error_message=error_str,
+            protocol=EmailLog.PROTOCOL_POP3,
         )
         raise
 
@@ -251,6 +284,7 @@ def pop3_sync(q, logger, server):
                 queue=q,
                 status=EmailLog.STATUS_IGNORED,
                 raw_message_excerpt=full_message,
+                protocol=EmailLog.PROTOCOL_POP3,
             )
         except DeleteIgnoredTicketException:
             logger.warning(
@@ -261,6 +295,7 @@ def pop3_sync(q, logger, server):
                 queue=q,
                 status=EmailLog.STATUS_IGNORED,
                 raw_message_excerpt=full_message,
+                protocol=EmailLog.PROTOCOL_POP3,
             )
         except Exception as e:
             logger.error(f"Error processing message {msgNum}: {e}", exc_info=True)
@@ -270,6 +305,7 @@ def pop3_sync(q, logger, server):
                 error_type=EmailLog.ERROR_TYPE_PARSE if isinstance(e, (TypeError, ValueError)) else EmailLog.ERROR_TYPE_UNKNOWN,
                 error_message=str(e),
                 raw_message_excerpt=full_message,
+                protocol=EmailLog.PROTOCOL_POP3,
             )
         else:
             if ticket:
@@ -284,6 +320,7 @@ def pop3_sync(q, logger, server):
                     subject=ticket.title,
                     sender=ticket.submitter_email,
                     attachment_count=ticket.followup_set.last().followupattachment_set.count() if ticket.followup_set.exists() else 0,
+                    protocol=EmailLog.PROTOCOL_POP3,
                 )
             else:
                 logger.warning(
@@ -294,6 +331,7 @@ def pop3_sync(q, logger, server):
                     queue=q,
                     status=EmailLog.STATUS_DEFERRED,
                     raw_message_excerpt=full_message,
+                    protocol=EmailLog.PROTOCOL_POP3,
                 )
 
     server.quit()
@@ -320,6 +358,7 @@ def imap_sync(q, logger, server):
             status=EmailLog.STATUS_FAILED,
             error_type=EmailLog.ERROR_TYPE_AUTH,
             error_message=f"{error_msg} {str(e)}",
+            protocol=EmailLog.PROTOCOL_IMAP,
         )
         server.logout()
         sys.exit()
@@ -331,6 +370,7 @@ def imap_sync(q, logger, server):
             status=EmailLog.STATUS_FAILED,
             error_type=EmailLog.ERROR_TYPE_SSL,
             error_message=f"{error_msg} {str(e)}",
+            protocol=EmailLog.PROTOCOL_IMAP,
         )
         server.logout()
         sys.exit()
@@ -356,6 +396,7 @@ def imap_sync(q, logger, server):
                         queue=q,
                         status=EmailLog.STATUS_IGNORED,
                         raw_message_excerpt=full_message,
+                        protocol=EmailLog.PROTOCOL_IMAP,
                     )
                 except DeleteIgnoredTicketException:
                     server.store(num, "+FLAGS", "\\Deleted")
@@ -366,6 +407,7 @@ def imap_sync(q, logger, server):
                         queue=q,
                         status=EmailLog.STATUS_IGNORED,
                         raw_message_excerpt=full_message,
+                        protocol=EmailLog.PROTOCOL_IMAP,
                     )
                 except TypeError as te:
                     logger.error(
@@ -377,6 +419,7 @@ def imap_sync(q, logger, server):
                         error_type=EmailLog.ERROR_TYPE_PARSE,
                         error_message=str(te),
                         raw_message_excerpt=full_message,
+                        protocol=EmailLog.PROTOCOL_IMAP,
                     )
                 except Exception as e:
                     logger.error(
@@ -388,6 +431,7 @@ def imap_sync(q, logger, server):
                         error_type=EmailLog.ERROR_TYPE_UNKNOWN,
                         error_message=str(e),
                         raw_message_excerpt=full_message,
+                        protocol=EmailLog.PROTOCOL_IMAP,
                     )
                 else:
                     if ticket:
@@ -402,6 +446,7 @@ def imap_sync(q, logger, server):
                             subject=ticket.title,
                             sender=ticket.submitter_email,
                             attachment_count=ticket.followup_set.last().followupattachment_set.count() if ticket.followup_set.exists() else 0,
+                            protocol=EmailLog.PROTOCOL_IMAP,
                         )
                     else:
                         logger.warning(
@@ -412,6 +457,7 @@ def imap_sync(q, logger, server):
                             queue=q,
                             status=EmailLog.STATUS_DEFERRED,
                             raw_message_excerpt=full_message,
+                            protocol=EmailLog.PROTOCOL_IMAP,
                         )
     except imaplib.IMAP4.error as e:
         error_msg = f"IMAP retrieve failed. Is the folder '{q.email_box_imap_folder}' spelled correctly?"
@@ -421,6 +467,7 @@ def imap_sync(q, logger, server):
             status=EmailLog.STATUS_FAILED,
             error_type=EmailLog.ERROR_TYPE_CONNECTION,
             error_message=f"{error_msg} {str(e)}",
+            protocol=EmailLog.PROTOCOL_IMAP,
         )
 
     server.expunge()
@@ -471,6 +518,7 @@ def imap_oauth_sync(q, logger, server):
             status=EmailLog.STATUS_FAILED,
             error_type=EmailLog.ERROR_TYPE_AUTH,
             error_message=f"IMAP OAUTH authentication failed: {str(e1)}",
+            protocol=EmailLog.PROTOCOL_IMAP_OAUTH,
         )
         server.logout()
         sys.exit()
@@ -483,6 +531,7 @@ def imap_oauth_sync(q, logger, server):
             status=EmailLog.STATUS_FAILED,
             error_type=EmailLog.ERROR_TYPE_SSL,
             error_message=f"{error_msg}: {str(e2)}",
+            protocol=EmailLog.PROTOCOL_IMAP_OAUTH,
         )
         server.logout()
         sys.exit()
@@ -508,6 +557,7 @@ def imap_oauth_sync(q, logger, server):
                         queue=q,
                         status=EmailLog.STATUS_IGNORED,
                         raw_message_excerpt=full_message,
+                        protocol=EmailLog.PROTOCOL_IMAP_OAUTH,
                     )
 
                 except DeleteIgnoredTicketException:
@@ -520,6 +570,7 @@ def imap_oauth_sync(q, logger, server):
                         queue=q,
                         status=EmailLog.STATUS_IGNORED,
                         raw_message_excerpt=full_message,
+                        protocol=EmailLog.PROTOCOL_IMAP_OAUTH,
                     )
 
                 except TypeError as te:
@@ -532,6 +583,7 @@ def imap_oauth_sync(q, logger, server):
                         error_type=EmailLog.ERROR_TYPE_PARSE,
                         error_message=str(te),
                         raw_message_excerpt=full_message,
+                        protocol=EmailLog.PROTOCOL_IMAP_OAUTH,
                     )
 
                 except Exception as e:
@@ -544,6 +596,7 @@ def imap_oauth_sync(q, logger, server):
                         error_type=EmailLog.ERROR_TYPE_UNKNOWN,
                         error_message=str(e),
                         raw_message_excerpt=full_message,
+                        protocol=EmailLog.PROTOCOL_IMAP_OAUTH,
                     )
 
                 else:
@@ -560,6 +613,7 @@ def imap_oauth_sync(q, logger, server):
                             subject=ticket.title,
                             sender=ticket.submitter_email,
                             attachment_count=ticket.followup_set.last().followupattachment_set.count() if ticket.followup_set.exists() else 0,
+                            protocol=EmailLog.PROTOCOL_IMAP_OAUTH,
                         )
                     else:
                         logger.warning(
@@ -570,6 +624,7 @@ def imap_oauth_sync(q, logger, server):
                             queue=q,
                             status=EmailLog.STATUS_DEFERRED,
                             raw_message_excerpt=full_message,
+                            protocol=EmailLog.PROTOCOL_IMAP_OAUTH,
                         )
 
     except imaplib.IMAP4.error as e:
@@ -580,6 +635,7 @@ def imap_oauth_sync(q, logger, server):
             status=EmailLog.STATUS_FAILED,
             error_type=EmailLog.ERROR_TYPE_CONNECTION,
             error_message=f"{error_msg} {str(e)}",
+            protocol=EmailLog.PROTOCOL_IMAP_OAUTH,
         )
     # Purged Flagged Messages & Logout
     server.expunge()
@@ -690,6 +746,7 @@ def process_queue(q, logger):
                         queue=q,
                         status=EmailLog.STATUS_IGNORED,
                         raw_message_excerpt=full_message,
+                        protocol=EmailLog.PROTOCOL_LOCAL,
                     )
                 except DeleteIgnoredTicketException:
                     os.unlink(m)
@@ -700,6 +757,7 @@ def process_queue(q, logger):
                         queue=q,
                         status=EmailLog.STATUS_IGNORED,
                         raw_message_excerpt=full_message,
+                        protocol=EmailLog.PROTOCOL_LOCAL,
                     )
                 except Exception as e:
                     logger.error(
@@ -711,6 +769,7 @@ def process_queue(q, logger):
                         error_type=EmailLog.ERROR_TYPE_PARSE if isinstance(e, (TypeError, ValueError)) else EmailLog.ERROR_TYPE_UNKNOWN,
                         error_message=str(e),
                         raw_message_excerpt=full_message,
+                        protocol=EmailLog.PROTOCOL_LOCAL,
                     )
                 else:
                     if ticket:
@@ -724,6 +783,7 @@ def process_queue(q, logger):
                             subject=ticket.title,
                             sender=ticket.submitter_email,
                             attachment_count=ticket.followup_set.last().followupattachment_set.count() if ticket.followup_set.exists() else 0,
+                            protocol=EmailLog.PROTOCOL_LOCAL,
                         )
                         try:
                             # delete message file if ticket was successful
@@ -741,6 +801,7 @@ def process_queue(q, logger):
                             queue=q,
                             status=EmailLog.STATUS_DEFERRED,
                             raw_message_excerpt=full_message,
+                            protocol=EmailLog.PROTOCOL_LOCAL,
                         )
             except OSError as e:
                 logger.error("Error reading message file %s: %s", m, str(e))
@@ -749,6 +810,7 @@ def process_queue(q, logger):
                     status=EmailLog.STATUS_FAILED,
                     error_type=EmailLog.ERROR_TYPE_UNKNOWN,
                     error_message=f"Error reading file: {str(e)}",
+                    protocol=EmailLog.PROTOCOL_LOCAL,
                 )
 
 

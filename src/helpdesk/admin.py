@@ -165,17 +165,21 @@ class EmailLogAdmin(admin.ModelAdmin):
     list_display = (
         "timestamp",
         "direction",
+        "protocol",
         "status",
         "error_type",
+        "error_code",
         "queue",
         "subject",
         "sender",
-        "recipient",
     )
     list_filter = (
         "direction",
+        "protocol",
+        "fetch_type",
         "status",
         "error_type",
+        "error_code",
         "is_bounce",
         "queue",
         "timestamp",
@@ -185,14 +189,18 @@ class EmailLogAdmin(admin.ModelAdmin):
         "sender",
         "recipient",
         "error_message",
+        "error_code",
         "message_id",
     )
     date_hierarchy = "timestamp"
     readonly_fields = (
         "timestamp",
         "direction",
+        "protocol",
+        "fetch_type",
         "status",
         "error_type",
+        "error_code",
         "error_message",
         "queue",
         "message_id",

@@ -14,6 +14,16 @@
 
 <p>{% trans "Monitor email pipeline health, including fetch frequency, failure analysis, and bounce samples." %}</p>
 
+<div class="alert alert-info mb-4" role="alert">
+    <i class="fas fa-info-circle"></i>
+    <strong>{% trans "Data Source:" %}</strong>
+    {% blocktrans %}
+    All statistics are generated from the <code>EmailLog</code> database table, which records every email processing event (both incoming and outgoing).
+    The default fetch mechanism is <strong>scheduled polling</strong> — the system checks each queue's mailbox at the configured interval.
+    Email addresses in sample displays are masked to protect privacy.
+    {% endblocktrans %}
+</div>
+
 <div class="mb-3">
     <form method="get" class="form-inline">
         <div class="form-group mr-2">
@@ -76,6 +86,41 @@
     </div>
 </div>
 
+{% if fetch_type_stats %}
+<div class="card mb-4">
+    <div class="card-header">
+        <i class="fas fa-sync"></i>
+        {% trans "Fetch Type Distribution" %}
+        <small class="text-muted ml-2">
+            {% blocktrans %}How incoming emails were collected: polling (scheduled), event-triggered, or manually.{% endblocktrans %}
+        </small>
+    </div>
+    <div class="card-body">
+        <div class="row">
+            {% for ft in fetch_type_stats %}
+            <div class="col-md-4 mb-3">
+                <div class="card bg-light">
+                    <div class="card-body text-center">
+                        <div class="display-4">
+                            {% if ft.type == 'poll' %}
+                                <i class="fas fa-clock text-primary"></i>
+                            {% elif ft.type == 'event' %}
+                                <i class="fas fa-bolt text-success"></i>
+                            {% else %}
+                                <i class="fas fa-hand-pointer text-warning"></i>
+                            {% endif %}
+                        </div>
+                        <h5>{{ ft.label }}</h5>
+                        <p class="display-6 mb-0"><strong>{{ ft.count }}</strong></p>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+{% endif %}
+
 <div class="card mb-4">
     <div class="card-header">
         <i class="fas fa-chart-bar"></i>
@@ -103,12 +148,10 @@
                         <td>
                             {% with total=day.incoming|add:day.outgoing %}
                                 {% if total > 0 %}
-                                    {% widthratio total|add:day.failed|add:"-1" total 100 as success_rate %}
-                                    {% widthratio total total 100 as temp %}
                                     {% if day.failed == 0 %}
                                         <span class="text-success">100%</span>
                                     {% else %}
-                                        <span class="{% if day.failed > 0 %}text-warning{% else %}text-success{% endif %}">
+                                        <span class="text-warning">
                                             {% widthratio total|add:"-1" total 100 %}%
                                         </span>
                                     {% endif %}
@@ -134,7 +177,7 @@
         <div class="card h-100">
             <div class="card-header">
                 <i class="fas fa-chart-pie"></i>
-                {% trans "Failure Reason Analysis" %}
+                {% trans "Failure Reason Analysis (by Error Type)" %}
             </div>
             <div class="card-body">
                 {% if error_type_stats %}
@@ -180,53 +223,159 @@
     <div class="col-lg-6 mb-4">
         <div class="card h-100">
             <div class="card-header">
-                <i class="fas fa-server"></i>
-                {% trans "Queue Email Status" %}
+                <i class="fas fa-hashtag"></i>
+                {% trans "Top Error Codes" %}
+                <small class="text-muted ml-2">{% trans "Grouped by protocol" %}</small>
             </div>
             <div class="card-body">
+                {% if error_code_stats %}
                 <div class="table-responsive">
                     <table class="table table-striped">
                         <thead>
                             <tr>
-                                <th>{% trans "Queue" %}</th>
-                                <th>{% trans "Last Check" %}</th>
-                                <th>{% trans "Interval" %}</th>
-                                <th>{% trans "In" %}</th>
-                                <th>{% trans "Failed" %}</th>
-                                <th>{% trans "Status" %}</th>
+                                <th>{% trans "Protocol" %}</th>
+                                <th>{% trans "Error Code" %}</th>
+                                <th>{% trans "Count" %}</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {% for qs in queue_stats %}
+                            {% for ec in error_code_stats %}
                             <tr>
-                                <td>{{ qs.queue.title }}</td>
                                 <td>
-                                    {% if qs.last_check %}
-                                        {{ qs.last_check|date:"Y-m-d H:i" }}
-                                    {% else %}
-                                        <span class="text-warning">{% trans "Never" %}</span>
-                                    {% endif %}
+                                    <span class="badge badge-{% if ec.protocol == 'smtp' %}primary{% elif ec.protocol == 'imap' or ec.protocol == 'imap_oauth' %}info{% elif ec.protocol == 'pop3' %}secondary{% else %}light{% endif %}">
+                                        {{ ec.protocol_label }}
+                                    </span>
                                 </td>
-                                <td>{{ qs.interval }} min</td>
-                                <td>{{ qs.incoming }}</td>
-                                <td class="{% if qs.failed > 0 %}text-danger{% endif %}">{{ qs.failed }}</td>
-                                <td>
-                                    {% if qs.failed > 0 %}
-                                        <span class="badge badge-danger">{% trans "Issues" %}</span>
-                                    {% else %}
-                                        <span class="badge badge-success">{% trans "Healthy" %}</span>
-                                    {% endif %}
-                                </td>
-                            </tr>
-                            {% empty %}
-                            <tr>
-                                <td colspan="6">{% trans "No email queues configured." %}</td>
+                                <td><code>{{ ec.error_code }}</code></td>
+                                <td><strong>{{ ec.count }}</strong></td>
                             </tr>
                             {% endfor %}
                         </tbody>
                     </table>
                 </div>
+                {% else %}
+                <p class="text-muted">{% trans "No protocol-specific error codes recorded yet." %}</p>
+                {% endif %}
             </div>
+        </div>
+    </div>
+</div>
+
+{% if protocol_error_stats %}
+<div class="card mb-4">
+    <div class="card-header">
+        <i class="fas fa-project-diagram"></i>
+        {% trans "Protocol-specific Failure Breakdown" %}
+        <small class="text-muted ml-2">{% trans "IMAP / POP3 / SMTP split with error details" %}</small>
+    </div>
+    <div class="card-body">
+        <div class="row">
+            {% for ps in protocol_error_stats %}
+            <div class="col-lg-4 mb-4">
+                <div class="card border-{% if ps.protocol == 'smtp' %}primary{% elif ps.protocol == 'imap' or ps.protocol == 'imap_oauth' %}info{% elif ps.protocol == 'pop3' %}secondary{% else %}light{% endif %} h-100">
+                    <div class="card-header bg-{% if ps.protocol == 'smtp' %}primary{% elif ps.protocol == 'imap' or ps.protocol == 'imap_oauth' %}info{% elif ps.protocol == 'pop3' %}secondary{% else %}light{% endif %} text-white">
+                        <i class="fas fa-{% if ps.protocol == 'smtp' %}paper-plane{% elif ps.protocol == 'imap' or ps.protocol == 'imap_oauth' %}inbox{% elif ps.protocol == 'pop3' %}download{% else %}question-circle{% endif %}"></i>
+                        <strong>{{ ps.label }}</strong>
+                        <span class="badge badge-light ml-2">{{ ps.total_failed }} {% trans "failed" %}</span>
+                    </div>
+                    <div class="card-body">
+                        {% if ps.error_codes %}
+                        <h6 class="mt-2">{% trans "Top Error Codes" %}</h6>
+                        <ul class="list-group list-group-flush mb-3">
+                            {% for code, cnt in ps.error_codes %}
+                            <li class="list-group-item d-flex justify-content-between align-items-center px-0 py-1">
+                                <code>{{ code }}</code>
+                                <span class="badge badge-danger badge-pill">{{ cnt }}</span>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                        {% endif %}
+                        {% if ps.error_types %}
+                        <h6 class="mt-2">{% trans "Error Types" %}</h6>
+                        <ul class="list-group list-group-flush">
+                            {% for etype, cnt in ps.error_types %}
+                            <li class="list-group-item d-flex justify-content-between align-items-center px-0 py-1">
+                                <span>{{ etype }}</span>
+                                <span class="badge badge-warning badge-pill">{{ cnt }}</span>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<div class="card mb-4">
+    <div class="card-header">
+        <i class="fas fa-server"></i>
+        {% trans "Queue Email Status" %}
+        <small class="text-muted ml-2">
+            {% blocktrans %}Each queue is polled at its configured interval (minutes).{% endblocktrans %}
+        </small>
+    </div>
+    <div class="card-body">
+        <div class="table-responsive">
+            <table class="table table-striped">
+                <thead>
+                    <tr>
+                        <th>{% trans "Queue" %}</th>
+                        <th>{% trans "Protocol" %}</th>
+                        <th>{% trans "Last Check" %}</th>
+                        <th>{% trans "Poll Interval" %}</th>
+                        <th>{% trans "In" %}</th>
+                        <th>{% trans "Out" %}</th>
+                        <th>{% trans "Failed" %}</th>
+                        <th>{% trans "Status" %}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for qs in queue_stats %}
+                    <tr>
+                        <td>{{ qs.queue.title }}</td>
+                        <td>
+                            {% if qs.queue.email_box_type %}
+                                <span class="badge badge-info">{{ qs.queue.email_box_type|upper }}</span>
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if qs.last_check %}
+                                {{ qs.last_check|date:"Y-m-d H:i" }}
+                            {% else %}
+                                <span class="text-warning">{% trans "Never" %}</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if qs.interval %}
+                                {{ qs.interval }} {% trans "min" %}
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                        <td>{{ qs.incoming }}</td>
+                        <td>{{ qs.outgoing }}</td>
+                        <td class="{% if qs.failed > 0 %}text-danger{% endif %}">{{ qs.failed }}</td>
+                        <td>
+                            {% if qs.failed > 0 %}
+                                <span class="badge badge-danger">{% trans "Issues" %}</span>
+                            {% else %}
+                                <span class="badge badge-success">{% trans "Healthy" %}</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr>
+                        <td colspan="8">{% trans "No email queues configured." %}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
         </div>
     </div>
 </div>
@@ -244,7 +393,10 @@
                     <tr>
                         <th>{% trans "Time" %}</th>
                         <th>{% trans "Queue" %}</th>
+                        <th>{% trans "Protocol" %}</th>
+                        <th>{% trans "Error Code" %}</th>
                         <th>{% trans "Error Type" %}</th>
+                        <th>{% trans "Sender" %}</th>
                         <th>{% trans "Error Message" %}</th>
                         <th>{% trans "Actions" %}</th>
                     </tr>
@@ -255,11 +407,32 @@
                         <td>{{ log.timestamp|date:"Y-m-d H:i:s" }}</td>
                         <td>{{ log.queue.title|default:"-" }}</td>
                         <td>
+                            {% if log.get_protocol_display %}
+                                <span class="badge badge-secondary">{{ log.get_protocol_display }}</span>
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if log.error_code %}
+                                <code>{{ log.error_code }}</code>
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                        <td>
                             <span class="badge badge-danger">{{ log.get_error_type_display }}</span>
                         </td>
                         <td>
-                            {% if log.error_message %}
-                                {{ log.error_message|truncatechars:80 }}
+                            {% if log.sender_masked %}
+                                {{ log.sender_masked }}
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if log.error_message_masked %}
+                                {{ log.error_message_masked|truncatechars:80 }}
                             {% else %}
                                 -
                             {% endif %}
@@ -279,7 +452,11 @@
                                             </button>
                                         </div>
                                         <div class="modal-body">
-                                            <pre class="bg-light p-3 rounded"><code>{{ log.raw_message_excerpt|escape }}</code></pre>
+                                            <div class="alert alert-warning" role="alert">
+                                                <i class="fas fa-eye-slash"></i>
+                                                {% trans "Email addresses in this view are masked to protect privacy." %}
+                                            </div>
+                                            <pre class="bg-light p-3 rounded"><code>{{ log.raw_message_excerpt_masked|escape }}</code></pre>
                                         </div>
                                     </div>
                                 </div>
@@ -310,6 +487,7 @@
                     <tr>
                         <th>{% trans "Time" %}</th>
                         <th>{% trans "Queue" %}</th>
+                        <th>{% trans "Error Code" %}</th>
                         <th>{% trans "Recipient" %}</th>
                         <th>{% trans "Subject" %}</th>
                         <th>{% trans "Error Type" %}</th>
@@ -321,12 +499,19 @@
                     <tr>
                         <td>{{ log.timestamp|date:"Y-m-d H:i:s" }}</td>
                         <td>{{ log.queue.title|default:"-" }}</td>
-                        <td>{{ log.recipient|truncatechars:30 }}</td>
+                        <td>
+                            {% if log.error_code %}
+                                <code class="text-danger">{{ log.error_code }}</code>
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                        <td>{{ log.recipient_masked|default:"-"|truncatechars:30 }}</td>
                         <td>{{ log.subject|truncatechars:40 }}</td>
                         <td>
                             <span class="badge badge-danger">{{ log.get_error_type_display }}</span>
                         </td>
-                        <td>{{ log.error_message|truncatechars:60 }}</td>
+                        <td>{{ log.error_message_masked|default:"-"|truncatechars:60 }}</td>
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -341,7 +526,11 @@
 <div class="card mb-4">
     <div class="card-header">
         <i class="fas fa-undo"></i>
-        {% trans "Bounce Samples" %}
+        {% trans "SMTP Bounce Samples" %}
+        <small class="text-muted ml-2">
+            <i class="fas fa-eye-slash"></i>
+            {% trans "Email addresses are masked for privacy" %}
+        </small>
     </div>
     <div class="card-body">
         {% if bounce_samples %}
@@ -351,6 +540,7 @@
                     <tr>
                         <th>{% trans "Time" %}</th>
                         <th>{% trans "Direction" %}</th>
+                        <th>{% trans "Protocol" %}</th>
                         <th>{% trans "Recipient/Sender" %}</th>
                         <th>{% trans "Bounce Reason" %}</th>
                         <th>{% trans "Subject" %}</th>
@@ -367,8 +557,15 @@
                                 <span class="badge badge-warning">{% trans "Outgoing" %}</span>
                             {% endif %}
                         </td>
-                        <td>{{ log.recipient|default:log.sender|truncatechars:40 }}</td>
-                        <td>{{ log.bounce_reason|truncatechars:60 }}</td>
+                        <td>
+                            {% if log.get_protocol_display %}
+                                <span class="badge badge-secondary">{{ log.get_protocol_display }}</span>
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                        <td>{{ log.recipient_masked|default:log.sender_masked|truncatechars:40 }}</td>
+                        <td>{{ log.bounce_reason_masked|default:"-"|truncatechars:60 }}</td>
                         <td>{{ log.subject|truncatechars:40 }}</td>
                     </tr>
                     {% endfor %}
@@ -394,6 +591,8 @@
                     <tr>
                         <th>{% trans "Time" %}</th>
                         <th>{% trans "Direction" %}</th>
+                        <th>{% trans "Protocol" %}</th>
+                        <th>{% trans "Fetch" %}</th>
                         <th>{% trans "Status" %}</th>
                         <th>{% trans "Queue" %}</th>
                         <th>{% trans "Subject/Sender" %}</th>
@@ -408,6 +607,26 @@
                                 <span class="badge badge-info">{% trans "In" %}</span>
                             {% else %}
                                 <span class="badge badge-success">{% trans "Out" %}</span>
+                            {% endif %}
+                        </td>
+                        <td class="small">
+                            {% if log.get_protocol_display %}
+                                {{ log.get_protocol_display }}
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                        <td class="small">
+                            {% if log.direction == 'incoming' and log.get_fetch_type_display %}
+                                {% if log.fetch_type == 'poll' %}
+                                    <i class="fas fa-clock text-primary" title="{{ log.get_fetch_type_display }}"></i>
+                                {% elif log.fetch_type == 'event' %}
+                                    <i class="fas fa-bolt text-success" title="{{ log.get_fetch_type_display }}"></i>
+                                {% else %}
+                                    <i class="fas fa-hand-pointer text-warning" title="{{ log.get_fetch_type_display }}"></i>
+                                {% endif %}
+                            {% else %}
+                                -
                             {% endif %}
                         </td>
                         <td>
@@ -426,7 +645,7 @@
                             {% if log.subject %}
                                 {{ log.subject|truncatechars:40 }}
                             {% else %}
-                                {{ log.sender|default:log.recipient|truncatechars:30 }}
+                                {{ log.sender_masked|default:log.recipient_masked|truncatechars:30 }}
                             {% endif %}
                         </td>
                     </tr>

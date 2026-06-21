@@ -2322,6 +2322,30 @@ class EmailLog(models.Model):
         (ERROR_TYPE_UNKNOWN, _("Unknown")),
     )
 
+    PROTOCOL_POP3 = "pop3"
+    PROTOCOL_IMAP = "imap"
+    PROTOCOL_IMAP_OAUTH = "imap_oauth"
+    PROTOCOL_SMTP = "smtp"
+    PROTOCOL_LOCAL = "local"
+    PROTOCOL_UNKNOWN = "unknown"
+    PROTOCOL_CHOICES = (
+        (PROTOCOL_POP3, _("POP3")),
+        (PROTOCOL_IMAP, _("IMAP")),
+        (PROTOCOL_IMAP_OAUTH, _("IMAP OAuth")),
+        (PROTOCOL_SMTP, _("SMTP")),
+        (PROTOCOL_LOCAL, _("Local Directory")),
+        (PROTOCOL_UNKNOWN, _("Unknown")),
+    )
+
+    FETCH_TYPE_POLL = "poll"
+    FETCH_TYPE_EVENT = "event"
+    FETCH_TYPE_MANUAL = "manual"
+    FETCH_TYPE_CHOICES = (
+        (FETCH_TYPE_POLL, _("Polling (Scheduled)")),
+        (FETCH_TYPE_EVENT, _("Event Triggered")),
+        (FETCH_TYPE_MANUAL, _("Manual Trigger")),
+    )
+
     queue = models.ForeignKey(
         Queue,
         on_delete=models.CASCADE,
@@ -2359,6 +2383,33 @@ class EmailLog(models.Model):
         _("Error Message"),
         blank=True,
         null=True,
+    )
+
+    protocol = models.CharField(
+        _("Protocol"),
+        max_length=20,
+        choices=PROTOCOL_CHOICES,
+        default=PROTOCOL_UNKNOWN,
+        db_index=True,
+        help_text=_("Email protocol used (IMAP, POP3, SMTP, etc.)"),
+    )
+
+    error_code = models.CharField(
+        _("Error Code"),
+        max_length=50,
+        blank=True,
+        null=True,
+        db_index=True,
+        help_text=_("Protocol-specific error code, e.g. SMTP 550, IMAP NO, etc."),
+    )
+
+    fetch_type = models.CharField(
+        _("Fetch Type"),
+        max_length=10,
+        choices=FETCH_TYPE_CHOICES,
+        default=FETCH_TYPE_POLL,
+        db_index=True,
+        help_text=_("How the email was fetched: scheduled polling, event-triggered, or manual"),
     )
 
     message_id = models.CharField(
@@ -2437,10 +2488,61 @@ class EmailLog(models.Model):
             models.Index(fields=["direction", "status", "-timestamp"]),
             models.Index(fields=["error_type", "-timestamp"]),
             models.Index(fields=["queue", "direction", "-timestamp"]),
+            models.Index(fields=["protocol", "status", "-timestamp"]),
+            models.Index(fields=["error_code", "-timestamp"]),
+            models.Index(fields=["fetch_type", "-timestamp"]),
         ]
 
     def __str__(self):
         return f"{self.get_direction_display()} - {self.get_status_display()} - {self.timestamp}"
+
+    @staticmethod
+    def mask_email(email):
+        if not email:
+            return email
+        import re
+        emails = re.findall(r"[\w.+-]+@[\w-]+\.[\w.-]+", email)
+        masked = email
+        for em in emails:
+            if "@" in em:
+                local, domain = em.split("@", 1)
+                if len(local) > 2:
+                    masked_local = local[:2] + "*" * (len(local) - 2)
+                elif len(local) == 2:
+                    masked_local = local[0] + "*"
+                else:
+                    masked_local = "*" * len(local)
+                if "." in domain:
+                    domain_parts = domain.rsplit(".", 1)
+                    if len(domain_parts[0]) > 2:
+                        masked_domain = domain_parts[0][:2] + "*" * (len(domain_parts[0]) - 2) + "." + domain_parts[1]
+                    else:
+                        masked_domain = "*" * len(domain_parts[0]) + "." + domain_parts[1]
+                else:
+                    masked_domain = "*" * len(domain)
+                masked_em = masked_local + "@" + masked_domain
+                masked = masked.replace(em, masked_em)
+        return masked
+
+    @property
+    def sender_masked(self):
+        return self.mask_email(self.sender)
+
+    @property
+    def recipient_masked(self):
+        return self.mask_email(self.recipient)
+
+    @property
+    def error_message_masked(self):
+        return self.mask_email(self.error_message)
+
+    @property
+    def bounce_reason_masked(self):
+        return self.mask_email(self.bounce_reason)
+
+    @property
+    def raw_message_excerpt_masked(self):
+        return self.mask_email(self.raw_message_excerpt)
 
     @classmethod
     def log_incoming(
@@ -2457,6 +2559,9 @@ class EmailLog(models.Model):
         attachment_count=0,
         attachment_errors=None,
         raw_message_excerpt=None,
+        protocol=PROTOCOL_UNKNOWN,
+        error_code=None,
+        fetch_type=FETCH_TYPE_POLL,
     ):
         return cls.objects.create(
             queue=queue,
@@ -2472,6 +2577,9 @@ class EmailLog(models.Model):
             attachment_count=attachment_count,
             attachment_errors=attachment_errors,
             raw_message_excerpt=raw_message_excerpt,
+            protocol=protocol,
+            error_code=error_code,
+            fetch_type=fetch_type,
         )
 
     @classmethod
@@ -2488,6 +2596,8 @@ class EmailLog(models.Model):
         bounce_reason=None,
         attachment_count=0,
         raw_message_excerpt=None,
+        protocol=PROTOCOL_SMTP,
+        error_code=None,
     ):
         return cls.objects.create(
             queue=queue,
@@ -2502,4 +2612,6 @@ class EmailLog(models.Model):
             bounce_reason=bounce_reason,
             attachment_count=attachment_count,
             raw_message_excerpt=raw_message_excerpt,
+            protocol=protocol,
+            error_code=error_code,
         )

@@ -2224,7 +2224,7 @@ def delete_checklist_template(request, checklist_template_id):
 
 @helpdesk_superuser_required
 def email_diagnostic(request):
-    from collections import defaultdict
+    from collections import defaultdict, Counter
     from datetime import timedelta
     from helpdesk.models import EmailLog, Queue
 
@@ -2246,30 +2246,6 @@ def email_diagnostic(request):
     total_outgoing = all_logs.filter(direction=EmailLog.DIRECTION_OUTGOING).count()
     total_failed = all_logs.filter(status=EmailLog.STATUS_FAILED).count()
     total_ignored = all_logs.filter(status=EmailLog.STATUS_IGNORED).count()
-
-    hourly_data = []
-    for i in range(days * 24):
-        hour_start = now().replace(minute=0, second=0, microsecond=0) - timedelta(
-            hours=(days * 24 - 1 - i)
-        )
-        hour_end = hour_start + timedelta(hours=1)
-        incoming_count = EmailLog.objects.filter(
-            direction=EmailLog.DIRECTION_INCOMING,
-            timestamp__gte=hour_start,
-            timestamp__lt=hour_end,
-        ).count()
-        outgoing_count = EmailLog.objects.filter(
-            direction=EmailLog.DIRECTION_OUTGOING,
-            timestamp__gte=hour_start,
-            timestamp__lt=hour_end,
-        ).count()
-        hourly_data.append(
-            {
-                "hour": hour_start.strftime("%Y-%m-%d %H:00"),
-                "incoming": incoming_count,
-                "outgoing": outgoing_count,
-            }
-        )
 
     daily_data = []
     for i in range(days):
@@ -2316,6 +2292,53 @@ def email_diagnostic(request):
             )
     error_type_stats.sort(key=lambda x: x["count"], reverse=True)
 
+    protocol_error_stats = []
+    failed_logs = all_logs.filter(status=EmailLog.STATUS_FAILED)
+    for protocol, protocol_label in EmailLog.PROTOCOL_CHOICES:
+        protocol_failed = failed_logs.filter(protocol=protocol)
+        if protocol_failed.exists():
+            error_code_counter = Counter()
+            error_type_counter = Counter()
+            for log in protocol_failed:
+                if log.error_code:
+                    error_code_counter[log.error_code] += 1
+                if log.error_type and log.error_type != EmailLog.ERROR_TYPE_NONE:
+                    error_type_counter[log.get_error_type_display()] += 1
+            protocol_error_stats.append({
+                "protocol": protocol,
+                "label": protocol_label,
+                "total_failed": protocol_failed.count(),
+                "error_codes": error_code_counter.most_common(10),
+                "error_types": error_type_counter.most_common(10),
+            })
+    protocol_error_stats.sort(key=lambda x: x["total_failed"], reverse=True)
+
+    fetch_type_stats = []
+    incoming_logs = all_logs.filter(direction=EmailLog.DIRECTION_INCOMING)
+    for fetch_type, fetch_label in EmailLog.FETCH_TYPE_CHOICES:
+        count = incoming_logs.filter(fetch_type=fetch_type).count()
+        if count > 0:
+            fetch_type_stats.append({
+                "type": fetch_type,
+                "label": fetch_label,
+                "count": count,
+            })
+
+    error_code_stats = []
+    failed_with_code = failed_logs.exclude(error_code__isnull=True).exclude(error_code="")
+    error_code_counter = Counter()
+    for log in failed_with_code:
+        key = (log.protocol, log.error_code)
+        error_code_counter[key] += 1
+    for (protocol, code), count in error_code_counter.most_common(20):
+        protocol_label = dict(EmailLog.PROTOCOL_CHOICES).get(protocol, protocol)
+        error_code_stats.append({
+            "protocol": protocol,
+            "protocol_label": protocol_label,
+            "error_code": code,
+            "count": count,
+        })
+
     incoming_errors = all_logs.filter(
         direction=EmailLog.DIRECTION_INCOMING,
         status=EmailLog.STATUS_FAILED,
@@ -2357,9 +2380,11 @@ def email_diagnostic(request):
         "total_outgoing": total_outgoing,
         "total_failed": total_failed,
         "total_ignored": total_ignored,
-        "hourly_data": hourly_data,
         "daily_data": daily_data,
         "error_type_stats": error_type_stats,
+        "protocol_error_stats": protocol_error_stats,
+        "error_code_stats": error_code_stats,
+        "fetch_type_stats": fetch_type_stats,
         "incoming_errors": incoming_errors,
         "outgoing_errors": outgoing_errors,
         "bounce_samples": bounce_samples,
